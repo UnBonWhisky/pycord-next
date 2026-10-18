@@ -28,57 +28,37 @@ from __future__ import annotations
 import heapq
 import logging
 import threading
-from typing import Protocol, TypeVar
+from typing import TYPE_CHECKING
 
-from ..packets import Packet
 from .wrapped import add_wrapped, gap_wrapped
 
-__all__ = (
-    "Buffer",
-    "JitterBuffer",
-)
+if TYPE_CHECKING:
+    from ..packets import Packet
 
+__all__ = ("JitterBuffer",)
 
-T = TypeVar("T")
-PacketT = TypeVar("PacketT", bound=Packet)
 _log = logging.getLogger(__name__)
 
 
-class Buffer(Protocol[T]):
-    def __len__(self) -> int: ...
-    def push(self, item: T) -> None: ...
-    def pop(self) -> T | None: ...
-    def peek(self) -> T | None: ...
-    def flush(self) -> list[T]: ...
-    def reset(self) -> None: ...
+class JitterBuffer:
+    """A jitter buffer that reorders voice packets by their sequence number.
 
+    Parameters
+    ----------
+    max_size: :class:`int`
+        The maximum number of packets held before the oldest are discarded.
+    pref_size: :class:`int`
+        The number of packets that must be buffered before one is released.
+    prefill: :class:`int`
+        The number of packets to receive before any packet is released.
 
-class BaseBuff(Buffer[PacketT]):
-    def __init__(self) -> None:
-        self._buffer: list[PacketT] = []
+    Raises
+    ------
+    ValueError
+        ``max_size`` is lower than 1 or ``pref_size`` is outside of
+        ``0..max_size``.
+    """
 
-    def __len__(self) -> int:
-        return len(self._buffer)
-
-    def push(self, item: PacketT) -> None:
-        self._buffer.append(item)
-
-    def pop(self) -> PacketT | None:
-        return self._buffer.pop()
-
-    def peek(self) -> PacketT | None:
-        return self._buffer[-1] if self._buffer else None
-
-    def flush(self) -> list[PacketT]:
-        buf = self._buffer.copy()
-        self._buffer.clear()
-        return buf
-
-    def reset(self) -> None:
-        self._buffer.clear()
-
-
-class JitterBuffer(BaseBuff[PacketT]):
     _threshold: int = 10000
 
     def __init__(
@@ -96,8 +76,10 @@ class JitterBuffer(BaseBuff[PacketT]):
         self._prefill: int = prefill
         self._last_tx_seq: int = -1
         self._has_item: threading.Event = threading.Event()
-        # self._lock: threading.Lock = threading.Lock()
         self._buffer: list[Packet] = []
+
+    def __len__(self) -> int:
+        return len(self._buffer)
 
     def _push(self, packet: Packet) -> None:
         heapq.heappush(self._buffer, packet)
@@ -137,6 +119,18 @@ class JitterBuffer(BaseBuff[PacketT]):
             heapq.heappop(self._buffer)
 
     def push(self, packet: Packet) -> bool:
+        """Add a packet to the buffer.
+
+        Parameters
+        ----------
+        packet: :class:`Packet`
+            The packet to add.
+
+        Returns
+        -------
+        :class:`bool`
+            ``False`` if the packet is too old and was dropped, ``True`` otherwise.
+        """
         seq = packet.sequence
 
         if (
@@ -155,7 +149,30 @@ class JitterBuffer(BaseBuff[PacketT]):
         self._update_has_item()
         return True
 
+    def is_ready(self) -> bool:
+        """Check whether a packet can be popped right now.
+
+        Returns
+        -------
+        :class:`bool`
+            Whether a packet is ready.
+        """
+        return self._has_item.is_set()
+
     def pop(self, *, timeout: float | None = 0) -> Packet | None:
+        """Remove and return the next packet if it is ready.
+
+        Parameters
+        ----------
+        timeout: :class:`float` | None
+            How long to wait for a packet to become ready, in seconds.
+            ``None`` waits indefinitely.
+
+        Returns
+        -------
+        :class:`Packet` | None
+            The next packet, or ``None`` if none became ready in time.
+        """
         ok = self._has_item.wait(timeout)
         if not ok:
             return None
@@ -172,15 +189,34 @@ class JitterBuffer(BaseBuff[PacketT]):
         return packet
 
     def peek(self, *, all: bool = False) -> Packet | None:
+        """Look at the next packet without removing it.
+
+        Parameters
+        ----------
+        all: :class:`bool`
+            Whether to return the first packet even if the buffer is not yet
+            ready to release it.
+
+        Returns
+        -------
+        :class:`Packet` | None
+            The packet, or ``None`` if there is none.
+        """
         if not self._buffer:
             return None
 
         if all:
             return self._buffer[0]
-        else:
-            return self._get_packet_if_ready()
+        return self._get_packet_if_ready()
 
     def peek_next(self) -> Packet | None:
+        """Look at the first packet if it directly follows the last released one.
+
+        Returns
+        -------
+        :class:`Packet` | None
+            The packet, or ``None`` if there is a gap or the buffer is empty.
+        """
         packet = self.peek(all=True)
 
         if packet is None:
@@ -191,13 +227,28 @@ class JitterBuffer(BaseBuff[PacketT]):
             or self._last_tx_seq < 0
         ):
             return packet
+        return None
 
     def gap(self) -> int:
+        """Get the number of missing packets before the first buffered packet.
+
+        Returns
+        -------
+        :class:`int`
+            The size of the gap, ``0`` if there is none.
+        """
         if self._buffer and self._last_tx_seq > 0:
             return gap_wrapped(self._last_tx_seq, self._buffer[0].sequence)
         return 0
 
     def flush(self) -> list[Packet]:
+        """Remove every buffered packet and return them in order.
+
+        Returns
+        -------
+        list[:class:`Packet`]
+            The packets that were buffered, sorted by sequence.
+        """
         packets = sorted(self._buffer)
         self._buffer.clear()
 
@@ -209,6 +260,7 @@ class JitterBuffer(BaseBuff[PacketT]):
         return packets
 
     def reset(self) -> None:
+        """Discard every buffered packet and reset the sequence tracking."""
         self._buffer.clear()
         self._has_item.clear()
         self._prefill = self.prefill

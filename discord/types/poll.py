@@ -28,14 +28,15 @@ from typing import Literal, TypedDict
 
 from typing_extensions import NotRequired
 
-from .emoji import Emoji
+from .emoji import PartialEmoji
+from .user import User
 
 PollLayoutType = Literal[1]
 
 
 class PollMedia(TypedDict):
     text: str
-    emoji: NotRequired[Emoji]
+    emoji: NotRequired[PartialEmoji]
 
 
 class PollAnswer(TypedDict):
@@ -52,6 +53,10 @@ class PollAnswerCount(TypedDict):
     id: int
     count: int
     me_voted: bool
+
+
+class PollAnswerVoters(TypedDict):
+    users: list[User]
 
 
 class Poll(TypedDict):

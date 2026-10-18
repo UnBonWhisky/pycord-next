@@ -27,19 +27,22 @@ from __future__ import annotations
 
 import colorsys
 import random
-from typing import Any
+from typing import TYPE_CHECKING, overload
 
 from typing_extensions import Self, deprecated, override
 
+from ._internal.aliases import AliasMixin, export_module_aliases
+
 __all__ = (
-    "Colour",
     "Color",
+    "Colour",
 )
 
 
-class Colour:
-    """Represents a Colour. This class is similar
-    to a (red, green, blue) :class:`tuple`.
+class Colour(AliasMixin):
+    """Represents a Colour.
+
+    This class is similar to a (red, green, blue) :class:`tuple`.
 
     There is an alias for this called Color.
 
@@ -73,8 +76,8 @@ class Colour:
 
     __slots__ = ("value",)
 
-    def __init__(self, value: int):
-        if not isinstance(value, int):
+    def __init__(self, value: int) -> None:
+        if not isinstance(value, int):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError(
                 f"Expected int parameter, received {value.__class__.__name__} instead."
             )
@@ -85,7 +88,7 @@ class Colour:
         return (self.value >> (8 * byte)) & 0xFF
 
     @override
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, Colour) and self.value == other.value
 
     @override
@@ -122,17 +125,42 @@ class Colour:
         """Returns an (r, g, b) tuple representing the colour."""
         return self.r, self.g, self.b
 
+    @overload
     @classmethod
-    def resolve_value(cls, value: int | Colour | None) -> Self:
+    def resolve_value(cls, value: None) -> None: ...
+
+    @overload
+    @classmethod
+    def resolve_value(cls, value: int | Colour) -> Colour: ...
+
+    @classmethod
+    def resolve_value(cls, value: int | Colour | None) -> Colour | None:
+        """Converts an :class:`int`, a :class:`Colour` or ``None`` to a colour.
+
+        Parameters
+        ----------
+        value: Optional[Union[:class:`int`, :class:`Colour`]]
+            The value to convert.
+
+        Returns
+        -------
+        Optional[:class:`Colour`]
+            ``None`` if ``value`` is ``None``, ``value`` itself if it already is
+            a :class:`Colour`, otherwise a new colour built from the integer.
+
+        Raises
+        ------
+        TypeError
+            ``value`` is neither an :class:`int`, a :class:`Colour` nor ``None``.
+        """
         if value is None or isinstance(value, Colour):
             return value
-        elif isinstance(value, int):
+        if isinstance(value, int):  # pyright: ignore[reportUnnecessaryIsInstance]
             return cls(value=value)
-        else:
-            raise TypeError(
-                "Expected discord.Colour, int, or None but received"
-                f" {value.__class__.__name__} instead."
-            )
+        raise TypeError(
+            "Expected discord.Colour, int, or None but received"
+            f" {value.__class__.__name__} instead."
+        )
 
     @classmethod
     def from_rgb(cls, r: int, g: int, b: int) -> Self:
@@ -154,7 +182,7 @@ class Colour:
     def random(
         cls,
         *,
-        seed: int | str | float | bytes | bytearray | None = None,
+        seed: str | float | bytes | bytearray | None = None,
     ) -> Self:
         """A factory method that returns a :class:`Colour` with a random hue.
 
@@ -276,28 +304,20 @@ class Colour:
         """A factory method that returns a :class:`Colour` with a value of ``0x95a5a6``."""
         return cls(0x95A5A6)
 
-    lighter_gray = lighter_grey
-
     @classmethod
     def dark_grey(cls) -> Self:
         """A factory method that returns a :class:`Colour` with a value of ``0x607d8b``."""
         return cls(0x607D8B)
-
-    dark_gray = dark_grey
 
     @classmethod
     def light_grey(cls) -> Self:
         """A factory method that returns a :class:`Colour` with a value of ``0x979c9f``."""
         return cls(0x979C9F)
 
-    light_gray = light_grey
-
     @classmethod
     def darker_grey(cls) -> Self:
         """A factory method that returns a :class:`Colour` with a value of ``0x546e7a``."""
         return cls(0x546E7A)
-
-    darker_gray = darker_grey
 
     @classmethod
     def og_blurple(cls) -> Self:
@@ -317,6 +337,7 @@ class Colour:
     @classmethod
     def light_theme(cls) -> Self:
         """A factory method that returns a :class:`Colour` with a value of ``0xfbfbfb``.
+
         This will appear transparent on Discord's light theme.
 
         .. versionadded:: 2.8
@@ -326,6 +347,7 @@ class Colour:
     @classmethod
     def ash_theme(cls) -> Self:
         """A factory method that returns a :class:`Colour` with a value of ``0x323339``.
+
         This will appear transparent on Discord's ash theme.
 
         .. versionadded:: 2.8
@@ -335,6 +357,7 @@ class Colour:
     @classmethod
     def dark_theme(cls) -> Self:
         """A factory method that returns a :class:`Colour` with a value of ``0x1a1a1e``.
+
         This will appear transparent on Discord's dark theme.
 
         .. versionadded:: 1.5
@@ -347,6 +370,7 @@ class Colour:
     @classmethod
     def onyx_theme(cls) -> Self:
         """A factory method that returns a :class:`Colour` with a value of ``0x070709``.
+
         This will appear transparent on Discord's onyx theme.
 
         .. versionadded:: 2.8
@@ -382,8 +406,7 @@ class Colour:
         "Colour.embed_background is deprecated since version 2.8 and will be removed in version 3.0. This is not relevant anymore since Discord provides the custom themes feature."
     )
     def embed_background(cls, theme: str = "dark") -> Self:
-        """A factory method that returns a :class:`Colour` corresponding to the
-        embed colours on discord clients, with a value of:
+        """A factory method that returns a :class:`Colour` corresponding to the embed colours on discord clients, with a value of:
 
         - ``0x2B2D31`` (dark)
         - ``0xEEEFF1`` (light)
@@ -407,5 +430,15 @@ class Colour:
 
         return cls(themes_cls[theme])
 
+    if TYPE_CHECKING:
+        lighter_gray = lighter_grey
+        dark_gray = dark_grey
+        light_gray = light_grey
+        darker_gray = darker_grey
+        grayple = greyple
 
-Color = Colour
+
+if TYPE_CHECKING:
+    Color = Colour
+
+export_module_aliases(globals())

@@ -50,6 +50,11 @@ Objects
     :members:
     :inherited-members:
 
+.. attributetable:: discord.ui.ItemInterface
+
+.. autoclass:: discord.ui.ItemInterface
+    :members:
+
 .. attributetable:: discord.ui.Item
 
 .. autoclass:: discord.ui.Item

@@ -26,10 +26,11 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from typing_extensions import Self, deprecated
 
+from ._internal.aliases import AliasMixin
 from .asset import Asset
 from .colour import Colour
 from .enums import RoleType
@@ -45,18 +46,22 @@ from .utils import (
     warn_deprecated,
 )
 
-__all__ = ("RoleTags", "Role", "RoleColours")
+__all__ = ("Role", "RoleColours", "RoleTags")
 
 if TYPE_CHECKING:
-    import datetime
+    import datetime as dt
+    from collections.abc import Mapping
 
-    from .guild import Guild
+    from .guild import Guild, PartialGuild
+    from .iterators import MessageSearchIterator
     from .member import Member
     from .state import ConnectionState
     from .types.guild import RolePositionUpdate
-    from .types.role import Role as RolePayload
-    from .types.role import RoleColours as RoleColoursPayload
-    from .types.role import RoleTags as RoleTagPayload
+    from .types.role import (
+        Role as RolePayload,
+        RoleColours as RoleColoursPayload,
+        RoleTags as RoleTagPayload,
+    )
 
 
 def _parse_tag_bool(data: RoleTagPayload, key: str) -> bool | None:
@@ -102,10 +107,10 @@ def _parse_tag_int(data: RoleTagPayload, key: str) -> int | None:
     :class:`int` | :class:`None`
         The parsed integer value or None if the key is not present or the value is not an integer string.
     """
-    if value := data.get(key):
+    if value := cast("Mapping[str, Any]", data).get(key):
         with suppress(ValueError):
             # value error means it's not a number string (None or "")
-            return int(value)  # pyright: ignore[reportUnknownArgumentType]
+            return int(value)
     return None
 
 
@@ -138,20 +143,20 @@ class RoleTags:
     """
 
     __slots__ = (
-        "integration_id",
-        "subscription_listing_id",
-        "_premium_subscriber",
         "_available_for_purchase",
+        "_data",
         "_guild_connections",
         "_is_guild_product_role",
-        "bot_id",
-        "_data",
+        "_premium_subscriber",
         "_type",
+        "bot_id",
+        "integration_id",
+        "subscription_listing_id",
     )
 
     _type: RoleType
 
-    def __init__(self, data: RoleTagPayload):
+    def __init__(self, data: RoleTagPayload) -> None:
         self._data: RoleTagPayload = data
         self.integration_id: int | None = _parse_tag_int(data, "integration_id")
         self.subscription_listing_id: int | None = _parse_tag_int(
@@ -214,7 +219,7 @@ class RoleTags:
 
     @deprecated(
         "RoleTags.is_bot_managed is deprecated since version 2.8,"
-        + " consider using RoleTags.type == RoleType.APPLICATION instead."
+        " consider using RoleTags.type == RoleType.APPLICATION instead."
     )
     def is_bot_managed(self) -> bool:
         """Whether the role is associated with a bot.
@@ -226,7 +231,7 @@ class RoleTags:
 
     @deprecated(
         "RoleTags.is_premium_subscriber is deprecated since version 2.8,"
-        + " consider using RoleTags.type == RoleType.BOOSTER instead."
+        " consider using RoleTags.type == RoleType.BOOSTER instead."
     )
     def is_premium_subscriber(self) -> bool:
         """Whether the role is the premium subscriber, AKA "boost", role for the guild.
@@ -238,13 +243,12 @@ class RoleTags:
 
     @deprecated(
         "RoleTags.is_integration is deprecated since version 2.8,"
-        + " consider using RoleTags.type in"
-        + " (RoleType.INTEGRATION, RoleType.PREMIUM_SUBSCRIPTION_TIER,"
-        + " RoleType.DRAFT_PREMIUM_SUBSCRIPTION_TIER) instead."
+        " consider using RoleTags.type in"
+        " (RoleType.INTEGRATION, RoleType.PREMIUM_SUBSCRIPTION_TIER,"
+        " RoleType.DRAFT_PREMIUM_SUBSCRIPTION_TIER) instead."
     )
     def is_integration(self) -> bool:
-        """Whether the guild manages the role through some form of
-        integrations such as Twitch or through guild subscriptions.
+        """Whether the guild manages the role through some form of integrations such as Twitch or through guild subscriptions.
 
         .. deprecated:: 2.8
             Use ``RoleTags.type in (RoleType.INTEGRATION,
@@ -255,7 +259,7 @@ class RoleTags:
 
     @deprecated(
         "RoleTags.is_available_for_purchase is deprecated since version 2.8,"
-        + " consider using RoleTags.type == RoleType.PREMIUM_SUBSCRIPTION_TIER instead."
+        " consider using RoleTags.type == RoleType.PREMIUM_SUBSCRIPTION_TIER instead."
     )
     def is_available_for_purchase(self) -> bool:
         """Whether the role is available for purchase.
@@ -273,7 +277,7 @@ class RoleTags:
 
     @deprecated(
         "RoleTags.is_guild_connections_role is deprecated since version 2.8,"
-        + " consider using RoleTags.type == RoleType.CONNECTION instead."
+        " consider using RoleTags.type == RoleType.CONNECTION instead."
     )
     def is_guild_connections_role(self) -> bool:
         """Whether the role is a guild connections role.
@@ -288,8 +292,8 @@ class RoleTags:
     def __repr__(self) -> str:
         return (
             f"<RoleTags bot_id={self.bot_id} integration_id={self.integration_id} "
-            + f"subscription_listing_id={self.subscription_listing_id} "
-            + f"type={self.type!r}>"
+            f"subscription_listing_id={self.subscription_listing_id} "
+            f"type={self.type!r}>"
         )
 
 
@@ -317,6 +321,12 @@ class RoleColours:
         The tertiary colour used for holographic roles.
     """
 
+    __slots__ = (
+        "primary",
+        "secondary",
+        "tertiary",
+    )
+
     HOLOGRAPHIC_PRIMARY = Colour(11127295)
     HOLOGRAPHIC_SECONDARY = Colour(16759788)
     HOLOGRAPHIC_TERTIARY = Colour(16761760)
@@ -326,7 +336,7 @@ class RoleColours:
         primary: Colour,
         secondary: Colour | None = None,
         tertiary: Colour | None = None,
-    ):
+    ) -> None:
         """Initialises a :class:`RoleColours` object.
 
         .. versionadded:: 2.7
@@ -347,12 +357,10 @@ class RoleColours:
     @classmethod
     def _from_payload(cls, data: RoleColoursPayload) -> Self:
         primary = Colour(data["primary_color"])
-        secondary = (
-            Colour(data["secondary_color"]) if data.get("secondary_color") else None
-        )
-        tertiary = (
-            Colour(data["tertiary_color"]) if data.get("tertiary_color") else None
-        )
+        secondary_value = data.get("secondary_color")
+        tertiary_value = data.get("tertiary_color")
+        secondary = Colour(secondary_value) if secondary_value else None
+        tertiary = Colour(tertiary_value) if tertiary_value else None
         return cls(primary, secondary, tertiary)
 
     def _to_dict(self) -> RoleColoursPayload:
@@ -361,7 +369,7 @@ class RoleColours:
             "primary_color": self.primary.value,
             "secondary_color": self.secondary.value if self.secondary else None,
             "tertiary_color": self.tertiary.value if self.tertiary else None,
-        }  # type: ignore
+        }
 
     @classmethod
     def default(cls) -> RoleColours:
@@ -402,7 +410,29 @@ class RoleColours:
         )
 
 
-class Role(Hashable):
+def _role_lt(left: object, right: object) -> bool:
+    if not isinstance(left, Role) or not isinstance(right, Role):
+        return NotImplemented
+
+    if left.guild_id != right.guild_id:
+        raise RuntimeError("cannot compare roles from two different guilds.")
+
+    # the @everyone role is always the lowest role in hierarchy
+    guild_id = left.guild_id
+    if left.id == guild_id:
+        # everyone_role < everyone_role -> False
+        return right.id != guild_id
+
+    if left.position < right.position:
+        return True
+
+    if left.position == right.position:
+        return int(left.id) > int(right.id)
+
+    return False
+
+
+class Role(Hashable, AliasMixin):
     """Represents a Discord role in a :class:`Guild`.
 
     .. container:: operations
@@ -445,8 +475,8 @@ class Role(Hashable):
         The ID for the role.
     name: :class:`str`
         The name of the role.
-    guild: :class:`Guild`
-        The guild the role belongs to.
+    guild_id: :class:`int`
+        The ID of the guild the role belongs to.
     hoist: :class:`bool`
          Indicates if the role will be displayed separately from other members.
     position: :class:`int`
@@ -489,28 +519,47 @@ class Role(Hashable):
     """
 
     __slots__ = (
-        "id",
-        "name",
-        "_permissions",
         "_colour",
+        "_icon",
+        "_permissions",
+        "_state",
         "colours",
-        "position",
+        "flags",
+        "guild_id",
+        "hoist",
+        "id",
         "managed",
         "mentionable",
-        "hoist",
-        "guild",
+        "name",
+        "position",
         "tags",
         "unicode_emoji",
-        "_icon",
-        "_state",
-        "flags",
     )
 
-    def __init__(self, *, guild: Guild, state: ConnectionState, data: RolePayload):
-        self.guild: Guild = guild
+    def __init__(
+        self, *, guild: Guild | PartialGuild, state: ConnectionState, data: RolePayload
+    ) -> None:
+        self.guild_id: int = guild.id
         self._state: ConnectionState = state
         self.id: int = int(data["id"])
         self._update(data)
+
+    @property
+    def guild(self) -> Guild | PartialGuild:
+        """The guild that the role belongs to.
+
+        This is the cached :class:`Guild`, or a :class:`PartialGuild` handle when
+        it is not cached or the cache backend is not the in-process one. Use
+        :meth:`PartialGuild.get` to get the cached :class:`Guild` with any backend.
+        """
+        from .guild import PartialGuild
+
+        state = self._state
+        if state.cache.supports_sync:
+            guild = state._guilds.get_nowait(self.guild_id)
+            if guild is not None:
+                return guild
+        return PartialGuild(state=state, id=self.guild_id)
 
     def __str__(self) -> str:
         return self.name
@@ -518,43 +567,25 @@ class Role(Hashable):
     def __repr__(self) -> str:
         return f"<Role id={self.id} name={self.name!r}>"
 
-    def __lt__(self: R, other: R) -> bool:
-        if not isinstance(other, Role) or not isinstance(self, Role):
-            return NotImplemented
+    def __lt__(self, other: object) -> bool:
+        return _role_lt(self, other)
 
-        if self.guild != other.guild:
-            raise RuntimeError("cannot compare roles from two different guilds.")
-
-        # the @everyone role is always the lowest role in hierarchy
-        guild_id = self.guild.id
-        if self.id == guild_id:
-            # everyone_role < everyone_role -> False
-            return other.id != guild_id
-
-        if self.position < other.position:
-            return True
-
-        if self.position == other.position:
-            return int(self.id) > int(other.id)
-
-        return False
-
-    def __le__(self: R, other: R) -> bool:
-        r = Role.__lt__(other, self)
+    def __le__(self, other: object) -> bool:
+        r = _role_lt(other, self)
         if r is NotImplemented:
             return NotImplemented
         return not r
 
-    def __gt__(self: R, other: R) -> bool:
-        return Role.__lt__(other, self)
+    def __gt__(self, other: object) -> bool:
+        return _role_lt(other, self)
 
-    def __ge__(self: R, other: R) -> bool:
-        r = Role.__lt__(self, other)
+    def __ge__(self, other: object) -> bool:
+        r = _role_lt(self, other)
         if r is NotImplemented:
             return NotImplemented
         return not r
 
-    def _update(self, data: RolePayload):
+    def _update(self, data: RolePayload) -> None:
         self.name: str = data["name"]
         self._permissions: int = int(data.get("permissions", 0))
         self.position: int = data.get("position", 0)
@@ -568,14 +599,11 @@ class Role(Hashable):
         self.flags: RoleFlags = RoleFlags._from_value(data.get("flags", 0))
         self.tags: RoleTags | None
 
-        try:
-            self.tags = RoleTags(data["tags"])
-        except KeyError:
-            self.tags = None
+        self.tags = RoleTags(data["tags"]) if "tags" in data else None
 
     def is_default(self) -> bool:
         """Checks if the role is the default role."""
-        return self.guild.id == self.id
+        return self.guild_id == self.id
 
     @deprecated(
         "Role.is_bot_managed is deprecated since version 2.8, consider using Role.type instead."
@@ -607,8 +635,7 @@ class Role(Hashable):
         "Role.is_integration is deprecated since version 2.8, consider using Role.type instead."
     )
     def is_integration(self) -> bool:
-        """Whether the guild manages the role through some form of
-        integrations such as Twitch or through guild subscriptions.
+        """Whether the guild manages the role through some form of integrations such as Twitch or through guild subscriptions.
 
         .. deprecated:: 2.8
             Use :attr:`Role.type` instead.
@@ -635,14 +662,49 @@ class Role(Hashable):
         .. versionadded:: 2.0
         .. versionchanged:: 2.7.1
             Added check for :attr:`~Permissions.manage_roles` permission
+
+        This reads the in-process cache and raises :class:`SyncCacheAccessError`
+        with a remote cache backend, use :meth:`check_assignable` there.
         """
-        me = self.guild.me
+        self_id = self._state.self_id
+        if self_id is None:
+            return False
+        me = self._state._guild_bucket("members", self.guild_id).get_nowait(self_id)
+        if me is None:
+            return False
         return (
             not self.is_default()
             and not self.managed
             and me.guild_permissions.manage_roles
             and me.top_role > self
         )
+
+    async def check_assignable(self) -> bool:
+        """|coro|
+
+        Whether the role is able to be assigned or removed by the bot, with any
+        cache backend. This is the awaitable twin of :meth:`is_assignable`, it checks
+        the same conditions.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        :class:`bool`
+            ``False`` when the bot's member of the guild is not cached.
+        """
+        self_id = self._state.self_id
+        if self_id is None:
+            return False
+        me = await self._state._guild_bucket("members", self.guild_id).get(self_id)
+        if me is None:
+            return False
+        if self.is_default() or self.managed:
+            return False
+        if not (await me.get_guild_permissions()).manage_roles:
+            return False
+        top_role = await me.get_top_role()
+        return top_role is not None and top_role > self
 
     @deprecated(
         "Role.is_available_for_purchase is deprecated since version 2.8, consider using Role.type instead."
@@ -685,34 +747,13 @@ class Role(Hashable):
     )
     def colour(self) -> Colour:
         """Returns the role colour. Equivalent to :attr:`colours.primary`.
-        An alias exists under ``color``.
 
         .. versionchanged:: 2.7
         """
         return self.colours.primary
 
     @property
-    @deprecated(
-        "Role.color is deprecated since version 2.7, consider using colors.primary instead."
-    )
-    def color(self) -> Colour:
-        """Returns the role's primary color. Equivalent to :attr:`colors.primary`.
-        An alias exists under ``colour``.
-
-        .. versionchanged:: 2.7
-        """
-        return self.colours.primary
-
-    @property
-    def colors(self) -> RoleColours:
-        """Returns the role's colours. Equivalent to :attr:`colours`.
-
-        .. versionadded:: 2.7
-        """
-        return self.colours
-
-    @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """Returns the role's creation time in UTC."""
         return snowflake_time(self.id)
 
@@ -724,7 +765,26 @@ class Role(Hashable):
     @property
     def members(self) -> list[Member]:
         """Returns all the members with this role."""
-        all_members = self.guild.members
+        all_members = self._state._guild_bucket(
+            "members", self.guild_id
+        ).values_nowait()
+        if self.is_default():
+            return all_members
+
+        role_id = self.id
+        return [member for member in all_members if member._roles.has(role_id)]
+
+    async def get_members(self) -> list[Member]:
+        """|coro|
+
+        Returns all the cached members with this role.
+
+        Returns
+        -------
+        List[:class:`Member`]
+            The cached members that have this role.
+        """
+        all_members = await self._state._guild_bucket("members", self.guild_id).values()
         if self.is_default():
             return all_members
 
@@ -767,9 +827,12 @@ class Role(Hashable):
         change_range = range(
             min(self.position, position), max(self.position, position) + 1
         )
+        guild_roles = sorted(
+            await self._state._guild_bucket("roles", self.guild_id).values()
+        )
         roles = [
             r.id
-            for r in self.guild.roles[1:]
+            for r in guild_roles[1:]
             if r.position in change_range and r.id != self.id
         ]
 
@@ -779,9 +842,10 @@ class Role(Hashable):
             roles.append(self.id)
 
         payload: list[RolePositionUpdate] = [
-            {"id": z[0], "position": z[1]} for z in zip(roles, change_range)
+            {"id": z[0], "position": z[1]}
+            for z in zip(roles, change_range, strict=False)
         ]
-        await http.move_role_position(self.guild.id, payload, reason=reason)
+        await http.move_role_position(self.guild_id, payload, reason=reason)
 
     async def edit(
         self,
@@ -823,7 +887,7 @@ class Role(Hashable):
         permissions: :class:`Permissions`
             The new permissions to change to.
         colour: Union[:class:`Colour`, :class:`int`]
-            The new colour to change to. (aliased to color as well)
+            The new colour to change to.
         hoist: :class:`bool`
             Indicates if the role should be shown separately in the member list.
         mentionable: :class:`bool`
@@ -863,10 +927,8 @@ class Role(Hashable):
         payload: dict[str, Any] = {}
         if color is not MISSING:
             colour = color
-
         if colors is not MISSING:
             colours = colors
-
         if colour is not MISSING:
             warn_deprecated("colour", "colours", "2.7")
             if isinstance(colour, int):
@@ -875,9 +937,10 @@ class Role(Hashable):
         if holographic:
             colours = RoleColours.holographic()
         if colours is not MISSING:
-            if not isinstance(colours, RoleColours):
+            if not isinstance(colours, RoleColours):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise InvalidArgument("colours must be a RoleColours object")
-            if "ENHANCED_ROLE_COLORS" not in self.guild.features:
+            guild = await self._state._get_guild(self.guild_id)
+            if guild is not None and "ENHANCED_ROLE_COLORS" not in guild.features:
                 colours.secondary = None
                 colours.tertiary = None
 
@@ -907,7 +970,7 @@ class Role(Hashable):
             payload["icon"] = None
 
         data = await self._state.http.edit_role(
-            self.guild.id, self.id, reason=reason, **payload
+            self.guild_id, self.id, reason=reason, **payload
         )
         return Role(guild=self.guild, data=data, state=self._state)
 
@@ -931,5 +994,17 @@ class Role(Hashable):
         HTTPException
             Deleting the role failed.
         """
+        await self._state.http.delete_role(self.guild_id, self.id, reason=reason)
 
-        await self._state.http.delete_role(self.guild.id, self.id, reason=reason)
+    def search_mentions(self, **filters: Any) -> MessageSearchIterator:
+        """Retrieves an :class:`.AsyncIterator` of the messages mentioning this role.
+
+        This is :meth:`Guild.search_messages` with ``mention_roles`` set to this role.
+
+        .. versionadded:: 3.0
+        """
+        return self.guild.search_messages(mention_roles=[self], **filters)
+
+    if TYPE_CHECKING:
+        color = colour
+        colors: RoleColours

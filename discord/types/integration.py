@@ -25,7 +25,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import Literal, Union
+from typing import Literal
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -39,7 +39,7 @@ class IntegrationApplication(TypedDict):
     name: str
     icon: str | None
     description: str
-    summary: str
+    summary: NotRequired[str]
 
 
 class IntegrationAccount(TypedDict):
@@ -57,27 +57,28 @@ class PartialIntegration(TypedDict):
     account: IntegrationAccount
 
 
-IntegrationType = Literal["twitch", "youtube", "discord"]
+IntegrationType = Literal["twitch", "youtube", "discord", "guild_subscription"]
 
 
 class BaseIntegration(PartialIntegration):
     enabled: bool
-    syncing: bool
-    synced_at: str
-    user: User
-    expire_behavior: IntegrationExpireBehavior
-    expire_grace_period: int
+    syncing: NotRequired[bool]
+    synced_at: NotRequired[str]
+    user: NotRequired[User]
+    expire_behavior: NotRequired[IntegrationExpireBehavior]
+    expire_grace_period: NotRequired[int]
+    scopes: NotRequired[list[str]]
 
 
 class StreamIntegration(BaseIntegration):
-    role_id: Snowflake | None
-    enable_emoticons: bool
-    subscriber_count: int
-    revoked: bool
+    role_id: NotRequired[Snowflake]
+    enable_emoticons: NotRequired[bool]
+    subscriber_count: NotRequired[int]
+    revoked: NotRequired[bool]
 
 
 class BotIntegration(BaseIntegration):
     application: IntegrationApplication
 
 
-Integration = Union[BaseIntegration, StreamIntegration, BotIntegration]
+Integration = BaseIntegration | StreamIntegration | BotIntegration

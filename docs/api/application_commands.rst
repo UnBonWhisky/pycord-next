@@ -38,6 +38,9 @@ Shortcut Decorators
 .. autofunction:: discord.commands.message_command
     :decorator:
 
+.. autofunction:: discord.commands.entry_point_command
+    :decorator:
+
 Objects
 ~~~~~~~
 
@@ -54,12 +57,20 @@ Objects
 .. autoclass:: SlashCommandGroup
     :members:
 
+.. attributetable:: ContextMenuCommand
+.. autoclass:: ContextMenuCommand
+    :members:
+
 .. attributetable:: UserCommand
 .. autoclass:: UserCommand
     :members:
 
 .. attributetable:: MessageCommand
 .. autoclass:: MessageCommand
+    :members:
+
+.. attributetable:: EntryPointCommand
+.. autoclass:: EntryPointCommand
     :members:
 
 Options
@@ -88,6 +99,10 @@ Objects
 
 Context Objects
 ---------------
+
+.. attributetable:: BaseContext
+.. autoclass:: BaseContext
+    :members:
 
 .. attributetable:: ApplicationContext
 .. autoclass:: ApplicationContext

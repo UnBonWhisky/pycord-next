@@ -26,96 +26,118 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import types
-from collections import namedtuple
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, Union
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypeVar, Union, cast
+
+from ._internal.aliases import export_module_aliases
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 
 __all__ = (
-    "Enum",
-    "ChannelType",
-    "MessageType",
-    "VoiceRegion",
-    "SpeakingState",
-    "VerificationLevel",
-    "ContentFilter",
-    "Status",
+    "ActivityType",
+    "ApplicationEventWebhookStatus",
+    "ApplicationRoleConnectionMetadataType",
     "AuditLogAction",
     "AuditLogActionCategory",
-    "UserFlags",
-    "ActivityType",
-    "NotificationLevel",
-    "TeamMembershipState",
-    "TeamRole",
-    "WebhookType",
-    "ExpireBehaviour",
-    "ExpireBehavior",
-    "StickerType",
-    "StickerFormatType",
-    "InviteTarget",
-    "VideoQualityMode",
-    "ComponentType",
-    "ButtonStyle",
-    "StagePrivacyLevel",
-    "InteractionType",
-    "InteractionResponseType",
-    "NSFWLevel",
-    "EmbeddedActivity",
-    "ScheduledEventStatus",
-    "ScheduledEventPrivacyLevel",
-    "ScheduledEventLocationType",
-    "InputTextStyle",
-    "SlashCommandOptionType",
-    "AutoModTriggerType",
-    "AutoModEventType",
     "AutoModActionType",
+    "AutoModEventType",
     "AutoModKeywordPresetType",
-    "ApplicationRoleConnectionMetadataType",
-    "PromptType",
-    "OnboardingMode",
-    "ReactionType",
-    "VoiceChannelEffectAnimationType",
-    "SKUType",
-    "EntitlementType",
+    "AutoModTriggerType",
+    "ButtonStyle",
+    "ChannelType",
+    "ComponentType",
+    "ContentFilter",
+    "EmbeddedActivity",
     "EntitlementOwnerType",
+    "EntitlementType",
+    "EntryPointHandler",
+    "Enum",
+    "ExpireBehavior",
+    "ExpireBehaviour",
+    "InputTextStyle",
     "IntegrationType",
     "InteractionContextType",
-    "PollLayoutType",
-    "MessageReferenceType",
-    "ThreadArchiveDuration",
-    "RoleType",
-    "SubscriptionStatus",
-    "SeparatorSpacingSize",
-    "SelectDefaultValueType",
-    "ApplicationEventWebhookStatus",
+    "InteractionResponseType",
+    "InteractionType",
+    "InviteTarget",
     "InviteTargetUsersJobStatusCode",
+    "MessageReferenceType",
+    "MessageType",
+    "NSFWLevel",
+    "NotificationLevel",
+    "OnboardingMode",
+    "PollLayoutType",
+    "PromptType",
+    "ReactionType",
+    "RoleType",
+    "SKUType",
+    "ScheduledEventEntityType",
+    "ScheduledEventLocationType",
+    "ScheduledEventPrivacyLevel",
+    "ScheduledEventRecurrenceFrequency",
+    "ScheduledEventStatus",
+    "ScheduledEventWeekday",
+    "SearchEmbedType",
+    "SearchSortMode",
+    "SearchSortOrder",
+    "SelectDefaultValueType",
+    "SeparatorSpacingSize",
+    "SharedClientThemeBaseType",
+    "SlashCommandOptionType",
+    "SpeakingState",
+    "StagePrivacyLevel",
+    "Status",
+    "StatusDisplayType",
+    "StickerFormatType",
+    "StickerType",
+    "SubscriptionStatus",
+    "TeamMembershipState",
+    "TeamRole",
+    "ThreadArchiveDuration",
+    "UserFlags",
+    "VerificationLevel",
+    "VideoQualityMode",
+    "VoiceChannelEffectAnimationType",
+    "VoiceRegion",
+    "WebhookType",
 )
 
 
-def _create_value_cls(name, comparable):
-    cls = namedtuple(f"_EnumValue_{name}", "name value")
-    cls.__repr__ = lambda self: f"<{name}.{self.name}: {self.value!r}>"
-    cls.__str__ = lambda self: f"{name}.{self.name}"
+def _create_value_cls(name: str, comparable: bool) -> type[Any]:
+    cls: Any = NamedTuple(f"_EnumValue_{name}", [("name", Any), ("value", Any)])
+
+    def _repr(self: Any) -> str:
+        return f"<{name}.{self.name}: {self.value!r}>"
+
+    def _str(self: Any) -> str:
+        return f"{name}.{self.name}"
+
+    cls.__repr__ = _repr
+    cls.__str__ = _str
     if comparable:
-        cls.__le__ = (
-            lambda self, other: isinstance(other, self.__class__)
-            and self.value <= other.value
-        )
-        cls.__ge__ = (
-            lambda self, other: isinstance(other, self.__class__)
-            and self.value >= other.value
-        )
-        cls.__lt__ = (
-            lambda self, other: isinstance(other, self.__class__)
-            and self.value < other.value
-        )
-        cls.__gt__ = (
-            lambda self, other: isinstance(other, self.__class__)
-            and self.value > other.value
-        )
+
+        def _le(self: Any, other: Any) -> bool:
+            return isinstance(other, self.__class__) and self.value <= other.value
+
+        def _ge(self: Any, other: Any) -> bool:
+            return isinstance(other, self.__class__) and self.value >= other.value
+
+        def _lt(self: Any, other: Any) -> bool:
+            return isinstance(other, self.__class__) and self.value < other.value
+
+        def _gt(self: Any, other: Any) -> bool:
+            return isinstance(other, self.__class__) and self.value > other.value
+
+        cls.__le__ = _le
+        cls.__ge__ = _ge
+        cls.__lt__ = _lt
+        cls.__gt__ = _gt
     return cls
 
 
-def _is_descriptor(obj):
+def _is_descriptor(obj: object) -> bool:
     return (
         hasattr(obj, "__get__") or hasattr(obj, "__set__") or hasattr(obj, "__delete__")
     )
@@ -123,15 +145,21 @@ def _is_descriptor(obj):
 
 class EnumMeta(type):
     if TYPE_CHECKING:
-        __name__: ClassVar[str]
         _enum_member_names_: ClassVar[list[str]]
         _enum_member_map_: ClassVar[dict[str, Any]]
         _enum_value_map_: ClassVar[dict[Any, Any]]
 
-    def __new__(cls, name, bases, attrs, *, comparable: bool = False):
-        value_mapping = {}
-        member_mapping = {}
-        member_names = []
+    def __new__(
+        cls,
+        name: str,
+        bases: tuple[type, ...],
+        attrs: dict[str, Any],
+        *,
+        comparable: bool = False,
+    ) -> EnumMeta:
+        value_mapping: dict[Any, Any] = {}
+        member_mapping: dict[str, Any] = {}
+        member_names: list[str] = []
 
         value_cls = _create_value_cls(name, comparable)
         for key, value in list(attrs.items()):
@@ -163,58 +191,61 @@ class EnumMeta(type):
         attrs["_enum_member_names_"] = member_names
         attrs["_enum_value_cls_"] = value_cls
         actual_cls = super().__new__(cls, name, bases, attrs)
-        value_cls._actual_enum_cls_ = actual_cls  # type: ignore
+        value_cls._actual_enum_cls_ = actual_cls
         return actual_cls
 
-    def __iter__(cls):
+    def __iter__(cls) -> Iterator[Any]:
         return (cls._enum_member_map_[name] for name in cls._enum_member_names_)
 
-    def __reversed__(cls):
+    def __reversed__(cls) -> Iterator[Any]:
         return (
             cls._enum_member_map_[name] for name in reversed(cls._enum_member_names_)
         )
 
-    def __len__(cls):
+    def __len__(cls) -> int:
         return len(cls._enum_member_names_)
 
-    def __repr__(cls):
+    def __repr__(cls) -> str:
         return f"<enum {cls.__name__}>"
 
     @property
-    def __members__(cls):
+    def __members__(cls) -> types.MappingProxyType[str, Any]:
         return types.MappingProxyType(cls._enum_member_map_)
 
-    def __call__(cls, value):
+    def __call__(cls, value: Any) -> Any:
         try:
             return cls._enum_value_map_[value]
         except (KeyError, TypeError):
-            raise ValueError(f"{value!r} is not a valid {cls.__name__}")
+            raise ValueError(f"{value!r} is not a valid {cls.__name__}") from None
 
-    def __getitem__(cls, key):
+    def __getitem__(cls, key: str) -> Any:
         return cls._enum_member_map_[key]
 
-    def __setattr__(cls, name, value):
+    def __setattr__(cls, name: str, value: Any) -> None:
         raise TypeError("Enums are immutable.")
 
-    def __delattr__(cls, attr):
+    def __delattr__(cls, attr: str) -> None:
         raise TypeError("Enums are immutable")
 
-    def __instancecheck__(self, instance):
-        # isinstance(x, Y)
-        # -> __instancecheck__(Y, x)
+    def __instancecheck__(cls, instance: object) -> bool:
+        # isinstance dispatches to the metaclass of the checked class
         try:
-            return instance._actual_enum_cls_ is self
+            return cast("Any", instance)._actual_enum_cls_ is cls
         except AttributeError:
             return False
 
 
 if TYPE_CHECKING:
-    from enum import Enum
+    from enum import Enum, EnumMeta as _EnumMetaBase
 else:
+    _EnumMetaBase = EnumMeta
 
     class Enum(metaclass=EnumMeta):
+        """The base class of the pycord enumerations."""
+
         @classmethod
-        def try_value(cls, value):
+        def try_value(cls, value: Any) -> Any:
+            """Return the member for ``value``, or ``value`` itself when there is none."""
             try:
                 return cls._enum_value_map_[value]
             except (KeyError, TypeError):
@@ -238,7 +269,7 @@ class ChannelType(Enum):
     forum = 15
     media = 16
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
 
@@ -286,8 +317,41 @@ class MessageType(Enum):
     poll_result = 46
 
 
-class VoiceRegion(Enum):
-    """Voice region"""
+class _VoiceRegionMeta(_EnumMetaBase):
+    def _warn(self, label: str) -> None:
+        from .utils import warn_deprecated
+
+        warn_deprecated(
+            label,
+            instead="the region ID string or Guild.fetch_voice_regions()",
+            since="3.0",
+            stacklevel=4,
+        )
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in type.__getattribute__(self, "_enum_member_map_"):
+            self._warn(f"VoiceRegion.{name}")
+        return super().__getattribute__(name)
+
+    def __getitem__(self, key: str) -> Any:
+        member = super().__getitem__(key)
+        self._warn(f"VoiceRegion[{key!r}]")
+        return member
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self._warn(f"VoiceRegion({', '.join(map(repr, args))})")
+        return cast("Any", super().__call__(*args, **kwargs))
+
+
+class VoiceRegion(Enum, metaclass=_VoiceRegionMeta):
+    """Specifies the region a voice server belongs to.
+
+    .. deprecated:: 3.0
+        The list of voice regions is dynamic, so this enum is deprecated. Use :meth:`Guild.fetch_voice_regions` or
+        :meth:`Client.fetch_voice_regions` to retrieve the available regions as
+        :class:`VoiceServerRegion` objects and use their ``id``.
+        Accessing the members emits a :class:`DeprecationWarning`.
+    """
 
     us_west = "us-west"
     us_east = "us-east"
@@ -312,8 +376,9 @@ class VoiceRegion(Enum):
     vip_us_east = "vip-us-east"
     vip_us_west = "vip-us-west"
     vip_amsterdam = "vip-amsterdam"
+    rotterdam = "rotterdam"
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.value
 
 
@@ -325,10 +390,10 @@ class SpeakingState(Enum):
     soundshare = 2
     priority = 4
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
-    def __int__(self):
+    def __int__(self) -> int:
         return self.value
 
 
@@ -341,7 +406,7 @@ class VerificationLevel(Enum, comparable=True):
     high = 3
     highest = 4
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
 
@@ -351,7 +416,7 @@ class SortOrder(Enum):
     latest_activity = 0
     creation_date = 1
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
 
@@ -362,7 +427,7 @@ class ContentFilter(Enum, comparable=True):
     no_role = 1
     all_members = 2
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
 
@@ -377,7 +442,18 @@ class Status(Enum):
     invisible = "invisible"
     streaming = "streaming"
 
-    def __str__(self):
+    def __str__(self) -> str:
+        return self.value
+
+
+class StatusDisplayType(Enum):
+    """Which field of an activity is displayed in the user's status text."""
+
+    name = 0  # pyright: ignore[reportIncompatibleMethodOverride, reportAssignmentType]
+    state = 1
+    details = 2
+
+    def __int__(self) -> int:
         return self.value
 
 
@@ -465,6 +541,7 @@ class AuditLogAction(Enum):
 
     @property
     def category(self) -> AuditLogActionCategory | None:
+        """The category of this action, or ``None`` when it has none."""
         lookup: dict[AuditLogAction, AuditLogActionCategory | None] = {
             AuditLogAction.guild_update: AuditLogActionCategory.update,
             AuditLogAction.channel_create: AuditLogActionCategory.create,
@@ -536,49 +613,51 @@ class AuditLogAction(Enum):
 
     @property
     def target_type(self) -> str | None:
-        v = self.value
+        """The type of object the action targets, or ``None`` when it has none."""
+        v = cast("int", self.value)
         if v == -1:
             return "all"
-        elif v < 10:
+        if v < 10:
             return "guild"
-        elif v < 20:
+        if v < 20:
             return "channel"
-        elif v < 30:
+        if v < 30:
             return "user"
-        elif v < 40:
+        if v < 40:
             return "role"
-        elif v < 50:
+        if v < 50:
             return "invite"
-        elif v < 60:
+        if v < 60:
             return "webhook"
-        elif v < 70:
+        if v < 70:
             return "emoji"
-        elif v == 73:
+        if v == 73:
             return "channel"
-        elif v < 80:
+        if v < 80:
             return "message"
-        elif v < 83:
+        if v < 83:
             return "integration"
-        elif v < 90:
+        if v < 90:
             return "stage_instance"
-        elif v < 93:
+        if v < 93:
             return "sticker"
-        elif v < 103:
+        if v < 103:
             return "scheduled_event"
-        elif v < 113:
+        if v < 113:
             return "thread"
-        elif v < 122:
+        if v < 122:
             return "application_command_permission"
-        elif v < 146:
+        if v < 146:
             return "auto_moderation_rule"
-        elif v < 152:
+        if v < 152:
             return "monetization"
-        elif v < 168:
+        if v < 168:
             return "onboarding"
-        elif v < 192:
+        if v < 192:
             return "server_guide"
-        elif v < 194:
+        if v < 194:
             return "voice_channel_status"
+        return None
 
 
 class UserFlags(Enum):
@@ -619,7 +698,7 @@ class ActivityType(Enum):
     custom = 4
     competing = 5
 
-    def __int__(self):
+    def __int__(self) -> int:
         return self.value
 
 
@@ -654,7 +733,8 @@ class ExpireBehaviour(Enum):
     kick = 1
 
 
-ExpireBehavior = ExpireBehaviour
+if TYPE_CHECKING:
+    ExpireBehavior = ExpireBehaviour
 
 
 class StickerType(Enum):
@@ -674,6 +754,7 @@ class StickerFormatType(Enum):
 
     @property
     def file_extension(self) -> str:
+        """The file extension of stickers of this format."""
         lookup: dict[StickerFormatType, str] = {
             StickerFormatType.png: "png",
             StickerFormatType.apng: "png",
@@ -705,8 +786,7 @@ class InteractionResponseType(Enum):
     """Interaction response type"""
 
     pong = 1
-    # ack = 2 (deprecated)
-    # channel_message = 3 (deprecated)
+    # values 2 (ack) and 3 (channel_message) are deprecated
     channel_message = 4  # (with source)
     deferred_channel_message = 5  # (with source)
     deferred_message_update = 6  # for components
@@ -714,6 +794,7 @@ class InteractionResponseType(Enum):
     auto_complete_result = 8  # for autocomplete interactions
     modal = 9  # for modal dialogs
     premium_required = 10
+    launch_activity = 12
 
 
 class VideoQualityMode(Enum):
@@ -722,7 +803,7 @@ class VideoQualityMode(Enum):
     auto = 1
     full = 2
 
-    def __int__(self):
+    def __int__(self) -> int:
         return self.value
 
 
@@ -752,7 +833,7 @@ class ComponentType(Enum):
     checkbox_group = 22
     checkbox = 23
 
-    def __int__(self):
+    def __int__(self) -> int:
         return self.value
 
 
@@ -774,7 +855,7 @@ class ButtonStyle(Enum):
     red = 4
     url = 5
 
-    def __int__(self):
+    def __int__(self) -> int:
         return self.value
 
 
@@ -800,7 +881,7 @@ class ApplicationType(Enum):
 class StagePrivacyLevel(Enum):
     """Stage privacy level"""
 
-    # public = 1 (deprecated)
+    # value 1 (public) is deprecated
     closed = 2
     guild_only = 2
 
@@ -830,28 +911,26 @@ class SlashCommandOptionType(Enum):
     attachment = 11
 
     @classmethod
-    def from_datatype(cls, datatype):
+    def from_datatype(cls, datatype: Any) -> SlashCommandOptionType | None:
+        """Return the option type matching a Python annotation, or ``None`` for a context parameter."""
         if isinstance(datatype, tuple):  # typing.Union has been used
-            datatypes = [cls.from_datatype(op) for op in datatype]
+            datatypes = [
+                cls.from_datatype(op) for op in cast("tuple[Any, ...]", datatype)
+            ]
             if all(x == cls.channel for x in datatypes):
                 return cls.channel
-            elif set(datatypes) <= {cls.role, cls.user}:
+            if set(datatypes) <= {cls.role, cls.user}:
                 return cls.mentionable
-            else:
-                raise TypeError("Invalid usage of typing.Union")
+            raise TypeError("Invalid usage of typing.Union")
 
         if (
             isinstance(datatype, types.UnionType)
             or getattr(datatype, "__origin__", None) is Union
         ):
             # Python 3.10+ "|" operator or typing.Union has been used. The __args__ attribute is a tuple of the types.
-            # Type checking fails for this case, so ignore it.
-            return cls.from_datatype(datatype.__args__)  # type: ignore
+            return cls.from_datatype(datatype.__args__)
 
-        if isinstance(datatype, str):
-            datatype_name = datatype
-        else:
-            datatype_name = datatype.__name__
+        datatype_name = datatype if isinstance(datatype, str) else datatype.__name__
         if datatype_name in ["Member", "User"]:
             return cls.user
         if datatype_name in [
@@ -892,6 +971,7 @@ class SlashCommandOptionType(Enum):
             raise TypeError(
                 f"Invalid class {datatype} used as an input type for an Option"
             )  # TODO: Improve the error message
+        return None
 
 
 class EmbeddedActivity(Enum):
@@ -956,7 +1036,7 @@ class ScheduledEventStatus(Enum):
     canceled = 4
     cancelled = 4
 
-    def __int__(self):
+    def __int__(self) -> int:
         return self.value
 
 
@@ -965,16 +1045,49 @@ class ScheduledEventPrivacyLevel(Enum):
 
     guild_only = 2
 
-    def __int__(self):
+    def __int__(self) -> int:
         return self.value
 
 
-class ScheduledEventLocationType(Enum):
-    """Scheduled event location type"""
+class ScheduledEventEntityType(Enum):
+    """Scheduled event entity type"""
 
     stage_instance = 1
     voice = 2
     external = 3
+
+    def __int__(self) -> int:
+        return self.value
+
+
+ScheduledEventLocationType = ScheduledEventEntityType
+
+
+class ScheduledEventRecurrenceFrequency(Enum):
+    """Scheduled event recurrence rule frequency"""
+
+    yearly = 0
+    monthly = 1
+    weekly = 2
+    daily = 3
+
+    def __int__(self) -> int:
+        return self.value
+
+
+class ScheduledEventWeekday(Enum):
+    """Scheduled event recurrence rule weekday"""
+
+    monday = 0
+    tuesday = 1
+    wednesday = 2
+    thursday = 3
+    friday = 4
+    saturday = 5
+    sunday = 6
+
+    def __int__(self) -> int:
+        return self.value
 
 
 class AutoModTriggerType(Enum):
@@ -1110,6 +1223,56 @@ class MessageReferenceType(Enum):
     forward = 1
 
 
+class SharedClientThemeBaseType(Enum):
+    """The base theme mode of a :class:`SharedClientTheme`.
+
+    .. versionadded:: 3.0
+    """
+
+    unset = 0
+    dark = 1
+    light = 2
+    darker = 3
+    midnight = 4
+
+
+class SearchEmbedType(Enum):
+    """The kind of embed a message search can filter on.
+
+    These do not correspond 1:1 to the actual embed types.
+
+    .. versionadded:: 3.0
+    """
+
+    image = "image"
+    video = "video"
+    gif = "gif"
+    sound = "sound"
+    article = "article"
+
+
+class SearchSortMode(Enum):
+    """The sorting algorithm of a message search.
+
+    .. versionadded:: 3.0
+    """
+
+    timestamp = "timestamp"
+    relevance = "relevance"
+
+
+class SearchSortOrder(Enum):
+    """The direction a message search is sorted in.
+
+    The order is not respected when sorting by :attr:`SearchSortMode.relevance`.
+
+    .. versionadded:: 3.0
+    """
+
+    asc = "asc"
+    desc = "desc"
+
+
 class SubscriptionStatus(Enum):
     """The status of a subscription."""
 
@@ -1133,7 +1296,7 @@ class SeparatorSpacingSize(Enum):
     small = 1
     large = 2
 
-    def __int__(self):
+    def __int__(self) -> int:
         return self.value
 
 
@@ -1205,17 +1368,26 @@ class ApplicationEventWebhookStatus(Enum):
 
 
 class InviteTargetUsersJobStatusCode(Enum):
+    """The status of an invite target users job."""
+
     unspecified = 0
     processing = 1
     completed = 2
     failed = 3
 
 
+class EntryPointHandler(Enum):
+    """Represents the handler for entry point commands (type 4)."""
+
+    app_handler = 1
+    discord_launch_activity = 2
+
+
 T = TypeVar("T")
 
 
 def create_unknown_value(cls: type[T], val: Any) -> T:
-    value_cls = cls._enum_value_cls_  # type: ignore
+    value_cls = cast("Any", cls)._enum_value_cls_
     name = f"unknown_{val}"
     return value_cls(name=name, value=val)
 
@@ -1225,8 +1397,10 @@ def try_enum(cls: type[T], val: Any) -> T:
 
     If it fails it returns a proxy invalid value instead.
     """
-
     try:
-        return cls._enum_value_map_[val]  # type: ignore
+        return cast("Any", cls)._enum_value_map_[val]
     except (KeyError, TypeError, AttributeError):
         return create_unknown_value(cls, val)
+
+
+export_module_aliases(globals())

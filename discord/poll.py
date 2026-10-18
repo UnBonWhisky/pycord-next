@@ -24,9 +24,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import datetime
-from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from . import utils
 from .enums import PollLayoutType, try_enum
@@ -34,22 +32,27 @@ from .iterators import VoteIterator
 from .partial_emoji import PartialEmoji
 
 __all__ = (
-    "PollMedia",
+    "Poll",
     "PollAnswer",
     "PollAnswerCount",
+    "PollMedia",
     "PollResults",
-    "Poll",
 )
 
 if TYPE_CHECKING:
+    import datetime as dt
+
     from .abc import Snowflake
     from .emoji import AppEmoji, GuildEmoji
     from .message import Message, PartialMessage
-    from .types.poll import Poll as PollPayload
-    from .types.poll import PollAnswer as PollAnswerPayload
-    from .types.poll import PollAnswerCount as PollAnswerCountPayload
-    from .types.poll import PollMedia as PollMediaPayload
-    from .types.poll import PollResults as PollResultsPayload
+    from .types.emoji import PartialEmoji as PartialEmojiPayload
+    from .types.poll import (
+        Poll as PollPayload,
+        PollAnswer as PollAnswerPayload,
+        PollAnswerCount as PollAnswerCountPayload,
+        PollMedia as PollMediaPayload,
+        PollResults as PollResultsPayload,
+    )
 
 
 class PollMedia:
@@ -66,28 +69,39 @@ class PollMedia:
         The answer's emoji.
     """
 
+    __slots__ = (
+        "emoji",
+        "text",
+    )
+
     def __init__(
         self, text: str, emoji: GuildEmoji | AppEmoji | PartialEmoji | str | None = None
-    ):
+    ) -> None:
         self.text: str = text
         self.emoji: GuildEmoji | AppEmoji | PartialEmoji | str | None = emoji
 
     def to_dict(self) -> PollMediaPayload:
-        dict_ = {
+        """Convert this media to its payload."""
+        dict_: PollMediaPayload = {
             "text": self.text,
         }
         if self.emoji:
             if isinstance(self.emoji, str):
-                dict_["emoji"] = {
-                    "name": self.emoji,
-                }
-            else:
-                if self.emoji.id:
-                    dict_["emoji"] = {
+                dict_["emoji"] = cast(
+                    "PartialEmojiPayload",
+                    {
+                        "name": self.emoji,
+                    },
+                )
+            elif self.emoji.id:
+                dict_["emoji"] = cast(
+                    "PartialEmojiPayload",
+                    {
                         "id": str(self.emoji.id),
-                    }
-                else:
-                    dict_["emoji"] = {"name": self.emoji.name}
+                    },
+                )
+            else:
+                dict_["emoji"] = cast("PartialEmojiPayload", {"name": self.emoji.name})
 
         return dict_
 
@@ -95,14 +109,13 @@ class PollMedia:
     def from_dict(
         cls, data: PollMediaPayload, message: Message | PartialMessage | None = None
     ) -> PollMedia:
-
-        _emoji: dict[str, Any] = data.get("emoji") or {}
-        if isinstance(_emoji, dict) and _emoji.get("name"):
-            emoji = PartialEmoji.from_dict(_emoji)
-            if emoji.id and message:
-                emoji = message._state.get_emoji(emoji.id) or emoji
-        else:
-            emoji = _emoji or None
+        """Build a media from its payload."""
+        _emoji = cast("dict[str, Any]", data.get("emoji") or {})
+        emoji = (
+            PartialEmoji.from_dict(_emoji)
+            if _emoji.get("name") or _emoji.get("id")
+            else None
+        )
         return cls(
             data["text"],
             emoji,
@@ -126,12 +139,20 @@ class PollAnswer:
         The relevant media for this answer.
     """
 
+    __slots__ = (
+        "_poll",
+        "id",
+        "media",
+    )
+
+    __cache_skip__ = ("_poll",)
+
     def __init__(
         self, text: str, emoji: GuildEmoji | AppEmoji | PartialEmoji | str | None = None
-    ):
-        self.media = PollMedia(text, emoji)
-        self.id = None
-        self._poll = None
+    ) -> None:
+        self.media: PollMedia = PollMedia(text, emoji)
+        self.id: int | None = None
+        self._poll: Poll | None = None
 
     @property
     def text(self) -> str:
@@ -139,13 +160,13 @@ class PollAnswer:
         return self.media.text
 
     @property
-    def emoji(self) -> GuildEmoji | AppEmoji | PartialEmoji | None:
+    def emoji(self) -> GuildEmoji | AppEmoji | PartialEmoji | str | None:
         """The answer's emoji. Shortcut for :attr:`PollMedia.emoji`."""
         return self.media.emoji
 
     @property
     def count(self) -> int | None:
-        """This answer's vote count, if received from Discord."""
+        """The vote count of this answer, if received from Discord."""
         if not (self._poll and self.id):
             return None
         if self._poll.results is None:
@@ -158,9 +179,13 @@ class PollAnswer:
         return 0  # If an answer isn't in answer_counts, it has 0 votes.
 
     def to_dict(self) -> PollAnswerPayload:
-        dict_ = {
-            "poll_media": self.media.to_dict(),
-        }
+        """Convert this answer to its payload."""
+        dict_ = cast(
+            "PollAnswerPayload",
+            {
+                "poll_media": self.media.to_dict(),
+            },
+        )
         if self.id is not None:
             dict_["answer_id"] = self.id
         return dict_
@@ -169,9 +194,10 @@ class PollAnswer:
     def from_dict(
         cls,
         data: PollAnswerPayload,
-        poll=None,
+        poll: Poll | None = None,
         message: Message | PartialMessage | None = None,
     ) -> PollAnswer:
+        """Build an answer from its payload."""
         media = PollMedia.from_dict(data["poll_media"], message=message)
         answer = cls(
             media.text,
@@ -188,6 +214,7 @@ class PollAnswer:
         self, *, limit: int | None = None, after: Snowflake | None = None
     ) -> VoteIterator:
         """Returns an :class:`AsyncIterator` representing the users that have voted with this answer.
+
         Only works if this poll was received from Discord.
 
         The ``after`` parameter must represent a member
@@ -219,20 +246,18 @@ class PollAnswer:
 
         Examples
         --------
-
         Usage ::
 
             async for user in answer.users():
-                print(f'{user} voted **{answer.text}**!')
+                print(f"{user} voted **{answer.text}**!")
 
         Flattening into a list: ::
 
             users = await answer.users().flatten()
             # users is now a list of User...
             winner = random.choice(users)
-            await channel.send(f'{winner} has won the raffle.')
+            await channel.send(f"{winner} has won the raffle.")
         """
-
         if not self._poll or not self._poll._message:
             raise RuntimeError(
                 "Users can only be fetched from an existing message poll."
@@ -260,12 +285,19 @@ class PollAnswerCount:
         If the current user voted this answer. This is always ``False`` for bots.
     """
 
-    def __init__(self, data: PollAnswerCountPayload):
-        self.id = data["id"]
+    __slots__ = (
+        "count",
+        "id",
+        "me",
+    )
+
+    def __init__(self, data: PollAnswerCountPayload) -> None:
+        self.id: int = data["id"]
         self.count: int = data.get("count", 0)
-        self.me = data.get("me_voted")
+        self.me: bool = data.get("me_voted")
 
     def to_dict(self) -> PollAnswerCountPayload:
+        """Convert this count to its payload."""
         return {"id": self.id, "count": self.count, "me_voted": self.me}
 
     def __repr__(self) -> str:
@@ -286,13 +318,19 @@ class PollResults:
         A list of counts for each answer. If an answer isn't included, it has no votes.
     """
 
-    def __init__(self, data: PollResultsPayload):
-        self.is_finalized = data.get("is_finalized")
-        self._answer_counts = {
+    __slots__ = (
+        "_answer_counts",
+        "is_finalized",
+    )
+
+    def __init__(self, data: PollResultsPayload) -> None:
+        self.is_finalized: bool = data.get("is_finalized")
+        self._answer_counts: dict[int, PollAnswerCount] = {
             a["id"]: PollAnswerCount(a) for a in data.get("answer_counts", [])
         }
 
     def to_dict(self) -> PollResultsPayload:
+        """Convert these results to their payload."""
         return {
             "is_finalized": self.is_finalized,
             "answer_counts": [a.to_dict() for a in self.answer_counts],
@@ -303,11 +341,13 @@ class PollResults:
 
     @property
     def answer_counts(self) -> list[PollAnswerCount]:
+        """The count of each answer that received votes."""
         return list(self._answer_counts.values())
 
     def total_votes(self) -> int:
-        """
-        Get the total number of votes across all answers. This may not be accurate if :attr:`is_finalized` is ``False``.
+        """Get the total number of votes across all answers.
+
+        This may not be accurate if :attr:`is_finalized` is ``False``.
 
         Returns
         -------
@@ -338,6 +378,21 @@ class Poll:
         The results of this poll received from Discord. If ``None``, this should be considered "unknown" rather than "no" results.
     """
 
+    __slots__ = (
+        "_expiry",
+        "_message",
+        "allow_multiselect",
+        "answers",
+        "duration",
+        "layout_type",
+        "question",
+        "results",
+    )
+
+    def __cache_restore__(self) -> None:
+        for answer in self.answers:
+            answer._poll = self
+
     def __init__(
         self,
         question: PollMedia | str,
@@ -346,31 +401,35 @@ class Poll:
         duration: int | None = 24,
         allow_multiselect: bool | None = False,
         layout_type: PollLayoutType | None = PollLayoutType.default,
-    ):
-        self.question = (
+    ) -> None:
+        self.question: PollMedia = (
             question if isinstance(question, PollMedia) else PollMedia(question)
         )
         self.answers: list[PollAnswer] = answers or []
         self.duration: int | None = duration
-        self.allow_multiselect: bool = allow_multiselect
-        self.layout_type: PollLayoutType = layout_type
+        self.allow_multiselect: bool = cast("bool", allow_multiselect)
+        self.layout_type: PollLayoutType = cast("PollLayoutType", layout_type)
         self.results: PollResults | None = None
         self._expiry: str | None = None
         self._message: Message | PartialMessage | None = None
 
-    @cached_property
-    def expiry(self) -> datetime.datetime | None:
+    @property
+    def expiry(self) -> dt.datetime | None:
         """An aware datetime object that specifies the date and time in UTC when the poll will end."""
         return utils.parse_time(self._expiry)
 
     def to_dict(self) -> PollPayload:
-        dict_ = {
-            "question": self.question.to_dict(),
-            "answers": [a.to_dict() for a in self.answers],
-            "duration": self.duration,
-            "allow_multiselect": self.allow_multiselect,
-            "layout_type": self.layout_type.value,
-        }
+        """Convert this poll to its payload."""
+        dict_ = cast(
+            "PollPayload",
+            {
+                "question": self.question.to_dict(),
+                "answers": [a.to_dict() for a in self.answers],
+                "duration": self.duration,
+                "allow_multiselect": self.allow_multiselect,
+                "layout_type": self.layout_type.value,
+            },
+        )
         if self.results is not None:
             dict_["results"] = self.results.to_dict()
         if self._expiry:
@@ -381,8 +440,9 @@ class Poll:
     def from_dict(
         cls, data: PollPayload, message: Message | PartialMessage | None = None
     ) -> Poll:
+        """Build a poll from its payload."""
         if not data:
-            return None
+            return None  # pyright: ignore[reportReturnType]
         poll = cls(
             question=PollMedia.from_dict(data["question"], message=message),
             answers=[
@@ -395,9 +455,6 @@ class Poll:
         )
         if (results := data.get("results")) is not None:
             poll.results = PollResults(results)
-        elif message and message.poll:
-            # results is nullable, so grab old results if necessary.
-            poll.results = message.poll.results
         poll._expiry = data.get("expiry")
         poll._message = message
         for a in poll.answers:
@@ -408,8 +465,9 @@ class Poll:
         return f"<Poll question={self.question!r} total_answers={len(self.answers)} expiry={(self._expiry)!r} allow_multiselect={self.allow_multiselect!r}>"
 
     def has_ended(self) -> bool | None:
-        """
-        Checks if this poll has completely ended. Shortcut for :attr:`PollResults.is_finalized`, if available.
+        """Checks if this poll has completely ended.
+
+        Shortcut for :attr:`PollResults.is_finalized`, if available.
 
         Returns
         -------
@@ -421,8 +479,9 @@ class Poll:
         return self.results.is_finalized
 
     def total_votes(self) -> int | None:
-        """
-        Shortcut for :meth:`PollResults.total_votes` This may not be precise if :attr:`is_finalized` is ``False``.
+        """Shortcut for :meth:`PollResults.total_votes`.
+
+        This may not be precise if :attr:`is_finalized` is ``False``.
 
         Returns
         -------
@@ -433,7 +492,7 @@ class Poll:
             return None
         return self.results.total_votes()
 
-    def get_answer(self, id) -> PollAnswer | None:
+    def get_answer(self, id: int) -> PollAnswer | None:
         """
         Get a poll answer by ID.
 
@@ -476,7 +535,6 @@ class Poll:
 
         Examples
         --------
-
         Regular usage ::
 
             poll = Poll(
@@ -491,7 +549,12 @@ class Poll:
 
         Chaining style ::
 
-            poll = Poll("What's your favorite color?").add_answer("Red", emoji="❤").add_answer("Green").add_answer("Blue")
+            poll = (
+                Poll("What's your favorite color?")
+                .add_answer("Red", emoji="❤")
+                .add_answer("Green")
+                .add_answer("Blue")
+            )
         """
         if len(self.answers) >= 10:
             raise ValueError("Polls may only have up to 10 answers.")
@@ -504,9 +567,9 @@ class Poll:
         return self
 
     async def end(self) -> Message:
-        """
-        Immediately ends this poll, if attached to a message. Only doable by the poll's owner.
-        Shortcut to :meth:`Message.end_poll`
+        """Immediately ends this poll, if attached to a message.
+
+        Only doable by the poll's owner. Shortcut to :meth:`Message.end_poll`.
 
         Returns
         -------
@@ -522,7 +585,6 @@ class Poll:
         RuntimeError
             This poll wasn't received from a message.
         """
-
         if not self._message:
             raise RuntimeError("You can only end a poll received from a message.")
 

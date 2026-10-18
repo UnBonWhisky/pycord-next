@@ -31,19 +31,21 @@ import select
 import socket
 import threading
 from collections.abc import Callable, Coroutine
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+
+import davey
 
 from discord import utils
 from discord.backoff import ExponentialBackoff
 from discord.errors import ConnectionClosed
-from discord.voice.utils.dependencies import DAVE_PROTOCOL_VERSION, HAS_DAVEY
+from discord.voice.utils.dependencies import DAVE_PROTOCOL_VERSION
 
 from .enums import ConnectionFlowState, OpCodes
 from .gateway import VoiceWebSocket
 
 if TYPE_CHECKING:
     from discord import abc
-    from discord.guild import Guild
+    from discord.guild import Guild, PartialGuild, VocalGuildChannel
     from discord.member import VoiceState
     from discord.raw_models import RawVoiceServerUpdateEvent, RawVoiceStateUpdateEvent
     from discord.state import ConnectionState
@@ -57,11 +59,22 @@ SocketReaderCallback = Callable[[bytes], Any]
 _log = logging.getLogger(__name__)
 _recv_log = logging.getLogger("discord.voice.receiver")
 
-if HAS_DAVEY:
-    import davey
-
 
 class SocketReader(threading.Thread):
+    """A thread that reads the voice UDP socket and feeds the registered callbacks.
+
+    Parameters
+    ----------
+    state: :class:`VoiceConnectionState`
+        The connection state that owns the socket.
+    name: :class:`str`
+        The name of the thread.
+    buffer_size: :class:`int`
+        The maximum number of bytes read from the socket at once.
+    start_paused: :class:`bool`
+        Whether the reader waits for a callback before reading.
+    """
+
     def __init__(
         self,
         state: VoiceConnectionState,
@@ -86,15 +99,36 @@ class SocketReader(threading.Thread):
         self._warned_wait: bool = False
 
     def is_running(self) -> bool:
+        """Check whether the thread was started and is still alive.
+
+        Returns
+        -------
+        :class:`bool`
+            Whether the reader is running.
+        """
         return self._started.is_set()
 
     def register(self, callback: SocketReaderCallback) -> None:
+        """Register a callback called with every datagram, and resume reading.
+
+        Parameters
+        ----------
+        callback: Callable[[:class:`bytes`], Any]
+            The callback to register.
+        """
         self._callbacks.append(callback)
         if self._idle_paused:
             self._idle_paused = False
             self._running.set()
 
     def unregister(self, callback: SocketReaderCallback) -> None:
+        """Unregister a callback, and pause reading once there is none left.
+
+        Parameters
+        ----------
+        callback: Callable[[:class:`bytes`], Any]
+            The callback to remove.
+        """
         try:
             self._callbacks.remove(callback)
         except ValueError:
@@ -105,15 +139,30 @@ class SocketReader(threading.Thread):
                 self._running.clear()
 
     def pause(self) -> None:
+        """Pause reading from the socket."""
         self._idle_paused = False
         self._running.clear()
 
     def is_paused(self) -> bool:
+        """Check whether the reader is paused.
+
+        Returns
+        -------
+        :class:`bool`
+            Whether the reader is paused.
+        """
         return self._idle_paused or (
             not self._running.is_set() and not self._end.is_set()
         )
 
     def resume(self, *, force: bool = False) -> None:
+        """Resume reading from the socket.
+
+        Parameters
+        ----------
+        force: :class:`bool`
+            Whether to resume even when no callback is registered.
+        """
         if self._running.is_set():
             return
 
@@ -125,11 +174,13 @@ class SocketReader(threading.Thread):
         self._running.set()
 
     def stop(self) -> None:
+        """Stop the reader thread."""
         self._started.clear()
         self._end.set()
         self._running.set()
 
     def run(self) -> None:
+        """Read the socket and feed the callbacks until stopped."""
         self._started.set()
         self._end.clear()
         self._running.set()
@@ -206,6 +257,16 @@ class SocketReader(threading.Thread):
 
 
 class SocketEventReader(SocketReader):
+    """A :class:`SocketReader` that reads the datagrams of a voice connection.
+
+    Parameters
+    ----------
+    state: :class:`VoiceConnectionState`
+        The connection state that owns the socket.
+    start_paused: :class:`bool`
+        Whether the reader waits for a callback before reading.
+    """
+
     def __init__(
         self, state: VoiceConnectionState, *, start_paused: bool = True
     ) -> None:
@@ -218,6 +279,25 @@ class SocketEventReader(SocketReader):
 
 
 class VoiceConnectionState:
+    """The state machine of a voice connection.
+
+    It performs the handshake with the main gateway and the voice gateway,
+    owns the UDP socket and the DAVE session.
+
+    Parameters
+    ----------
+    client: :class:`VoiceClient`
+        The voice client this state belongs to.
+    hook: Callable[[VoiceWebSocket, dict], Coroutine] | None
+        A coroutine function called with the websocket and every received
+        voice gateway message.
+
+    Raises
+    ------
+    RuntimeError
+        The client has no ID, or no channel to connect to.
+    """
+
     def __init__(
         self,
         client: VoiceClient,
@@ -256,17 +336,17 @@ class VoiceConnectionState:
         self._disconnected = asyncio.Event()
         self._runner: asyncio.Task[None] | None = None
         self._connector: asyncio.Task[None] | None = None
+        if not self._connection.self_id:
+            raise RuntimeError("client self ID is not set")
+        if not self.channel_id:
+            raise RuntimeError("client channel being connected to is not set")
+
         self._socket_reader = SocketEventReader(self)
         self._socket_reader.start()
         self.recording_done_callbacks: list[
             tuple[Callable[..., Coroutine[Any, Any, Any]], tuple[Any, ...]]
         ] = []
-        self._dispatch_task_set: set[asyncio.Task] = set()
-
-        if not self._connection.self_id:
-            raise RuntimeError("client self ID is not set")
-        if not self.channel_id:
-            raise RuntimeError("client channel being connected to is not set")
+        self._dispatch_task_set: set[asyncio.Task[Any]] = set()
 
         self.dave_session: davey.DaveSession | None = None
         self.dave_protocol_version: int = 0
@@ -275,22 +355,27 @@ class VoiceConnectionState:
 
     @property
     def user_ssrc_map(self) -> dict[int, int]:
+        """A mapping of user IDs to SSRCs."""
         return self.client._id_to_ssrc
 
     @property
     def ssrc_user_map(self) -> dict[int, int]:
-        return {v: k for k, v in self.user_ssrc_map.items()}
+        """A mapping of SSRCs to user IDs."""
+        return self.client._ssrc_to_id
 
     @property
     def max_dave_proto_version(self) -> int:
+        """The highest DAVE protocol version supported."""
         return DAVE_PROTOCOL_VERSION
 
     @property
     def state(self) -> ConnectionFlowState:
+        """The current state of the connection flow."""
         return self._state
 
     @state.setter
     def state(self, state: ConnectionFlowState) -> None:
+        """The current state of the connection flow."""
         if state is not self._state:
             _log.debug("State changed from %s to %s", self._state.name, state.name)
 
@@ -304,36 +389,71 @@ class VoiceConnectionState:
             self._connected.clear()
 
     @property
-    def guild(self) -> Guild:
+    def guild(self) -> Guild | PartialGuild:
+        """The guild the voice channel belongs to."""
         return self.client.guild
 
     @property
     def user(self) -> ClientUser:
+        """The connected user."""
         return self.client.user
 
     @property
     def channel_id(self) -> int | None:
-        return self.client.channel is not None and self.client.channel.id
+        """The ID of the channel being connected to."""
+        channel = cast("abc.Connectable | None", self.client.channel)
+        return channel is not None and channel.id
 
     @property
     def guild_id(self) -> int:
+        """The ID of the guild the voice channel belongs to."""
         return self.guild.id
 
     @property
     def supported_modes(self) -> tuple[SupportedModes, ...]:
+        """The encryption modes supported by the client."""
         return self.client.supported_modes
 
-    @property
-    def self_voice_state(self) -> VoiceState | None:
-        return self.guild.me.voice
+    async def _self_voice_flags(self) -> dict[str, bool]:
+        voice_state = await self.get_self_voice_state() or self
+        return {"self_deaf": voice_state.self_deaf, "self_mute": voice_state.self_mute}
+
+    async def get_self_voice_state(self) -> VoiceState | None:
+        """Get the voice state of the connected user.
+
+        Returns
+        -------
+        :class:`VoiceState` | None
+            The voice state, if it is known.
+        """
+        state = self.client._state
+        if state.self_id is None:
+            return None
+        return await state._guild_bucket("voice_states", self.guild_id).get(
+            state.self_id
+        )
 
     def is_connected(self) -> bool:
+        """Check whether the connection flow is complete.
+
+        Returns
+        -------
+        :class:`bool`
+            Whether the connection is established.
+        """
         return self.state is ConnectionFlowState.connected
 
     def _inside_runner(self) -> bool:
         return self._runner is not None and asyncio.current_task() == self._runner
 
     async def voice_state_update(self, data: RawVoiceStateUpdateEvent) -> None:
+        """Handle a ``VOICE_STATE_UPDATE`` event of the connected user.
+
+        Parameters
+        ----------
+        data: :class:`RawVoiceStateUpdateEvent`
+            The voice state payload.
+        """
         channel_id = data.channel_id
 
         if channel_id is None:
@@ -357,27 +477,26 @@ class VoiceConnectionState:
 
                 if channel_id != self.client.channel.id:
                     # moved from channel
-                    self._update_voice_channel(channel_id)
+                    await self._update_voice_channel(channel_id)
             else:
                 self.state = ConnectionFlowState.got_both_voice_updates
             return
 
         if self.state is ConnectionFlowState.connected:
-            self._update_voice_channel(channel_id)
+            await self._update_voice_channel(channel_id)
 
         elif self.state is not ConnectionFlowState.disconnected:
             if channel_id != self.client.channel.id:
                 _log.info("We were moved from the channel while connecting...")
 
-                self._update_voice_channel(channel_id)
+                await self._update_voice_channel(channel_id)
                 await self.soft_disconnect(
                     with_state=ConnectionFlowState.got_voice_state_update
                 )
                 await self.connect(
                     reconnect=self.reconnect,
                     timeout=self.timeout,
-                    self_deaf=(self.self_voice_state or self).self_deaf,
-                    self_mute=(self.self_voice_state or self).self_mute,
+                    **await self._self_voice_flags(),
                     resume=False,
                     wait=False,
                 )
@@ -385,11 +504,18 @@ class VoiceConnectionState:
                 _log.debug("Ignoring unexpected VOICE_STATEUPDATE event")
 
     async def voice_server_update(self, data: RawVoiceServerUpdateEvent) -> None:
+        """Handle a ``VOICE_SERVER_UPDATE`` event.
+
+        Parameters
+        ----------
+        data: :class:`RawVoiceServerUpdateEvent`
+            The voice server payload.
+        """
         previous_token = self.token
         previous_server_id = self.server_id
         previous_endpoint = self.endpoint
 
-        self.token = data.token
+        self.token = cast("str | None", data.token)
         self.server_id = data.guild_id
         endpoint = data.endpoint
 
@@ -436,8 +562,7 @@ class VoiceConnectionState:
             await self.connect(
                 reconnect=self.reconnect,
                 timeout=self.timeout,
-                self_deaf=(self.self_voice_state or self).self_deaf,
-                self_mute=(self.self_voice_state or self).self_mute,
+                **await self._self_voice_flags(),
                 resume=False,
                 wait=False,
             )
@@ -453,6 +578,23 @@ class VoiceConnectionState:
         resume: bool,
         wait: bool = True,
     ) -> None:
+        """Start the connection flow.
+
+        Parameters
+        ----------
+        reconnect: :class:`bool`
+            Whether to reconnect on failure.
+        timeout: :class:`float`
+            The maximum time in seconds to wait for the connection.
+        self_deaf: :class:`bool`
+            Whether to join deafened.
+        self_mute: :class:`bool`
+            Whether to join muted.
+        resume: :class:`bool`
+            Whether to resume the previous voice session.
+        wait: :class:`bool`
+            Whether to wait for the connection to complete.
+        """
         if self._connector:
             self._connector.cancel()
             self._connector = None
@@ -527,9 +669,8 @@ class VoiceConnectionState:
                     await self.disconnect(cleanup=False)
                     await asyncio.sleep(wait)
                     continue
-                else:
-                    await self.disconnect()
-                    raise
+                await self.disconnect()
+                raise
 
     async def _connect(
         self,
@@ -561,6 +702,17 @@ class VoiceConnectionState:
     async def disconnect(
         self, *, force: bool = True, cleanup: bool = True, wait: bool = False
     ) -> None:
+        """Disconnect from voice.
+
+        Parameters
+        ----------
+        force: :class:`bool`
+            Whether to disconnect even if the connection is not established.
+        cleanup: :class:`bool`
+            Whether to release the socket reader and the voice client.
+        wait: :class:`bool`
+            Whether to wait for Discord to confirm the disconnection.
+        """
         if not force and not self.is_connected():
             return
 
@@ -612,6 +764,13 @@ class VoiceConnectionState:
         *,
         with_state: ConnectionFlowState = ConnectionFlowState.got_both_voice_updates,
     ) -> None:
+        """Close the voice websocket and the socket but keep the voice client.
+
+        Parameters
+        ----------
+        with_state: :class:`ConnectionFlowState`
+            The state to move the connection flow to.
+        """
         _log.debug("Soft disconnecting from voice")
 
         if self._runner:
@@ -638,6 +797,16 @@ class VoiceConnectionState:
     async def move_to(
         self, channel: abc.Snowflake | None, timeout: float | None
     ) -> None:
+        """Move the connection to another voice channel.
+
+        Parameters
+        ----------
+        channel: :class:`abc.Snowflake` | None
+            The channel to move to, ``None`` to disconnect.
+        timeout: :class:`float` | None
+            The maximum time in seconds to wait for the move, or ``None`` to
+            wait forever.
+        """
         if channel is None:
             await self.disconnect(wait=True)
             return
@@ -671,18 +840,54 @@ class VoiceConnectionState:
         state: ConnectionFlowState = ConnectionFlowState.connected,
         timeout: float | None = None,
     ) -> Any:
+        """Wait for the connection flow to reach a state.
+
+        Parameters
+        ----------
+        state: :class:`ConnectionFlowState`
+            The state to wait for.
+        timeout: :class:`float` | None
+            The maximum time in seconds to wait, or ``None`` to wait forever.
+
+        Returns
+        -------
+        Any
+            A boolean when waiting for the connected state, which blocks the
+            calling thread, otherwise a coroutine that has to be awaited.
+        """
         if state is ConnectionFlowState.connected:
             return self._connected.wait(timeout)
         return self._wait_for_state(state, timeout=timeout)
 
     def send_packet(self, packet: bytes) -> None:
+        """Send a datagram over the voice socket.
+
+        Parameters
+        ----------
+        packet: :class:`bytes`
+            The data to send.
+        """
         self.socket.sendall(packet)
 
     def add_socket_listener(self, callback: SocketReaderCallback) -> None:
+        """Register a callback called with every datagram received on the voice socket.
+
+        Parameters
+        ----------
+        callback: Callable[[:class:`bytes`], Any]
+            The callback to register.
+        """
         _log.debug("Registering a socket listener callback %s", callback)
         self._socket_reader.register(callback)
 
     def remove_socket_listener(self, callback: SocketReaderCallback) -> None:
+        """Unregister a socket callback.
+
+        Parameters
+        ----------
+        callback: Callable[[:class:`bytes`], Any]
+            The callback to remove.
+        """
         _log.debug("Unregistering a socket listener callback %s", callback)
         self._socket_reader.unregister(callback)
 
@@ -712,7 +917,7 @@ class VoiceConnectionState:
     async def _voice_connect(
         self, *, self_deaf: bool = False, self_mute: bool = False
     ) -> None:
-        channel = self.client.channel
+        channel = cast("VocalGuildChannel", self.client.channel)
         await channel.guild.change_voice_state(
             channel=channel, self_deaf=self_deaf, self_mute=self_mute
         )
@@ -725,9 +930,8 @@ class VoiceConnectionState:
         )
 
         self.state = ConnectionFlowState.disconnected
-        await self.client.channel.guild.change_voice_state(
-            channel=None
-        )  # pyright: ignore[reportAttributeAccessIssue]
+        channel = cast("VocalGuildChannel", self.client.channel)
+        await channel.guild.change_voice_state(channel=None)
         self._expecting_disconnect = True
         self._disconnected.clear()
 
@@ -780,7 +984,7 @@ class VoiceConnectionState:
                             )
                             await self.disconnect()
                         break
-                    elif exc.code in (4014, 4022):
+                    if exc.code in (4014, 4022):
                         if self._disconnected.is_set():
                             _log.info(
                                 "Disconnecting from voice by Discord, close code %d",
@@ -800,17 +1004,16 @@ class VoiceConnectionState:
                             if self.state is not ConnectionFlowState.disconnected:
                                 await self.disconnect()
                             break
-                        else:
-                            # we have successfully resumed so just keep polling events
-                            continue
-                    elif exc.code == 4021:
+                        # we have successfully resumed so just keep polling events
+                        continue
+                    if exc.code == 4021:
                         _log.warning(
                             "We are being rate limited while attempting to connect to voice. Disconnecting...",
                         )
                         if self.state is not ConnectionFlowState.disconnected:
                             await self.disconnect()
                         break
-                    elif exc.code == 4015:
+                    if exc.code == 4015:
                         _log.info(
                             "Disconnected from voice due to a Discord-side issue, attempting to reconnect and resume...",
                         )
@@ -819,8 +1022,7 @@ class VoiceConnectionState:
                             await self._connect(
                                 reconnect=reconnect,
                                 timeout=self.timeout,
-                                self_deaf=(self.self_voice_state or self).self_deaf,
-                                self_mute=(self.self_voice_state or self).self_mute,
+                                **await self._self_voice_flags(),
                                 resume=True,
                             )
                         except asyncio.TimeoutError:
@@ -866,8 +1068,7 @@ class VoiceConnectionState:
                     await self._connect(
                         reconnect=reconnect,
                         timeout=self.timeout,
-                        self_deaf=(self.self_voice_state or self).self_deaf,
-                        self_mute=(self.self_voice_state or self).self_mute,
+                        **await self._self_voice_flags(),
                         resume=False,
                     )
                 except asyncio.TimeoutError:
@@ -901,15 +1102,20 @@ class VoiceConnectionState:
             await previous_ws.close()
 
     async def _move_to(self, channel: abc.Snowflake) -> None:
-        await self.client.channel.guild.change_voice_state(
-            channel=channel
-        )  # pyright: ignore[reportAttributeAccessIssue]
+        voice_channel = cast("VocalGuildChannel", self.client.channel)
+        await voice_channel.guild.change_voice_state(
+            channel=cast("VocalGuildChannel", channel)
+        )
         self.state = ConnectionFlowState.set_guild_voice_state
 
-    def _update_voice_channel(self, channel_id: int | None) -> None:
-        self.client.channel = channel_id and self.guild.get_channel(channel_id)  # type: ignore
+    async def _update_voice_channel(self, channel_id: int | None) -> None:
+        channel = channel_id and await self.client._state._guild_bucket(
+            "channels", self.guild_id
+        ).get(channel_id)
+        self.client.channel = cast("abc.Connectable", channel)
 
     async def reinit_dave_session(self) -> None:
+        """Create or reset the DAVE session for the current protocol version."""
         assert self.channel_id
 
         if self.dave_protocol_version > 0:
@@ -933,6 +1139,13 @@ class VoiceConnectionState:
             self.dave_session.set_passthrough_mode(True, 10)
 
     async def recover_dave_from_invalid_commit(self, transition: int) -> None:
+        """Ask the gateway to resend the group state after an invalid MLS commit.
+
+        Parameters
+        ----------
+        transition: :class:`int`
+            The ID of the transition the commit belongs to.
+        """
         payload = {
             "op": int(OpCodes.mls_invalid_commit_welcome),
             "d": {"transition_id": transition},
@@ -941,6 +1154,13 @@ class VoiceConnectionState:
         await self.reinit_dave_session()
 
     async def execute_dave_transition(self, transition: int) -> None:
+        """Apply a pending DAVE transition.
+
+        Parameters
+        ----------
+        transition: :class:`int`
+            The ID of the transition to execute.
+        """
         _log.debug("Executing DAVE transition with id %s", transition)
 
         if not self.dave_pending_transition:

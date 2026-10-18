@@ -31,25 +31,21 @@ import struct
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Coroutine
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
-
-from .utils.dependencies import HAS_DAVEY
-
-if HAS_DAVEY:
-    import davey
+import davey
 
 from discord import utils
 from discord.enums import SpeakingState
 from discord.errors import ConnectionClosed
-from discord.gateway import DiscordWebSocket
-from discord.gateway import KeepAliveHandler as KeepAliveHandlerBase
+from discord.gateway import BaseWebSocket, KeepAliveHandler as KeepAliveHandlerBase
 
 from .enums import OpCodes
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     from _typeshed import ConvertibleToInt
     from typing_extensions import Self
 
@@ -59,8 +55,15 @@ _log = logging.getLogger(__name__)
 
 
 class KeepAliveHandler(KeepAliveHandlerBase):
-    if TYPE_CHECKING:
-        ws: VoiceWebSocket
+    """Sends the heartbeats of a voice websocket from a dedicated thread.
+
+    Parameters
+    ----------
+    ws: :class:`VoiceWebSocket`
+        The websocket to keep alive.
+    interval: :class:`float` | None
+        The time in seconds between two heartbeats.
+    """
 
     def __init__(
         self,
@@ -90,15 +93,23 @@ class KeepAliveHandler(KeepAliveHandlerBase):
         self.recent_ack_latencies: deque[float] = deque(maxlen=20)
 
     def get_payload(self) -> dict[str, Any]:
+        """Build the heartbeat payload.
+
+        Returns
+        -------
+        dict[:class:`str`, Any]
+            The heartbeat payload.
+        """
         return {
             "op": int(OpCodes.heartbeat),
             "d": {
                 "t": int(time.time() * 1000),
-                "seq_ack": self.ws.seq_ack,
+                "seq_ack": cast("VoiceWebSocket", self.ws).seq_ack,
             },
         }
 
     def ack(self) -> None:
+        """Record a heartbeat acknowledgement and update the latency."""
         ack_time = time.perf_counter()
         self._last_ack = ack_time
         self._last_recv = ack_time
@@ -106,7 +117,25 @@ class KeepAliveHandler(KeepAliveHandlerBase):
         self.recent_ack_latencies.append(self.latency)
 
 
-class VoiceWebSocket(DiscordWebSocket):
+class VoiceWebSocket(BaseWebSocket):
+    """The websocket connection to the Discord voice gateway.
+
+    Parameters
+    ----------
+    socket: :class:`aiohttp.ClientWebSocketResponse`
+        The underlying websocket.
+    loop: :class:`asyncio.AbstractEventLoop`
+        The event loop the websocket runs on.
+    state: :class:`VoiceConnectionState`
+        The connection state that owns this websocket.
+    hook: Callable[..., Coroutine] | None
+        A coroutine function called with the websocket and every received
+        message.
+    """
+
+    if TYPE_CHECKING:
+        _connection: Any
+
     def __init__(
         self,
         socket: aiohttp.ClientWebSocketResponse,
@@ -115,43 +144,54 @@ class VoiceWebSocket(DiscordWebSocket):
         *,
         hook: Callable[..., Coroutine[Any, Any, Any]] | None = None,
     ) -> None:
+        super().__init__(socket, loop=loop)
         self.ws: aiohttp.ClientWebSocketResponse = socket
-        self.loop: asyncio.AbstractEventLoop = loop
-        self._keep_alive: KeepAliveHandler | None = None
-        self._close_code: int | None = None
         self.secret_key: list[int] | None = None
         self.seq_ack: int = -1
         self.state: VoiceConnectionState = state
         self.ssrc_map: dict[str, dict[str, Any]] = {}
         self.known_users: dict[int, Any] = {}
 
-        if hook:
-            self._hook = hook or state.ws_hook  # type: ignore
+        self._hook: Callable[..., Coroutine[Any, Any, Any]] = hook or self._default_hook
 
     @property
     def token(self) -> str | None:
+        """The token of the voice connection."""
         return self.state.token
 
     @token.setter
     def token(self, value: str | None) -> None:
+        """The token of the voice connection."""
         self.state.token = value
 
     @property
     def session_id(self) -> str | None:
+        """The session ID of the voice connection."""
         return self.state.session_id
 
     @session_id.setter
     def session_id(self, value: str | None) -> None:
+        """The session ID of the voice connection."""
         self.state.session_id = value
 
     @property
     def self_id(self) -> int:
+        """The ID of the connected user."""
         return self._connection.self_id
 
-    async def _hook(self, *args: Any) -> Any:
+    async def _default_hook(self, *args: Any) -> Any:
         pass
 
     async def send_as_bytes(self, op: ConvertibleToInt, data: bytes) -> None:
+        """Send a binary frame.
+
+        Parameters
+        ----------
+        op: :class:`int`
+            The opcode of the frame.
+        data: :class:`bytes`
+            The payload of the frame.
+        """
         packet = bytes([int(op)]) + data
         _log.debug(
             "Sending voice websocket binary frame: op: %s size: %d", op, len(data)
@@ -159,6 +199,13 @@ class VoiceWebSocket(DiscordWebSocket):
         await self.ws.send_bytes(packet)
 
     async def send_as_json(self, data: Any) -> None:
+        """Send a JSON frame.
+
+        Parameters
+        ----------
+        data: Any
+            The payload to serialise and send.
+        """
         _log.debug("Sending voice websocket frame: %s.", data)
         if data.get("op", None) == OpCodes.identify:
             _log.info("Identifying ourselves: %s", data)
@@ -167,6 +214,7 @@ class VoiceWebSocket(DiscordWebSocket):
     send_heartbeat = send_as_json
 
     async def resume(self) -> None:
+        """Send a resume payload to restore a previous session."""
         payload = {
             "op": int(OpCodes.resume),
             "d": {
@@ -178,7 +226,14 @@ class VoiceWebSocket(DiscordWebSocket):
         }
         await self.send_as_json(payload)
 
-    async def received_message(self, msg: Any, /):
+    async def received_message(self, msg: Any, /) -> None:
+        """Handle a text frame received from the voice gateway.
+
+        Parameters
+        ----------
+        msg: Any
+            The decoded payload.
+        """
         _log.debug("Voice websocket frame received: %s", msg)
         op = msg["op"]
         data = msg.get("d", {})  # this key should ALWAYS be given, but guard anyways
@@ -251,6 +306,13 @@ class VoiceWebSocket(DiscordWebSocket):
         await utils.maybe_coroutine(self._hook, self, msg)
 
     async def received_binary_message(self, msg: bytes) -> None:
+        """Handle a binary frame received from the voice gateway.
+
+        Parameters
+        ----------
+        msg: :class:`bytes`
+            The raw frame.
+        """
         self.seq_ack = struct.unpack_from(">H", msg, 0)[0]
         op = msg[2]
         _log.debug(
@@ -339,6 +401,13 @@ class VoiceWebSocket(DiscordWebSocket):
                 await state.recover_dave_from_invalid_commit(transt_id)
 
     async def ready(self, data: dict[str, Any]) -> None:
+        """Handle the ``READY`` payload, then run the IP discovery and select a protocol.
+
+        Parameters
+        ----------
+        data: dict[:class:`str`, Any]
+            The ``READY`` payload.
+        """
         state = self.state
 
         state.ssrc = data["ssrc"]
@@ -370,6 +439,17 @@ class VoiceWebSocket(DiscordWebSocket):
         _log.debug("Selected voice protocol %s for this connection", mode)
 
     async def select_protocol(self, ip: str, port: int, mode: str) -> None:
+        """Select the transport protocol and the encryption mode.
+
+        Parameters
+        ----------
+        ip: :class:`str`
+            The external IP address found by the IP discovery.
+        port: :class:`int`
+            The external port found by the IP discovery.
+        mode: :class:`str`
+            The encryption mode to use.
+        """
         payload = {
             "op": int(OpCodes.select_protocol),
             "d": {
@@ -384,6 +464,13 @@ class VoiceWebSocket(DiscordWebSocket):
         await self.send_as_json(payload)
 
     async def get_ip(self) -> tuple[str, int]:
+        """Run the IP discovery to find the external address of the UDP socket.
+
+        Returns
+        -------
+        tuple[:class:`str`, :class:`int`]
+            The external IP address and port.
+        """
         state = self.state
         packet = bytearray(74)
         struct.pack_into(">H", packet, 0, 1)  # 1 = Send
@@ -393,16 +480,15 @@ class VoiceWebSocket(DiscordWebSocket):
         _log.debug(
             f"Sending IP discovery packet for voice in channel {state.channel_id} (guild {state.guild_id})"
         )
-        await self.loop.sock_sendall(state.socket, packet)
-
         fut: asyncio.Future[bytes] = self.loop.create_future()
 
         def get_ip_packet(data: bytes) -> None:
             if data[1] == 0x02 and len(data) == 74:
                 self.loop.call_soon_threadsafe(fut.set_result, data)
 
-        fut.add_done_callback(lambda f: state.remove_socket_listener(get_ip_packet))
+        fut.add_done_callback(lambda _: state.remove_socket_listener(get_ip_packet))
         state.add_socket_listener(get_ip_packet)
+        await self.loop.sock_sendall(state.socket, packet)
         recv = await fut
 
         _log.debug("Received IP discovery packet with data %s", recv)
@@ -417,17 +503,32 @@ class VoiceWebSocket(DiscordWebSocket):
 
     @property
     def latency(self) -> float:
+        """Latency between a heartbeat and its acknowledgement in seconds.
+
+        This is ``inf`` before the first acknowledgement.
+        """
         heartbeat = self._keep_alive
         return float("inf") if heartbeat is None else heartbeat.latency
 
     @property
     def average_latency(self) -> float:
-        heartbeat = self._keep_alive
+        """Average of the most recent heartbeat latencies in seconds.
+
+        This is ``inf`` before the first acknowledgement.
+        """
+        heartbeat = cast("KeepAliveHandler | None", self._keep_alive)
         if heartbeat is None or not heartbeat.recent_ack_latencies:
             return float("inf")
         return sum(heartbeat.recent_ack_latencies) / len(heartbeat.recent_ack_latencies)
 
     async def load_secret_key(self, data: dict[str, Any]) -> None:
+        """Store the secret key of a ``SESSION_DESCRIPTION`` payload.
+
+        Parameters
+        ----------
+        data: dict[:class:`str`, Any]
+            The ``SESSION_DESCRIPTION`` payload.
+        """
         _log.debug(
             f"Received secret key for voice connection in channel {self.state.channel_id} (guild {self.state.guild_id})"
         )
@@ -435,6 +536,7 @@ class VoiceWebSocket(DiscordWebSocket):
         await self.speak(SpeakingState.none)
 
     async def poll_event(self) -> None:
+        """Receive and handle the next frame of the voice gateway."""
         msg = await asyncio.wait_for(self.ws.receive(), timeout=30)
 
         if msg.type is aiohttp.WSMsgType.TEXT:
@@ -455,6 +557,13 @@ class VoiceWebSocket(DiscordWebSocket):
             raise ConnectionClosed(self.ws, shard_id=None, code=self._close_code)
 
     async def close(self, code: int = 1000) -> None:
+        """Close the websocket and stop its keep alive handler.
+
+        Parameters
+        ----------
+        code: :class:`int`
+            The close code.
+        """
         if self._keep_alive:
             self._keep_alive.stop()
 
@@ -462,6 +571,13 @@ class VoiceWebSocket(DiscordWebSocket):
         await self.ws.close(code=self._close_code)
 
     async def speak(self, state: SpeakingState = SpeakingState.voice) -> None:
+        """Update the speaking state of the client.
+
+        Parameters
+        ----------
+        state: :class:`SpeakingState`
+            The new speaking state.
+        """
         await self.send_as_json(
             {
                 "op": int(OpCodes.speaking),
@@ -481,6 +597,25 @@ class VoiceWebSocket(DiscordWebSocket):
         hook: Callable[..., Coroutine[Any, Any, Any]] | None = None,
         seq_ack: int = -1,
     ) -> Self:
+        """Connect to the voice gateway of a connection state.
+
+        Parameters
+        ----------
+        state: :class:`VoiceConnectionState`
+            The connection state to connect for.
+        resume: :class:`bool`
+            Whether to resume the previous session instead of identifying.
+        hook: Callable[..., Coroutine] | None
+            A coroutine function called with the websocket and every received
+            message.
+        seq_ack: :class:`int`
+            The sequence number of the last received message.
+
+        Returns
+        -------
+        :class:`VoiceWebSocket`
+            The connected websocket.
+        """
         gateway = f"wss://{state.endpoint}/?v=8"
         client = state.client
         http = client._state.http
@@ -498,6 +633,7 @@ class VoiceWebSocket(DiscordWebSocket):
         return ws
 
     async def identify(self) -> None:
+        """Send the identify payload."""
         state = self.state
         payload = {
             "op": int(OpCodes.identify),
@@ -512,6 +648,13 @@ class VoiceWebSocket(DiscordWebSocket):
         await self.send_as_json(payload)
 
     async def send_dave_transition_ready(self, transition_id: int) -> None:
+        """Tell the gateway that the client is ready for a DAVE transition.
+
+        Parameters
+        ----------
+        transition_id: :class:`int`
+            The ID of the transition.
+        """
         payload = {
             "op": int(OpCodes.dave_transition_ready),
             "d": {

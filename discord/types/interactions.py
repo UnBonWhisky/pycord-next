@@ -25,26 +25,22 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, Union
+from typing import Literal
 
-from ..permissions import Permissions
-from .channel import ChannelType
+from typing_extensions import NotRequired, TypedDict
+
+from .channel import ChannelType, PartialChannel
 from .components import Component, ComponentType
 from .embed import Embed
-from .member import Member
-from .message import Attachment
+from .interaction_metadata import AuthorizingIntegrationOwners, InteractionType
+from .member import Member, MemberWithUser
+from .message import AllowedMentions, Attachment, Message
 from .monetization import Entitlement
 from .role import Role
 from .snowflake import Snowflake
 from .user import User
 
-if TYPE_CHECKING:
-    from .message import AllowedMentions, Message
-    from ..interactions import InteractionChannel
-
-from typing_extensions import NotRequired, TypedDict
-
-ApplicationCommandType = Literal[1, 2, 3]
+ApplicationCommandType = Literal[1, 2, 3, 4]
 
 
 class ApplicationCommand(TypedDict):
@@ -61,7 +57,10 @@ class ApplicationCommand(TypedDict):
     dm_permission: NotRequired[bool]
     default_permission: NotRequired[bool | None]
     nsfw: NotRequired[bool]
+    integration_types: NotRequired[list[int]]
+    contexts: NotRequired[list[int] | None]
     version: Snowflake
+    handler: NotRequired[int]
 
 
 ApplicationCommandOptionType = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
@@ -112,9 +111,6 @@ class GuildApplicationCommandPermissions(PartialGuildApplicationCommandPermissio
     guild_id: Snowflake
 
 
-InteractionType = Literal[1, 2, 3, 4, 5]
-
-
 class _ApplicationCommandInteractionDataOption(TypedDict):
     name: str
 
@@ -161,14 +157,14 @@ class _ApplicationCommandInteractionDataOptionNumber(
     value: float
 
 
-ApplicationCommandInteractionDataOption = Union[
-    _ApplicationCommandInteractionDataOptionString,
-    _ApplicationCommandInteractionDataOptionInteger,
-    _ApplicationCommandInteractionDataOptionSubcommand,
-    _ApplicationCommandInteractionDataOptionBoolean,
-    _ApplicationCommandInteractionDataOptionSnowflake,
-    _ApplicationCommandInteractionDataOptionNumber,
-]
+ApplicationCommandInteractionDataOption = (
+    _ApplicationCommandInteractionDataOptionString
+    | _ApplicationCommandInteractionDataOptionInteger
+    | _ApplicationCommandInteractionDataOptionSubcommand
+    | _ApplicationCommandInteractionDataOptionBoolean
+    | _ApplicationCommandInteractionDataOptionSnowflake
+    | _ApplicationCommandInteractionDataOptionNumber
+)
 
 
 class ApplicationCommandResolvedPartialChannel(TypedDict):
@@ -201,20 +197,20 @@ class ComponentInteractionData(TypedDict):
     component_type: ComponentType
 
 
-InteractionData = Union[ApplicationCommandInteractionData, ComponentInteractionData]
+InteractionData = ApplicationCommandInteractionData | ComponentInteractionData
 
 
 class Interaction(TypedDict):
     data: NotRequired[InteractionData]
     guild_id: NotRequired[Snowflake]
     channel_id: NotRequired[Snowflake]
-    channel: NotRequired[InteractionChannel]
-    member: NotRequired[Member]
+    channel: NotRequired[PartialChannel]
+    member: NotRequired[MemberWithUser]
     user: NotRequired[User]
     message: NotRequired[Message]
     locale: NotRequired[str]
     guild_locale: NotRequired[str]
-    app_permissions: NotRequired[Permissions]
+    app_permissions: NotRequired[str]
     attachment_size_limit: NotRequired[int]
     id: Snowflake
     application_id: Snowflake
@@ -226,16 +222,6 @@ class Interaction(TypedDict):
     context: InteractionContextType
 
 
-class InteractionMetadata(TypedDict):
-    id: Snowflake
-    type: InteractionType
-    user_id: Snowflake
-    authorizing_integration_owners: AuthorizingIntegrationOwners
-    original_response_message_id: NotRequired[Snowflake]
-    interacted_message_id: NotRequired[Snowflake]
-    triggering_interaction_metadata: NotRequired[InteractionMetadata]
-
-
 class InteractionApplicationCommandCallbackData(TypedDict, total=False):
     tts: bool
     content: str
@@ -245,19 +231,12 @@ class InteractionApplicationCommandCallbackData(TypedDict, total=False):
     components: list[Component]
 
 
-InteractionResponseType = Literal[1, 4, 5, 6, 7, 8, 9, 10]
+InteractionResponseType = Literal[1, 4, 5, 6, 7, 8, 9, 10, 12]
 
 
 class InteractionResponse(TypedDict):
     data: NotRequired[InteractionApplicationCommandCallbackData]
     type: InteractionResponseType
-
-
-class MessageInteraction(TypedDict):
-    id: Snowflake
-    type: InteractionType
-    name: str
-    user: User
 
 
 class EditApplicationCommand(TypedDict):
@@ -270,9 +249,6 @@ class EditApplicationCommand(TypedDict):
 
 InteractionContextType = Literal[0, 1, 2]
 ApplicationIntegrationType = Literal[0, 1]
-_StringApplicationIntegrationType = Literal["0", "1"]
-
-AuthorizingIntegrationOwners = dict[_StringApplicationIntegrationType, Snowflake]
 
 
 class InteractionCallbackResponse(TypedDict):
@@ -291,6 +267,9 @@ class InteractionCallback(TypedDict):
 
 class InteractionCallbackResource(TypedDict):
     type: InteractionResponseType
-    # This is not fully typed as activities are out of scope
-    activity_instance: NotRequired[dict]
+    activity_instance: NotRequired[InteractionCallbackActivityInstance]
     message: NotRequired[Message]
+
+
+class InteractionCallbackActivityInstance(TypedDict):
+    id: str

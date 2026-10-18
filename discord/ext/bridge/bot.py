@@ -26,17 +26,15 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 from abc import ABC
-from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any, cast
 
-from discord.commands import ApplicationContext
 from discord.errors import CheckFailure, DiscordException
-from discord.interactions import Interaction
-from discord.message import Message
 
-from ..commands import AutoShardedBot as ExtAutoShardedBot
-from ..commands import Bot as ExtBot
-from ..commands import Context as ExtContext
-from ..commands import errors
+from ..commands import (
+    AutoShardedBot as ExtAutoShardedBot,
+    Bot as ExtBot,
+    errors,
+)
 from .context import BridgeApplicationContext, BridgeExtContext
 from .core import (
     BridgeCommand,
@@ -47,18 +45,33 @@ from .core import (
     bridge_group,
 )
 
-__all__ = ("Bot", "AutoShardedBot")
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine, Iterator
+
+    from discord.commands import ApplicationContext
+    from discord.interactions import Interaction
+    from discord.message import Message
+
+    from ..commands import Context as ExtContext
+
+__all__ = ("AutoShardedBot", "Bot")
 
 
 class BotBase(ABC):
     _bridge_commands: list[BridgeCommand | BridgeCommandGroup]
 
+    if TYPE_CHECKING:
+
+        def dispatch(self, event: str, *args: Any, **kwargs: Any) -> None: ...
+
+        async def can_run(self, ctx: Any, *, call_once: bool = False) -> bool: ...
+
     @property
     def bridge_commands(self) -> list[BridgeCommand | BridgeCommandGroup]:
         """Returns all of the bot's bridge commands."""
-
         if not (cmds := getattr(self, "_bridge_commands", None)):
-            self._bridge_commands = cmds = []
+            cmds = list[BridgeCommand | BridgeCommandGroup]()
+            self._bridge_commands = cmds
 
         return cmds
 
@@ -78,31 +91,34 @@ class BotBase(ABC):
                 yield from cmd.walk_commands()
 
     async def get_application_context(
-        self, interaction: Interaction, cls=None
+        self,
+        interaction: Interaction,
+        cls: type[BridgeApplicationContext] | None = None,
     ) -> BridgeApplicationContext:
         cls = cls if cls is not None else BridgeApplicationContext
-        # Ignore the type hinting error here. BridgeApplicationContext is a subclass of ApplicationContext, and since
+        # BridgeApplicationContext is a subclass of ApplicationContext, and since
         # we gave it cls, it will be used instead.
-        return await super().get_application_context(interaction, cls=cls)  # type: ignore
+        return await cast("Any", super()).get_application_context(interaction, cls=cls)
 
-    async def get_context(self, message: Message, cls=None) -> BridgeExtContext:
+    async def get_context(
+        self, message: Message, cls: type[BridgeExtContext] | None = None
+    ) -> BridgeExtContext:
         cls = cls if cls is not None else BridgeExtContext
-        # Ignore the type hinting error here. BridgeExtContext is a subclass of Context, and since we gave it cls, it
+        # BridgeExtContext is a subclass of Context, and since we gave it cls, it
         # will be used instead.
-        return await super().get_context(message, cls=cls)  # type: ignore
+        return await cast("Any", super()).get_context(message, cls=cls)
 
-    def add_bridge_command(self, command: BridgeCommand):
-        """Takes a :class:`.BridgeCommand` and adds both a slash and traditional (prefix-based) version of the command
-        to the bot.
-        """
-        # Ignore the type hinting error here. All subclasses of BotBase pass the type checks.
-        command.add_to(self)  # type: ignore
+    def add_bridge_command(self, command: BridgeCommand) -> None:
+        """Takes a :class:`.BridgeCommand` and adds both a slash and traditional (prefix-based) version of the command to the bot."""
+        # All subclasses of BotBase pass the type checks.
+        command.add_to(cast("Any", self))
 
         self.bridge_commands.append(command)
 
-    def bridge_command(self, **kwargs):
-        """A shortcut decorator that invokes :func:`bridge_command` and adds it to
-        the internal command list via :meth:`~.Bot.add_bridge_command`.
+    def bridge_command(
+        self, **kwargs: Any
+    ) -> Callable[[Callable[..., Coroutine[Any, Any, Any]]], BridgeCommand]:
+        """A shortcut decorator that invokes :func:`bridge_command` and adds it to the internal command list via :meth:`~.Bot.add_bridge_command`.
 
         Returns
         -------
@@ -111,14 +127,16 @@ class BotBase(ABC):
             traditional (prefix-based) version of the command to the bot, and returns the :class:`.BridgeCommand`.
         """
 
-        def decorator(func) -> BridgeCommand:
+        def decorator(func: Callable[..., Coroutine[Any, Any, Any]]) -> BridgeCommand:
             result = bridge_command(**kwargs)(func)
             self.add_bridge_command(result)
             return result
 
         return decorator
 
-    def bridge_group(self, **kwargs):
+    def bridge_group(
+        self, **kwargs: Any
+    ) -> Callable[[Callable[..., Coroutine[Any, Any, Any]]], BridgeCommandGroup]:
         """A decorator that is used to wrap a function as a bridge command group.
 
         Parameters
@@ -127,34 +145,35 @@ class BotBase(ABC):
             Keyword arguments that are directly passed to the respective command constructors. (:class:`.SlashCommandGroup` and :class:`.ext.commands.Group`)
         """
 
-        def decorator(func) -> BridgeCommandGroup:
+        def decorator(
+            func: Callable[..., Coroutine[Any, Any, Any]],
+        ) -> BridgeCommandGroup:
             result = bridge_group(**kwargs)(func)
             self.add_bridge_command(result)
             return result
 
         return decorator
 
-    async def invoke(self, ctx: ExtContext | BridgeExtContext):
+    async def invoke(self, ctx: ExtContext[Any] | BridgeExtContext) -> None:
         if ctx.command is not None:
+            command = cast("Any", ctx.command)
             self.dispatch("command", ctx)
-            if isinstance(ctx.command, BridgeExtCommand):
+            if isinstance(command, BridgeExtCommand):
                 self.dispatch("bridge_command", ctx)
             try:
                 if await self.can_run(ctx, call_once=True):
-                    await ctx.command.invoke(ctx)
+                    await command.invoke(ctx)
                 else:
                     raise errors.CheckFailure("The global check once functions failed.")
             except errors.CommandError as exc:
-                await ctx.command.dispatch_error(ctx, exc)
+                await command.dispatch_error(ctx, exc)
             else:
                 self.dispatch("command_completion", ctx)
-                if isinstance(ctx.command, BridgeExtCommand):
+                if isinstance(command, BridgeExtCommand):
                     self.dispatch("bridge_command_completion", ctx)
         elif ctx.invoked_with:
             exc = errors.CommandNotFound(f'Command "{ctx.invoked_with}" is not found')
             self.dispatch("command_error", ctx, exc)
-            if isinstance(ctx.command, BridgeExtCommand):
-                self.dispatch("bridge_command_error", ctx, exc)
 
     async def invoke_application_command(
         self, ctx: ApplicationContext | BridgeApplicationContext
@@ -169,23 +188,25 @@ class BotBase(ABC):
         ctx: :class:`.ApplicationCommand`
             The invocation context to invoke.
         """
-        self._bot.dispatch("application_command", ctx)
-        if br_cmd := isinstance(ctx.command, BridgeSlashCommand):
-            self._bot.dispatch("bridge_command", ctx)
+        bot = cast("Any", self)._bot
+        command = cast("Any", ctx.command)
+        bot.dispatch("application_command", ctx)
+        if br_cmd := isinstance(command, BridgeSlashCommand):
+            bot.dispatch("bridge_command", ctx)
         try:
-            if await self._bot.can_run(ctx, call_once=True):
-                await ctx.command.invoke(ctx)
+            if await bot.can_run(ctx, call_once=True):
+                await command.invoke(ctx)
             else:
                 raise CheckFailure("The global check once functions failed.")
         except DiscordException as exc:
-            await ctx.command.dispatch_error(ctx, exc)
+            await command.dispatch_error(ctx, exc)
         else:
-            self._bot.dispatch("application_command_completion", ctx)
+            bot.dispatch("application_command_completion", ctx)
             if br_cmd:
-                self._bot.dispatch("bridge_command_completion", ctx)
+                bot.dispatch("bridge_command_completion", ctx)
 
 
-class Bot(BotBase, ExtBot):
+class Bot(BotBase, ExtBot):  # pyright: ignore[reportIncompatibleMethodOverride]
     """Represents a discord bot, with support for cross-compatibility between command types.
 
     This class is a subclass of :class:`.ext.commands.Bot` and as a result
@@ -196,9 +217,8 @@ class Bot(BotBase, ExtBot):
     """
 
 
-class AutoShardedBot(BotBase, ExtAutoShardedBot):
-    """This is similar to :class:`.Bot` except that it is inherited from
-    :class:`.ext.commands.AutoShardedBot` instead.
+class AutoShardedBot(BotBase, ExtAutoShardedBot):  # pyright: ignore[reportIncompatibleMethodOverride]
+    """Similar to :class:`.Bot` except that it is inherited from :class:`.ext.commands.AutoShardedBot` instead.
 
     .. versionadded:: 2.0
     """

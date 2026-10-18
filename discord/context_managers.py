@@ -26,10 +26,12 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from types import TracebackType
+
+    from typing_extensions import Self
 
     from .abc import Messageable
 
@@ -38,20 +40,30 @@ if TYPE_CHECKING:
 __all__ = ("Typing",)
 
 
-def _typing_done_callback(fut: asyncio.Task) -> None:
+def _typing_done_callback(fut: asyncio.Task[Any]) -> None:
     # just retrieve any exception and call it a day
-    try:
+    if not fut.cancelled():
         fut.exception()
-    except (asyncio.CancelledError, Exception):
-        pass
 
 
 class Typing:
+    """A context manager that keeps the typing indicator active in a channel.
+
+    Use it with ``with`` or ``async with`` through
+    :meth:`~discord.abc.Messageable.typing`.
+
+    Parameters
+    ----------
+    messageable: :class:`~discord.abc.Messageable`
+        The destination in which the typing indicator is shown.
+    """
+
     def __init__(self, messageable: Messageable) -> None:
         self.loop: asyncio.AbstractEventLoop = messageable._state.loop
         self.messageable: Messageable = messageable
 
     async def do_typing(self) -> None:
+        """Send the typing indicator every five seconds until cancelled."""
         try:
             channel = self._channel
         except AttributeError:
@@ -63,8 +75,8 @@ class Typing:
             await typing(channel.id)
             await asyncio.sleep(5)
 
-    def __enter__(self: TypingT) -> TypingT:
-        self.task: asyncio.Task = self.loop.create_task(self.do_typing())
+    def __enter__(self) -> Self:
+        self.task: asyncio.Task[None] = self.loop.create_task(self.do_typing())
         self.task.add_done_callback(_typing_done_callback)
         return self
 
@@ -76,7 +88,7 @@ class Typing:
     ) -> None:
         self.task.cancel()
 
-    async def __aenter__(self: TypingT) -> TypingT:
+    async def __aenter__(self) -> Self:
         self._channel = channel = await self.messageable._get_channel()
         await channel._state.http.send_typing(channel.id)
         return self.__enter__()

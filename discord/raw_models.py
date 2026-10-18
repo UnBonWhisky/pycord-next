@@ -25,13 +25,14 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import datetime
-from collections.abc import ItemsView, KeysView, ValuesView
-from typing import TYPE_CHECKING, Any
+import datetime as dt
+from typing import TYPE_CHECKING, Any, cast
 
 from typing_extensions import deprecated
 
 from . import utils
+from ._internal.aliases import AliasMixin
+from ._internal.cache_peek import cached_guild, cached_guild_channel
 from .automod import AutoModAction, AutoModTriggerType
 from .enums import (
     AuditLogAction,
@@ -41,22 +42,23 @@ from .enums import (
 )
 
 if TYPE_CHECKING:
-    from .abc import GuildChannel, MessageableChannel
-    from .guild import Guild
+    from collections.abc import ItemsView, KeysView, Mapping, ValuesView
+
+    from .abc import GuildChannel
+    from .channel import PartialGuildChannel
+    from .guild import Guild, PartialGuild
     from .member import Member
     from .message import Message
     from .partial_emoji import PartialEmoji
-    from .soundboard import PartialSoundboardSound
     from .state import ConnectionState
     from .threads import Thread
-    from .types.channel import VoiceChannelEffectSendEvent as VoiceChannelEffectSend
+    from .types.gateway import GatewayRateLimit as GatewayRateLimitPayload
     from .types.member import MemberUpdateEvent
     from .types.raw_models import (
         AuditLogEntryEvent,
-    )
-    from .types.raw_models import AutoModActionExecutionEvent as AutoModActionExecution
-    from .types.raw_models import (
+        AutoModActionExecutionEvent as AutoModActionExecution,
         BulkMessageDeleteEvent,
+        ChannelInfoChannel,
         IntegrationDeleteEvent,
         MemberRemoveEvent,
         MessageDeleteEvent,
@@ -66,39 +68,46 @@ if TYPE_CHECKING:
         ReactionClearEmojiEvent,
         ReactionClearEvent,
         ScheduledEventSubscription,
+        SoundboardSoundDeleteEvent,
         ThreadDeleteEvent,
         ThreadMembersUpdateEvent,
         ThreadUpdateEvent,
         TypingEvent,
+        VoiceChannelStartTimeUpdateEvent,
         VoiceChannelStatusUpdateEvent,
-        VoiceServerUpdateEvent,
-        VoiceStateEvent,
+    )
+    from .types.voice import (
+        VoiceServerUpdate as VoiceServerUpdateEvent,
+        VoiceState as VoiceStateEvent,
     )
     from .user import User
 
 
 __all__ = (
-    "RawMessageDeleteEvent",
+    "AutoModActionExecutionEvent",
+    "ChannelInfo",
+    "GatewayRateLimit",
+    "RawAuditLogEntryEvent",
     "RawBulkMessageDeleteEvent",
+    "RawIntegrationDeleteEvent",
+    "RawMemberRemoveEvent",
+    "RawMemberUpdateEvent",
+    "RawMessageDeleteEvent",
+    "RawMessagePollVoteEvent",
     "RawMessageUpdateEvent",
     "RawReactionActionEvent",
-    "RawReactionClearEvent",
     "RawReactionClearEmojiEvent",
-    "RawIntegrationDeleteEvent",
-    "RawThreadUpdateEvent",
-    "RawThreadDeleteEvent",
-    "RawTypingEvent",
-    "RawMemberRemoveEvent",
+    "RawReactionClearEvent",
     "RawScheduledEventSubscription",
-    "AutoModActionExecutionEvent",
-    "RawThreadMembersUpdateEvent",
-    "RawAuditLogEntryEvent",
-    "RawVoiceChannelStatusUpdateEvent",
-    "RawMessagePollVoteEvent",
     "RawSoundboardSoundDeleteEvent",
+    "RawThreadDeleteEvent",
+    "RawThreadMembersUpdateEvent",
+    "RawThreadUpdateEvent",
+    "RawTypingEvent",
+    "RawVoiceChannelStartTimeUpdateEvent",
+    "RawVoiceChannelStatusUpdateEvent",
     "RawVoiceServerUpdateEvent",
     "RawVoiceStateUpdateEvent",
-    "RawMemberUpdateEvent",
 )
 
 
@@ -133,7 +142,7 @@ class RawMessageDeleteEvent(_RawReprMixin):
         .. versionadded:: 2.5
     """
 
-    __slots__ = ("message_id", "channel_id", "guild_id", "cached_message", "data")
+    __slots__ = ("cached_message", "channel_id", "data", "guild_id", "message_id")
 
     def __init__(self, data: MessageDeleteEvent) -> None:
         self.message_id: int = int(data["id"])
@@ -162,7 +171,7 @@ class RawBulkMessageDeleteEvent(_RawReprMixin):
         .. versionadded:: 2.5
     """
 
-    __slots__ = ("message_ids", "channel_id", "guild_id", "cached_messages", "data")
+    __slots__ = ("cached_messages", "channel_id", "data", "guild_id", "message_ids")
 
     def __init__(self, data: BulkMessageDeleteEvent) -> None:
         self.message_ids: set[int] = {int(x) for x in data.get("ids", [])}
@@ -200,7 +209,7 @@ class RawMessageUpdateEvent(_RawReprMixin):
         .. versionadded:: 2.7
     """
 
-    __slots__ = ("message_id", "channel_id", "guild_id", "data", "cached_message")
+    __slots__ = ("cached_message", "channel_id", "data", "guild_id", "message_id")
 
     def __init__(self, data: MessageUpdateEvent, new_message: Message) -> None:
         self.message_id: int = int(data["id"])
@@ -211,9 +220,8 @@ class RawMessageUpdateEvent(_RawReprMixin):
         self.guild_id: int | None = utils._get_as_snowflake(data, "guild_id")
 
 
-class RawReactionActionEvent(_RawReprMixin):
-    """Represents the payload for a :func:`on_raw_reaction_add` or
-    :func:`on_raw_reaction_remove` event.
+class RawReactionActionEvent(_RawReprMixin, AliasMixin):
+    """Represents the payload for a :func:`on_raw_reaction_add` event or a :func:`on_raw_reaction_remove` event.
 
     Attributes
     ----------
@@ -238,13 +246,16 @@ class RawReactionActionEvent(_RawReprMixin):
         ``REACTION_REMOVE`` for reaction removal.
 
         .. versionadded:: 1.3
+    message_author_id: Optional[:class:`int`]
+        The ID of the user who authored the message that was reacted to. Only
+        available if `event_type` is `REACTION_ADD`.
+
+        .. versionadded:: 3.0
     burst: :class:`bool`
         Whether this reaction is a burst (super) reaction.
     burst_colours: Optional[:class:`list`]
         A list of hex codes this reaction can be. Only available if `event_type` is `REACTION_ADD`
         and this emoji has super reactions available.
-    burst_colors: Optional[:class:`list`]
-        Alias for :attr:`burst_colours`.
     type: :class:`ReactionType`
         The type of reaction added.
     data: :class:`dict`
@@ -254,18 +265,18 @@ class RawReactionActionEvent(_RawReprMixin):
     """
 
     __slots__ = (
-        "message_id",
-        "user_id",
-        "channel_id",
-        "guild_id",
-        "emoji",
         "burst",
         "burst_colours",
-        "burst_colors",
-        "type",
-        "event_type",
-        "member",
+        "channel_id",
         "data",
+        "emoji",
+        "event_type",
+        "guild_id",
+        "member",
+        "message_author_id",
+        "message_id",
+        "type",
+        "user_id",
     )
 
     def __init__(
@@ -277,12 +288,17 @@ class RawReactionActionEvent(_RawReprMixin):
         self.emoji: PartialEmoji = emoji
         self.event_type: str = event_type
         self.member: Member | None = None
+        self.message_author_id: int | None = utils._get_as_snowflake(
+            data, "message_author_id"
+        )
         self.burst: bool = data.get("burst")
-        self.burst_colours: list = data.get("burst_colors", [])
-        self.burst_colors: list = self.burst_colours
+        self.burst_colours: list[str] = data.get("burst_colors", [])
         self.type: ReactionType = try_enum(ReactionType, data.get("type", 0))
         self.guild_id: int | None = utils._get_as_snowflake(data, "guild_id")
         self.data: ReactionActionEvent = data
+
+    if TYPE_CHECKING:
+        burst_colors: list[str]
 
 
 class RawReactionClearEvent(_RawReprMixin):
@@ -302,7 +318,7 @@ class RawReactionClearEvent(_RawReprMixin):
         .. versionadded:: 2.5
     """
 
-    __slots__ = ("message_id", "channel_id", "guild_id", "data")
+    __slots__ = ("channel_id", "data", "guild_id", "message_id")
 
     def __init__(self, data: ReactionClearEvent) -> None:
         self.message_id: int = int(data["message_id"])
@@ -311,7 +327,7 @@ class RawReactionClearEvent(_RawReprMixin):
         self.data: ReactionClearEvent = data
 
 
-class RawReactionClearEmojiEvent(_RawReprMixin):
+class RawReactionClearEmojiEvent(_RawReprMixin, AliasMixin):
     """Represents the payload for a :func:`on_raw_reaction_clear_emoji` event.
 
     .. versionadded:: 1.3
@@ -327,13 +343,14 @@ class RawReactionClearEmojiEvent(_RawReprMixin):
     emoji: :class:`PartialEmoji`
         The custom or unicode emoji being removed.
     burst: :class:`bool`
-        Whether this reaction was a burst (super) reaction.
+        Whether this reaction was a burst (super) reaction. Discord does not send
+        this field for this event, it is ``False`` unless the payload has it.
     burst_colours: :class:`list`
-        The available HEX codes of the removed super reaction.
-    burst_colors: Optional[:class:`list`]
-        Alias for :attr:`burst_colours`.
+        The available HEX codes of the removed super reaction. Discord does not send
+        this field for this event, it is empty unless the payload has it.
     type: :class:`ReactionType`
-        The type of reaction removed.
+        The type of reaction removed. Discord does not send this field for this
+        event, it is :attr:`ReactionType.normal` unless the payload has it.
     data: :class:`dict`
         The raw data sent by the `gateway <https://docs.discord.com/developers/events/gateway-events-events#message-reaction-remove-emoji>`__.
 
@@ -341,27 +358,29 @@ class RawReactionClearEmojiEvent(_RawReprMixin):
     """
 
     __slots__ = (
-        "message_id",
-        "channel_id",
-        "guild_id",
-        "emoji",
         "burst",
-        "data",
         "burst_colours",
-        "burst_colors",
+        "channel_id",
+        "data",
+        "emoji",
+        "guild_id",
+        "message_id",
         "type",
     )
 
     def __init__(self, data: ReactionClearEmojiEvent, emoji: PartialEmoji) -> None:
+        extra: Mapping[str, Any] = data
         self.emoji: PartialEmoji = emoji
         self.message_id: int = int(data["message_id"])
         self.channel_id: int = int(data["channel_id"])
-        self.burst: bool = data.get("burst")
-        self.burst_colours: list = data.get("burst_colors", [])
-        self.burst_colors: list = self.burst_colours
-        self.type: ReactionType = try_enum(ReactionType, data.get("type", 0))
+        self.burst: bool = bool(extra.get("burst", False))
+        self.burst_colours: list[str] = list(extra.get("burst_colors") or [])
+        self.type: ReactionType = try_enum(ReactionType, extra.get("type", 0))
         self.guild_id: int | None = utils._get_as_snowflake(data, "guild_id")
         self.data: ReactionClearEmojiEvent = data
+
+    if TYPE_CHECKING:
+        burst_colors: list[str]
 
 
 class RawIntegrationDeleteEvent(_RawReprMixin):
@@ -383,7 +402,7 @@ class RawIntegrationDeleteEvent(_RawReprMixin):
         .. versionadded:: 2.5
     """
 
-    __slots__ = ("integration_id", "application_id", "guild_id", "data")
+    __slots__ = ("application_id", "data", "guild_id", "integration_id")
 
     def __init__(self, data: IntegrationDeleteEvent) -> None:
         self.integration_id: int = int(data["id"])
@@ -415,7 +434,7 @@ class RawThreadUpdateEvent(_RawReprMixin):
         The thread, if it could be found in the internal cache.
     """
 
-    __slots__ = ("thread_id", "thread_type", "parent_id", "guild_id", "data", "thread")
+    __slots__ = ("data", "guild_id", "parent_id", "thread", "thread_id", "thread_type")
 
     def __init__(self, data: ThreadUpdateEvent) -> None:
         self.thread_id: int = int(data["id"])
@@ -433,7 +452,6 @@ class RawThreadDeleteEvent(_RawReprMixin):
 
     Attributes
     ----------
-
     thread_id: :class:`int`
         The ID of the thread that was deleted.
     thread_type: :class:`discord.ChannelType`
@@ -450,13 +468,13 @@ class RawThreadDeleteEvent(_RawReprMixin):
         .. versionadded:: 2.5
     """
 
-    __slots__ = ("thread_id", "thread_type", "guild_id", "parent_id", "thread", "data")
+    __slots__ = ("data", "guild_id", "parent_id", "thread", "thread_id", "thread_type")
 
     def __init__(self, data: ThreadDeleteEvent) -> None:
-        self.thread_id: int = int(data["id"])  # type: ignore
-        self.thread_type: ChannelType = try_enum(ChannelType, int(data["type"]))  # type: ignore
-        self.guild_id: int = int(data["guild_id"])  # type: ignore
-        self.parent_id: int = int(data["parent_id"])  # type: ignore
+        self.thread_id: int = int(data["id"])
+        self.thread_type: ChannelType = try_enum(ChannelType, int(data["type"]))
+        self.guild_id: int = int(data["guild_id"])
+        self.parent_id: int = int(data["parent_id"])
         self.thread: Thread | None = None
         self.data: ThreadDeleteEvent = data
 
@@ -478,13 +496,44 @@ class RawVoiceChannelStatusUpdateEvent(_RawReprMixin):
         The raw data sent by the `gateway <https://docs.discord.com/developers/events/gateway-events-events#voice-channel-status-update>`__.
     """
 
-    __slots__ = ("id", "guild_id", "status", "data")
+    __slots__ = ("data", "guild_id", "id", "status")
 
     def __init__(self, data: VoiceChannelStatusUpdateEvent) -> None:
         self.id: int = int(data["id"])
         self.guild_id: int = int(data["guild_id"])
         self.status: str | None = data.get("status")
         self.data: VoiceChannelStatusUpdateEvent = data
+
+
+class RawVoiceChannelStartTimeUpdateEvent(_RawReprMixin):
+    """Represents the payload for an :func:`on_raw_voice_channel_start_time_update` event.
+
+    .. versionadded:: 3.0
+
+    Attributes
+    ----------
+    id: :class:`int`
+        The channel ID where the voice channel start time update originated from.
+    guild_id: :class:`int`
+        The guild ID where the voice channel start time update originated from.
+    voice_start_time: Optional[:class:`datetime.datetime`]
+        The new voice channel start time, ``None`` if the voice session ended.
+    data: :class:`dict`
+        The raw data sent by the `gateway <https://docs.discord.com/developers/events/gateway-events#voice-channel-start-time-update>`__.
+    """
+
+    __slots__ = ("data", "guild_id", "id", "voice_start_time")
+
+    def __init__(self, data: VoiceChannelStartTimeUpdateEvent) -> None:
+        self.id: int = int(data["id"])
+        self.guild_id: int = int(data["guild_id"])
+        start_time = data.get("voice_start_time")
+        self.voice_start_time: dt.datetime | None = (
+            dt.datetime.fromtimestamp(start_time, tz=dt.timezone.utc)
+            if start_time
+            else None
+        )
+        self.data: VoiceChannelStartTimeUpdateEvent = data
 
 
 class RawTypingEvent(_RawReprMixin):
@@ -510,13 +559,13 @@ class RawTypingEvent(_RawReprMixin):
         .. versionadded:: 2.5
     """
 
-    __slots__ = ("channel_id", "user_id", "when", "guild_id", "member", "data")
+    __slots__ = ("channel_id", "data", "guild_id", "member", "user_id", "when")
 
     def __init__(self, data: TypingEvent) -> None:
         self.channel_id: int = int(data["channel_id"])
         self.user_id: int = int(data["user_id"])
-        self.when: datetime.datetime = datetime.datetime.fromtimestamp(
-            data.get("timestamp"), tz=datetime.timezone.utc
+        self.when: dt.datetime = dt.datetime.fromtimestamp(
+            data.get("timestamp"), tz=dt.timezone.utc
         )
         self.member: Member | None = None
         self.guild_id: int | None = utils._get_as_snowflake(data, "guild_id")
@@ -530,8 +579,9 @@ class RawMemberRemoveEvent(_RawReprMixin):
 
     Attributes
     ----------
-    user: :class:`discord.User`
-        The user that left the guild.
+    user: Union[:class:`discord.User`, :class:`discord.Member`]
+        The user that left the guild. This is the cached :class:`discord.Member`
+        when the member was cached.
     guild_id: :class:`int`
         The ID of the guild the user left.
     data: :class:`dict`
@@ -540,17 +590,16 @@ class RawMemberRemoveEvent(_RawReprMixin):
         .. versionadded:: 2.5
     """
 
-    __slots__ = ("user", "guild_id", "data")
+    __slots__ = ("data", "guild_id", "user")
 
-    def __init__(self, data: MemberRemoveEvent, user: User):
-        self.user: User = user
+    def __init__(self, data: MemberRemoveEvent, user: User) -> None:
+        self.user: User | Member = user
         self.guild_id: int = int(data["guild_id"])
         self.data: MemberRemoveEvent = data
 
 
 class RawScheduledEventSubscription(_RawReprMixin):
-    """Represents the payload for a :func:`raw_scheduled_event_user_add` or
-    :func:`raw_scheduled_event_user_remove` event.
+    """Represents the payload for a :func:`raw_scheduled_event_user_add` or :func:`raw_scheduled_event_user_remove` event.
 
     .. versionadded:: 2.0
 
@@ -571,11 +620,11 @@ class RawScheduledEventSubscription(_RawReprMixin):
         .. versionadded:: 2.5
     """
 
-    __slots__ = ("event_id", "guild", "user_id", "event_type", "data")
+    __slots__ = ("data", "event_id", "event_type", "guild", "user_id")
 
-    def __init__(self, data: ScheduledEventSubscription, event_type: str):
-        self.event_id: int = int(data["guild_scheduled_event_id"])  # type: ignore
-        self.user_id: int = int(data["user_id"])  # type: ignore
+    def __init__(self, data: ScheduledEventSubscription, event_type: str) -> None:
+        self.event_id: int = int(data["guild_scheduled_event_id"])
+        self.user_id: int = int(data["user_id"])
         self.guild: Guild | None = None
         self.event_type: str = event_type
         self.data: ScheduledEventSubscription = data
@@ -606,7 +655,7 @@ class AutoModActionExecutionEvent:
         The member that triggered the action, if cached.
     channel_id: Optional[:class:`int`]
         The ID of the channel in which the member's content was posted.
-    channel: Optional[Union[:class:`TextChannel`, :class:`Thread`, :class:`VoiceChannel`, :class:`StageChannel`]]
+    channel: Optional[Union[:class:`abc.GuildChannel`, :class:`Thread`]]
         The channel in which the member's content was posted, if cached.
     message_id: Optional[:class:`int`]
         The ID of the message that triggered the action. This is only available if the
@@ -621,7 +670,7 @@ class AutoModActionExecutionEvent:
         if cached.
     content: :class:`str`
         The content of the message that triggered the action.
-    matched_keyword: :class:`str`
+    matched_keyword: Optional[:class:`str`]
         The word or phrase configured that was matched in the content.
     matched_content: :class:`str`
         The substring in the content that was matched.
@@ -633,22 +682,22 @@ class AutoModActionExecutionEvent:
 
     __slots__ = (
         "action",
+        "alert_system_message",
+        "alert_system_message_id",
+        "channel",
+        "channel_id",
+        "content",
+        "data",
+        "guild",
+        "guild_id",
+        "matched_content",
+        "matched_keyword",
+        "member",
+        "message",
+        "message_id",
         "rule_id",
         "rule_trigger_type",
-        "guild_id",
-        "guild",
         "user_id",
-        "member",
-        "content",
-        "matched_keyword",
-        "matched_content",
-        "channel_id",
-        "channel",
-        "message_id",
-        "message",
-        "alert_system_message_id",
-        "alert_system_message",
-        "data",
     )
 
     def __init__(self, state: ConnectionState, data: AutoModActionExecution) -> None:
@@ -658,26 +707,20 @@ class AutoModActionExecutionEvent:
             AutoModTriggerType, int(data["rule_trigger_type"])
         )
         self.guild_id: int = int(data["guild_id"])
-        self.guild: Guild | None = state._get_guild(self.guild_id)
+        self.guild: Guild | None = None
         self.user_id: int = int(data["user_id"])
         self.content: str | None = data.get("content", None)
-        self.matched_keyword: str = data["matched_keyword"]  # type: ignore
+        self.matched_keyword: str | None = data.get("matched_keyword")
         self.matched_content: str | None = data.get("matched_content", None)
         self.channel_id: int | None = utils._get_as_snowflake(data, "channel_id")
-        self.channel: MessageableChannel | None = (
-            self.channel_id
-            and self.guild
-            and self.guild.get_channel_or_thread(self.channel_id)
-        )  # type: ignore
-        self.member: Member | None = self.guild and self.guild.get_member(self.user_id)
+        self.channel: GuildChannel | Thread | None = None
+        self.member: Member | None = None
         self.message_id: int | None = utils._get_as_snowflake(data, "message_id")
-        self.message: Message | None = state._get_message(self.message_id)
+        self.message: Message | None = None
         self.alert_system_message_id: int | None = utils._get_as_snowflake(
             data, "alert_system_message_id"
         )
-        self.alert_system_message: Message | None = state._get_message(
-            self.alert_system_message_id
-        )
+        self.alert_system_message: Message | None = None
         self.data: AutoModActionExecution = data
 
     def __repr__(self) -> str:
@@ -707,7 +750,7 @@ class RawThreadMembersUpdateEvent(_RawReprMixin):
         .. versionadded:: 2.5
     """
 
-    __slots__ = ("thread_id", "guild_id", "member_count", "data")
+    __slots__ = ("data", "guild_id", "member_count", "thread_id")
 
     def __init__(self, data: ThreadMembersUpdateEvent) -> None:
         self.thread_id = int(data["id"])
@@ -744,25 +787,28 @@ class RawAuditLogEntryEvent(_RawReprMixin):
         which actions have this field filled out.
     data: :class:`dict`
         The raw data sent by the `gateway <https://docs.discord.com/developers/events/gateway-events-events#guild-audit-log-entry-create>`__.
+    guild: :class:`Guild`
+        The guild this action came from. Set once the event is dispatched.
     """
 
+    guild: Guild
+
     __slots__ = (
-        "id",
-        "user_id",
-        "guild_id",
-        "target_id",
         "action_type",
-        "reason",
-        "extra",
         "changes",
         "data",
+        "extra",
+        "guild_id",
+        "id",
+        "reason",
+        "target_id",
+        "user_id",
     )
 
     def __init__(self, data: AuditLogEntryEvent) -> None:
         self.id = int(data["id"])
-        self.user_id = data.get("user_id")
-        if self.user_id:
-            self.user_id = int(self.user_id)
+        user_id = data.get("user_id")
+        self.user_id: int | None = int(user_id) if user_id else None
         self.guild_id = int(data["guild_id"])
         self.target_id = data.get("target_id")
         if self.target_id:
@@ -798,13 +844,13 @@ class RawMessagePollVoteEvent(_RawReprMixin):
     """
 
     __slots__ = (
-        "user_id",
-        "message_id",
+        "added",
         "answer_id",
         "channel_id",
-        "guild_id",
         "data",
-        "added",
+        "guild_id",
+        "message_id",
+        "user_id",
     )
 
     def __init__(self, data: MessagePollVoteEvent, added: bool) -> None:
@@ -820,7 +866,7 @@ class RawMessagePollVoteEvent(_RawReprMixin):
 # this is for backwards compatibility because VoiceProtocol.on_voice_..._update
 # passed the raw payload instead of a raw object. Emit deprecation warning.
 class _PayloadLike(_RawReprMixin):
-    _raw_data: dict[str, Any]
+    _raw_data: Mapping[str, Any]
 
     @deprecated(
         "__getitem__ is deprecated since version 2.7 and will be removed in version 3.0. Consider using the attributes instead.",
@@ -842,7 +888,7 @@ class _PayloadLike(_RawReprMixin):
     @deprecated(
         "items is deprecated since version 2.7 and will be removed in version 3.0. Consider using the attributes instead.",
     )
-    def items(self) -> ItemsView:
+    def items(self) -> ItemsView[str, Any]:
         """Returns the (key, value) pairs of this raw event.
 
         .. deprecated:: 2.7
@@ -853,7 +899,7 @@ class _PayloadLike(_RawReprMixin):
     @deprecated(
         "values is deprecated since version 2.7 and will be removed in version 3.0. Consider using the attributes instead.",
     )
-    def values(self) -> ValuesView:
+    def values(self) -> ValuesView[Any]:
         """Returns the values of this raw event.
 
         .. deprecated:: 2.7
@@ -864,7 +910,7 @@ class _PayloadLike(_RawReprMixin):
     @deprecated(
         "keys is deprecated since version 2.7 and will be removed in version 3.0. Consider using the attributes instead.",
     )
-    def keys(self) -> KeysView:
+    def keys(self) -> KeysView[str]:
         """Returns the keys of this raw event.
 
         .. deprecated:: 2.7
@@ -914,20 +960,20 @@ class RawVoiceStateUpdateEvent(_PayloadLike):
     """
 
     __slots__ = (
-        "session_id",
-        "mute",
+        "_raw_data",
+        "_state",
+        "afk",
+        "channel_id",
         "deaf",
-        "self_mute",
+        "guild_id",
+        "mute",
+        "requested_to_speak_at",
         "self_deaf",
+        "self_mute",
         "self_stream",
         "self_video",
+        "session_id",
         "suppress",
-        "requested_to_speak_at",
-        "afk",
-        "guild_id",
-        "channel_id",
-        "_state",
-        "_raw_data",
     )
 
     def __init__(self, *, data: VoiceStateEvent, state: ConnectionState) -> None:
@@ -936,25 +982,68 @@ class RawVoiceStateUpdateEvent(_PayloadLike):
 
         self.self_mute: bool = data.get("self_mute", False)
         self.self_deaf: bool = data.get("self_deaf", False)
+        self.self_stream: bool = data.get("self_stream", False)
+        self.self_video: bool = data.get("self_video", False)
         self.mute: bool = data.get("mute", False)
         self.deaf: bool = data.get("deaf", False)
         self.suppress: bool = data.get("suppress", False)
-        self.requested_to_speak_at: datetime.datetime | None = utils.parse_time(
+        self.requested_to_speak_at: dt.datetime | None = utils.parse_time(
             data.get("request_to_speak_timestamp")
         )
         self.guild_id: int | None = utils._get_as_snowflake(data, "guild_id")
         self.channel_id: int | None = utils._get_as_snowflake(data, "channel_id")
-        self._raw_data: VoiceStateEvent = data
+        self.afk: bool = False
+        self._raw_data = data
 
     @property
-    def guild(self) -> Guild | None:
-        """Returns the guild channel the user is connected to, or ``None``."""
-        return self._state._get_guild(self.guild_id)
+    def guild(self) -> Guild | PartialGuild | None:
+        """Returns the guild the user is connected to, or ``None``.
+
+        This is the cached guild when it is available in an in-process cache,
+        otherwise a :class:`PartialGuild` handle.
+        Use :meth:`get_guild` to look the cached guild up with any cache backend.
+        """
+        from .guild import PartialGuild
+
+        if self.guild_id is None:
+            return None
+        return cached_guild(self._state, self.guild_id) or PartialGuild(
+            state=self._state, id=self.guild_id
+        )
 
     @property
-    def channel(self) -> GuildChannel | None:
-        """Returns the channel the user is connected to, or ``None``."""
-        return self._state.get_channel(self.channel_id)  # type: ignore
+    def channel(self) -> GuildChannel | Thread | PartialGuildChannel | None:
+        """Returns the channel the user is connected to, or ``None``.
+
+        This is the cached channel when it is available in an in-process cache,
+        otherwise a :class:`PartialGuildChannel` handle.
+        Use :meth:`get_channel` to look the cached channel up with any cache backend.
+        """
+        from .channel import PartialGuildChannel
+
+        if self.guild_id is None or self.channel_id is None:
+            return None
+        return cached_guild_channel(
+            self._state, self.guild_id, self.channel_id
+        ) or PartialGuildChannel(
+            state=self._state, id=self.channel_id, guild_id=self.guild_id
+        )
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the cached guild the user is connected to, or ``None``.
+        """
+        return await self._state._get_guild(self.guild_id)
+
+    async def get_channel(self) -> GuildChannel | None:
+        """|coro|
+
+        Returns the cached channel the user is connected to, or ``None``.
+        """
+        return cast(
+            "GuildChannel | None", await self._state.get_channel(self.channel_id)
+        )
 
 
 class RawVoiceServerUpdateEvent(_PayloadLike):
@@ -973,11 +1062,11 @@ class RawVoiceServerUpdateEvent(_PayloadLike):
     """
 
     __slots__ = (
-        "token",
-        "guild_id",
-        "endpoint",
         "_raw_data",
         "_state",
+        "endpoint",
+        "guild_id",
+        "token",
     )
 
     def __init__(self, *, data: VoiceServerUpdateEvent, state: ConnectionState) -> None:
@@ -985,12 +1074,28 @@ class RawVoiceServerUpdateEvent(_PayloadLike):
         self.guild_id: int = int(data["guild_id"])
         self.token: str = data["token"]
         self.endpoint: str | None = data["endpoint"]
-        self._raw_data: VoiceServerUpdateEvent = data
+        self._raw_data = data
 
     @property
-    def guild(self) -> Guild | None:
-        """Returns the guild this server update is from."""
-        return self._state._get_guild(self.guild_id)
+    def guild(self) -> Guild | PartialGuild:
+        """Returns the guild this server update is from.
+
+        This is the cached guild when it is available in an in-process cache,
+        otherwise a :class:`PartialGuild` handle.
+        Use :meth:`get_guild` to look the cached guild up with any cache backend.
+        """
+        from .guild import PartialGuild
+
+        return cached_guild(self._state, self.guild_id) or PartialGuild(
+            state=self._state, id=self.guild_id
+        )
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the cached guild this server update is from.
+        """
+        return await self._state._get_guild(self.guild_id)
 
 
 class RawSoundboardSoundDeleteEvent(_RawReprMixin):
@@ -999,12 +1104,12 @@ class RawSoundboardSoundDeleteEvent(_RawReprMixin):
     .. versionadded 2.7
     """
 
-    __slots__ = ("sound_id", "guild_id", "data")
+    __slots__ = ("data", "guild_id", "sound_id")
 
-    def __init__(self, data: PartialSoundboardSound) -> None:
+    def __init__(self, data: SoundboardSoundDeleteEvent) -> None:
         self.sound_id: int = int(data["sound_id"])
         self.guild_id: int = int(data["guild_id"])
-        self.data: PartialSoundboardSound = data
+        self.data: SoundboardSoundDeleteEvent = data
 
 
 class RawMemberUpdateEvent(_RawReprMixin):
@@ -1022,7 +1127,7 @@ class RawMemberUpdateEvent(_RawReprMixin):
         The new member object after the update.
     """
 
-    __slots__ = ("guild_id", "user_id", "data", "cached_member", "member")
+    __slots__ = ("cached_member", "data", "guild_id", "member", "user_id")
 
     def __init__(self, data: MemberUpdateEvent, member: Member) -> None:
         self.guild_id: int = int(data["guild_id"])
@@ -1030,3 +1135,59 @@ class RawMemberUpdateEvent(_RawReprMixin):
         self.data: MemberUpdateEvent = data
         self.cached_member: Member | None = None
         self.member: Member = member
+
+
+class GatewayRateLimit(_RawReprMixin):
+    """Represents the payload for a :func:`on_gateway_rate_limited` event.
+
+    .. versionadded:: 3.0
+
+    Attributes
+    ----------
+    opcode: :class:`int`
+        The gateway opcode that was rate limited.
+    retry_after: :class:`float`
+        The number of seconds to wait before sending the request again.
+    meta: :class:`dict`
+        The metadata of the rate limited request. For opcode ``8`` (Request Guild
+        Members) it holds ``guild_id`` and optionally ``nonce``.
+    guild_id: Optional[:class:`int`]
+        The guild the rate limited request was about, if the metadata has one.
+    nonce: Optional[:class:`str`]
+        The nonce of the rate limited request, if the metadata has one.
+    data: :class:`dict`
+        The raw data sent by the `gateway <https://docs.discord.com/developers/events/gateway-events#rate-limited>`_
+    """
+
+    __slots__ = ("data", "guild_id", "meta", "nonce", "opcode", "retry_after")
+
+    def __init__(self, data: GatewayRateLimitPayload) -> None:
+        self.opcode: int = int(data["opcode"])
+        self.retry_after: float = float(data["retry_after"])
+        self.meta: dict[str, Any] = data.get("meta") or {}
+        self.guild_id: int | None = utils._get_as_snowflake(self.meta, "guild_id")
+        self.nonce: str | None = self.meta.get("nonce")
+        self.data: GatewayRateLimitPayload = data
+
+
+class ChannelInfo(_RawReprMixin):
+    """Represents the ephemeral data of a channel sent by the gateway in response to a request for channel info.
+
+    .. versionadded:: 3.0
+
+    Attributes
+    ----------
+    id: :class:`int`
+        The ID of the channel this info belongs to.
+    status: Optional[:class:`str`]
+        The voice channel status.
+    voice_start_time: Optional[:class:`int`]
+        The Unix timestamp (in seconds) of when the voice session started.
+    """
+
+    __slots__ = ("id", "status", "voice_start_time")
+
+    def __init__(self, data: ChannelInfoChannel) -> None:
+        self.id: int = int(data["id"])
+        self.status: str | None = data.get("status")
+        self.voice_start_time: int | None = data.get("voice_start_time")

@@ -22,10 +22,13 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 import io
 import subprocess
+from typing import Any
 
-from .core import CREATE_NO_WINDOW, Filters, Sink, default_filters
+from .core import CREATE_NO_WINDOW, AudioData, Filters, Sink, default_filters
 from .errors import OGGSinkError
 
 
@@ -33,19 +36,24 @@ class OGGSink(Sink):
     """A special sink for .ogg files.
 
     .. versionadded:: 2.0
+
+    Parameters
+    ----------
+    filters: dict[:class:`str`, Any] | None
+        The filters of the sink, see :class:`~discord.sinks.Filters`.
     """
 
-    def __init__(self, *, filters=None):
+    def __init__(self, *, filters: dict[str, Any] | None = None) -> None:
         if filters is None:
             filters = default_filters
         self.filters = filters
         Filters.__init__(self, **self.filters)
 
-        self.encoding = "ogg"
+        self.encoding: str = "ogg"
         self.vc = None
         self.audio_data = {}
 
-    def format_audio(self, audio):
+    def format_audio(self, audio: AudioData) -> None:
         """Formats the recorded audio.
 
         Raises
@@ -55,7 +63,7 @@ class OGGSink(Sink):
         OGGSinkError
             Formatting the audio failed.
         """
-        if self.vc.recording:
+        if self.recording:
             raise OGGSinkError(
                 "Audio may only be formatted after recording is finished."
             )
@@ -86,7 +94,7 @@ class OGGSink(Sink):
             raise OGGSinkError("ffmpeg was not found.") from None
         except subprocess.SubprocessError as exc:
             raise OGGSinkError(
-                "Popen failed: {0.__class__.__name__}: {0}".format(exc)
+                f"Popen failed: {exc.__class__.__name__}: {exc}"
             ) from exc
 
         out = process.communicate(audio.file.read())[0]

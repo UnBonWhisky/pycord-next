@@ -25,46 +25,46 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 if TYPE_CHECKING:
     from aiohttp import ClientResponse, ClientWebSocketResponse
+    from requests import Response
 
-    try:
-        from requests import Response
-
-        _ResponseType = Union[ClientResponse, Response]
-    except ModuleNotFoundError:
-        _ResponseType = ClientResponse
-
+    from .http.route import Route
     from .interactions import Interaction
 
+    _ResponseType: TypeAlias = ClientResponse | Response
+
 __all__ = (
-    "DiscordException",
+    "ApplicationCommandError",
+    "ApplicationCommandInvokeError",
+    "CheckFailure",
     "ClientException",
-    "NoMoreItems",
-    "GatewayNotFound",
-    "ValidationError",
-    "HTTPException",
-    "Forbidden",
-    "NotFound",
-    "DiscordServerError",
-    "InvalidData",
-    "InvalidArgument",
-    "LoginFailure",
     "ConnectionClosed",
-    "PrivilegedIntentsRequired",
-    "InteractionResponded",
-    "ExtensionError",
+    "DiscordException",
+    "DiscordServerError",
     "ExtensionAlreadyLoaded",
-    "ExtensionNotLoaded",
-    "NoEntryPointError",
+    "ExtensionError",
     "ExtensionFailed",
     "ExtensionNotFound",
-    "ApplicationCommandError",
-    "CheckFailure",
-    "ApplicationCommandInvokeError",
+    "ExtensionNotLoaded",
+    "Forbidden",
+    "GatewayNotFound",
+    "GatewayRateLimited",
+    "HTTPException",
+    "InteractionResponded",
+    "InvalidArgument",
+    "InvalidData",
+    "LoginFailure",
     "MissingVoiceDependenciesError",
+    "NoEntryPointError",
+    "NoMoreItems",
+    "NotFound",
+    "PrivilegedIntentsRequired",
+    "RateLimited",
+    "SyncCacheAccessError",
+    "ValidationError",
 )
 
 
@@ -82,6 +82,18 @@ class ClientException(DiscordException):
     """
 
 
+class SyncCacheAccessError(ClientException):
+    """Raised when a synchronous cache accessor is used with a remote cache backend.
+
+    Synchronous properties and methods that read the cache (for example
+    :attr:`Client.guilds` or :attr:`Guild.members`) only work with the default
+    in-process cache. With a remote backend (Redis, Memcached...) use the
+    asynchronous getter named in the message instead.
+
+    .. versionadded:: 3.0
+    """
+
+
 class NoMoreItems(DiscordException):
     """Exception that is raised when an async iteration operation has no more items."""
 
@@ -89,7 +101,7 @@ class NoMoreItems(DiscordException):
 class GatewayNotFound(DiscordException):
     """An exception that is raised when the gateway for Discord could not be found"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         message = "The gateway to connect to discord was not found."
         super().__init__(message)
 
@@ -104,10 +116,11 @@ def _flatten_error_dict(d: dict[str, Any], key: str = "") -> dict[str, str]:
         new_key = f"{key}.{k}" if key else k
 
         if isinstance(v, dict):
+            nested = cast("dict[str, Any]", v)
             try:
-                _errors: list[dict[str, Any]] = v["_errors"]
+                _errors: list[dict[str, Any]] = nested["_errors"]
             except KeyError:
-                items.extend(_flatten_error_dict(v, new_key).items())
+                items.extend(_flatten_error_dict(nested, new_key).items())
             else:
                 items.append((new_key, " ".join(x.get("message", "") for x in _errors)))
         else:
@@ -134,9 +147,11 @@ class HTTPException(DiscordException):
         The Discord specific error code for the failure.
     """
 
-    def __init__(self, response: _ResponseType, message: str | dict[str, Any] | None):
+    def __init__(
+        self, response: _ResponseType, message: str | dict[str, Any] | None
+    ) -> None:
         self.response: _ResponseType = response
-        self.status: int = response.status  # type: ignore
+        self.status: int = cast("Any", response).status
         self.code: int
         self.text: str
         if isinstance(message, dict):
@@ -145,7 +160,7 @@ class HTTPException(DiscordException):
             errors = message.get("errors")
             if errors:
                 errors = _flatten_error_dict(errors)
-                helpful = "\n".join("In %s: %s" % t for t in errors.items())
+                helpful = "\n".join(f"In {k}: {v}" for k, v in errors.items())
                 self.text = f"{base}\n{helpful}"
             else:
                 self.text = base
@@ -183,15 +198,72 @@ class DiscordServerError(HTTPException):
     """
 
 
-class InvalidData(ClientException):
-    """Exception that's raised when the library encounters unknown
-    or invalid data from Discord.
+class RateLimited(DiscordException):
+    """Exception that's raised when a rate limit would make a request wait longer than the ``max_ratelimit_timeout`` of the :class:`Client`.
+
+    The request is not sent (or not retried) when this is raised.
+
+    Attributes
+    ----------
+    retry_after: :class:`float`
+        The number of seconds the request would have had to wait.
+    route: :class:`discord.http.Route`
+        The route of the rate limited request.
+    is_global: :class:`bool`
+        Whether the rate limit is global.
     """
+
+    def __init__(
+        self, retry_after: float, route: Route, *, is_global: bool = False
+    ) -> None:
+        self.retry_after: float = retry_after
+        self.route: Route = route
+        self.is_global: bool = is_global
+        scope = "global rate limit" if is_global else "rate limit"
+        super().__init__(
+            f"{route.method} {route.path} is hitting a {scope}, retry in"
+            f" {retry_after:.2f} seconds."
+        )
+
+
+class GatewayRateLimited(DiscordException):
+    """Exception that's raised when Discord rate limits a gateway request.
+
+    This fails the pending operation of the limited request, for example
+    :meth:`Guild.query_members` and :meth:`Guild.chunk` when Discord answers a
+    Request Guild Members with a ``RATE_LIMITED`` event.
+
+    .. versionadded:: 3.0
+
+    Attributes
+    ----------
+    opcode: :class:`int`
+        The gateway opcode that was rate limited.
+    retry_after: :class:`float`
+        The number of seconds to wait before sending the request again.
+    meta: :class:`dict`
+        The metadata of the rate limited request, for opcode ``8`` it holds
+        ``guild_id`` and optionally ``nonce``.
+    """
+
+    def __init__(
+        self, opcode: int, retry_after: float, meta: dict[str, Any] | None = None
+    ) -> None:
+        self.opcode: int = opcode
+        self.retry_after: float = retry_after
+        self.meta: dict[str, Any] = {} if meta is None else meta
+        super().__init__(
+            f"Gateway opcode {opcode} is rate limited, retry in"
+            f" {retry_after:.2f} seconds."
+        )
+
+
+class InvalidData(ClientException):
+    """Exception that's raised when the library encounters unknown or invalid data from Discord."""
 
 
 class InvalidArgument(ClientException):
-    """Exception that's raised when an argument to a function
-    is invalid some way (e.g. wrong value or wrong type).
+    """Exception that's raised when an argument to a function is invalid some way (e.g. wrong value or wrong type).
 
     This could be considered the parallel of ``ValueError`` and
     ``TypeError`` except inherited from :exc:`ClientException` and thus
@@ -200,15 +272,11 @@ class InvalidArgument(ClientException):
 
 
 class LoginFailure(ClientException):
-    """Exception that's raised when the :meth:`Client.login` function
-    fails to log you in from improper credentials or some other misc.
-    failure.
-    """
+    """Exception that's raised when the :meth:`Client.login` function fails to log you in from improper credentials or some other misc. failure."""
 
 
 class ConnectionClosed(ClientException):
-    """Exception that's raised when the gateway connection is
-    closed for reasons that could not be handled internally.
+    """Exception that's raised when the gateway connection is closed for reasons that could not be handled internally.
 
     Attributes
     ----------
@@ -226,7 +294,7 @@ class ConnectionClosed(ClientException):
         *,
         shard_id: int | None,
         code: int | None = None,
-    ):
+    ) -> None:
         # This exception is just the same exception except
         # reconfigured to subclass ClientException for users
         self.code: int = code or socket.close_code or -1
@@ -237,8 +305,7 @@ class ConnectionClosed(ClientException):
 
 
 class PrivilegedIntentsRequired(ClientException):
-    """Exception that's raised when the gateway is requesting privileged intents, but
-    they're not ticked in the developer page yet.
+    """Exception that's raised when the gateway is requesting privileged intents, but they're not ticked in the developer page yet.
 
     Go to https://discord.com/developers/applications/ and enable the intents
     that are required. Currently, these are as follows:
@@ -253,7 +320,7 @@ class PrivilegedIntentsRequired(ClientException):
         The shard ID that got closed if applicable.
     """
 
-    def __init__(self, shard_id: int | None):
+    def __init__(self, shard_id: int | None) -> None:
         self.shard_id: int | None = shard_id
         msg = (
             "Shard ID %s is requesting privileged intents that have not been explicitly"
@@ -266,8 +333,7 @@ class PrivilegedIntentsRequired(ClientException):
 
 
 class InteractionResponded(ClientException):
-    """Exception that's raised when sending another interaction response using
-    :class:`InteractionResponse` when one has already been done before.
+    """Exception that's raised when sending another interaction response using :class:`InteractionResponse` when one has already been done before.
 
     An interaction can only respond once.
 
@@ -279,7 +345,7 @@ class InteractionResponded(ClientException):
         The interaction that's already been responded to.
     """
 
-    def __init__(self, interaction: Interaction):
+    def __init__(self, interaction: Interaction) -> None:
         self.interaction: Interaction = interaction
         super().__init__("This interaction has already been responded to before")
 
@@ -420,7 +486,8 @@ class MissingVoiceDependenciesError(RuntimeError, DiscordException):
     .. note::
         This exception inherits from both :exc:`RuntimeError` and :exc:`DiscordException`.
 
-    Attributes:
+    Attributes
+    ----------
         missing: tuple[str, ...]
             The missing dependencies that are required for voice support.
     """

@@ -25,18 +25,22 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, Any, cast, overload
 
-from .partial_emoji import _EmojiTag
-from .utils import _get_as_snowflake, get
+from ._internal.cache_peek import cached_emoji
+from .object import Object
+from .partial_emoji import PartialEmoji, _EmojiTag
+from .utils import _get_as_snowflake
 
 if TYPE_CHECKING:
-    from .abc import Snowflake
-    from .emoji import GuildEmoji
-    from .guild import Guild
-    from .partial_emoji import PartialEmoji
-    from .types.welcome_screen import WelcomeScreen as WelcomeScreenPayload
+    from typing_extensions import Self
+
+    from .abc import GuildChannel, Snowflake
+    from .emoji import AppEmoji, GuildEmoji
+    from .guild import Guild, PartialGuild
+    from .state import ConnectionState
     from .types.welcome_screen import (
+        WelcomeScreen as WelcomeScreenPayload,
         WelcomeScreenChannel as WelcomeScreenChannelPayload,
     )
 
@@ -53,7 +57,6 @@ class WelcomeScreenChannel:
 
     Attributes
     ----------
-
     channel: :class:`abc.Snowflake`
         The channel that is being referenced.
     description: :class:`str`
@@ -66,46 +69,132 @@ class WelcomeScreenChannel:
         self,
         channel: Snowflake,
         description: str,
-        emoji: GuildEmoji | PartialEmoji | str,
-    ):
-        self.channel = channel
+        emoji: GuildEmoji | AppEmoji | PartialEmoji | str | None,
+    ) -> None:
+        self._channel = channel
         self.description = description
-        self.emoji = emoji
+        self._emoji = emoji
+        self._state: ConnectionState | None = None
+        self._guild_id: int | None = None
 
-    def __repr__(self):
+    @property
+    def channel(self) -> Snowflake:
+        """The channel that is being referenced.
+
+        This is the cached :class:`~discord.abc.GuildChannel` when it is in the
+        in-process cache, otherwise the :class:`Object` (or the snowflake) the
+        object was built with. Use :meth:`get_channel` with any cache backend.
+        """
+        state, guild_id = self._state, self._guild_id
+        if state is None or guild_id is None or not state.cache.supports_sync:
+            return self._channel
+        return (
+            state._guild_bucket("channels", guild_id).get_nowait(self._channel.id)
+            or self._channel
+        )
+
+    @channel.setter
+    def channel(self, value: Snowflake) -> None:
+        self._channel = value
+
+    @property
+    def emoji(self) -> GuildEmoji | AppEmoji | PartialEmoji | str | None:
+        """The emoji of the channel that is shown on welcome screen.
+
+        A custom emoji that is in the in-process cache is the cached
+        :class:`GuildEmoji`, otherwise it is the :class:`PartialEmoji`.
+        Use :meth:`get_emoji` with any cache backend.
+        """
+        emoji = self._emoji
+        emoji_id = getattr(emoji, "id", None)
+        if self._state is None or not emoji_id:
+            return emoji
+        return cached_emoji(self._state, emoji_id) or emoji
+
+    @emoji.setter
+    def emoji(self, value: GuildEmoji | AppEmoji | PartialEmoji | str | None) -> None:
+        self._emoji = value
+
+    def __repr__(self) -> str:
         return f"WelcomeScreenChannel(channel={self.channel} description={self.description})"
 
     def to_dict(self) -> WelcomeScreenChannelPayload:
+        """Convert this object to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The payload.
+        """
         dict_: WelcomeScreenChannelPayload = {
-            "channel_id": self.channel.id,
+            "channel_id": self._channel.id,
             "description": self.description,
             "emoji_id": None,
             "emoji_name": None,
         }
 
-        if isinstance(self.emoji, _EmojiTag):
+        if isinstance(self._emoji, _EmojiTag):
             # custom guild emoji
-            dict_["emoji_id"] = self.emoji.id  # type: ignore
-            dict_["emoji_name"] = self.emoji.name  # type: ignore
+            dict_["emoji_id"] = self._emoji.id
+            dict_["emoji_name"] = self._emoji.name
         else:
             # unicode emoji or None
-            dict_["emoji_name"] = self.emoji
-            dict_["emoji_id"] = None  # type: ignore
+            dict_["emoji_name"] = self._emoji
+            dict_["emoji_id"] = None
 
         return dict_
 
+    async def get_channel(self) -> GuildChannel | Snowflake:
+        """|coro|
+
+        Returns the channel that is being referenced.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Union[:class:`~discord.abc.GuildChannel`, :class:`Snowflake`]
+            The cached channel, or :attr:`channel` if it is not cached.
+        """
+        if self._state is None or self._guild_id is None:
+            return self._channel
+        channels = self._state._guild_bucket("channels", self._guild_id)
+        return await channels.get(self._channel.id) or self._channel
+
+    async def get_emoji(self) -> GuildEmoji | AppEmoji | PartialEmoji | str | None:
+        """|coro|
+
+        Returns the emoji of the channel that is shown on welcome screen.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Union[:class:`GuildEmoji`, :class:`PartialEmoji`, :class:`str`]
+            The cached emoji if there is one, else :attr:`emoji`.
+        """
+        emoji_id = getattr(self._emoji, "id", None)
+        if self._state is None or not emoji_id:
+            return self._emoji
+        return await self._state.get_emoji(emoji_id) or self._emoji
+
     @classmethod
     def _from_dict(
-        cls, data: WelcomeScreenChannelPayload, guild: Guild
+        cls, data: WelcomeScreenChannelPayload, guild: Guild | PartialGuild
     ) -> WelcomeScreenChannel:
         channel_id = _get_as_snowflake(data, "channel_id")
-        channel = guild.get_channel(channel_id)
+        channel = Object(cast("int", channel_id))
         description = data.get("description")
         _emoji_id = _get_as_snowflake(data, "emoji_id")
         _emoji_name = data.get("emoji_name")
 
-        emoji = get(guild.emojis, id=_emoji_id) if _emoji_id else _emoji_name
-        return cls(channel=channel, description=description, emoji=emoji)  # type: ignore
+        emoji = (
+            PartialEmoji(name=_emoji_name, id=_emoji_id) if _emoji_id else _emoji_name
+        )
+        welcome_channel = cls(channel=channel, description=description, emoji=emoji)
+        welcome_channel._state = guild._state
+        welcome_channel._guild_id = guild.id
+        return welcome_channel
 
 
 class WelcomeScreen:
@@ -115,24 +204,23 @@ class WelcomeScreen:
 
     Attributes
     ----------
-
     description: :class:`str`
         The description text displayed on the welcome screen.
     welcome_channels: List[:class:`WelcomeScreenChannel`]
         A list of channels displayed on welcome screen.
     """
 
-    def __init__(self, data: WelcomeScreenPayload, guild: Guild):
+    def __init__(self, data: WelcomeScreenPayload, guild: Guild | PartialGuild) -> None:
         self._guild = guild
         self._update(data)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             "<WelcomeScreen"
             f" description={self.description} welcome_channels={self.welcome_channels}"
         )
 
-    def _update(self, data: WelcomeScreenPayload):
+    def _update(self, data: WelcomeScreenPayload) -> None:
         self.description: str = data.get("description")
         self.welcome_channels: list[WelcomeScreenChannel] = [
             WelcomeScreenChannel._from_dict(channel, self._guild)
@@ -141,13 +229,54 @@ class WelcomeScreen:
 
     @property
     def enabled(self) -> bool:
-        """Indicates whether the welcome screen is enabled or not."""
-        return "WELCOME_SCREEN_ENABLED" in self._guild.features
+        """Indicates whether the welcome screen is enabled or not.
+
+        This reads the in-memory cache, use :meth:`get_enabled` with any cache backend.
+        """
+        guild = self.guild
+        return guild is not None and "WELCOME_SCREEN_ENABLED" in guild.features
+
+    async def get_enabled(self) -> bool:
+        """|coro|
+
+        Indicates whether the welcome screen is enabled or not.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        :class:`bool`
+            Whether the welcome screen is enabled. ``False`` if the guild is not
+            cached.
+        """
+        guild = await self.get_guild()
+        return guild is not None and "WELCOME_SCREEN_ENABLED" in guild.features
 
     @property
-    def guild(self) -> Guild:
-        """The guild this welcome screen belongs to."""
-        return self._guild
+    def guild(self) -> Guild | None:
+        """The guild this welcome screen belongs to.
+
+        This reads the in-memory cache, use :meth:`get_guild` with any cache backend.
+        """
+        if hasattr(self._guild, "features"):
+            return cast("Guild", self._guild)
+        return self._guild._state._guilds.get_nowait(self._guild.id)
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the guild this welcome screen belongs to.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Optional[:class:`Guild`]
+            The guild, or ``None`` if it is not cached.
+        """
+        if hasattr(self._guild, "features"):
+            return cast("Guild", self._guild)
+        return await self._guild._state._get_guild(self._guild.id)
 
     @overload
     async def edit(
@@ -157,12 +286,12 @@ class WelcomeScreen:
         welcome_channels: list[WelcomeScreenChannel] | None = ...,
         enabled: bool | None = ...,
         reason: str | None = ...,
-    ) -> None: ...
+    ) -> Self: ...
 
     @overload
-    async def edit(self) -> None: ...
+    async def edit(self) -> Self: ...
 
-    async def edit(self, **options):
+    async def edit(self, **options: Any) -> Self:
         """|coro|
 
         Edits the welcome screen.
@@ -172,7 +301,6 @@ class WelcomeScreen:
 
         Parameters
         ----------
-
         description: Optional[:class:`str`]
             The new description of welcome screen.
         welcome_channels: Optional[List[:class:`WelcomeScreenChannel`]]
@@ -184,7 +312,6 @@ class WelcomeScreen:
 
         Raises
         ------
-
         HTTPException
             Editing the welcome screen failed somehow.
         Forbidden
@@ -196,24 +323,30 @@ class WelcomeScreen:
         -------
         .. code-block:: python3
 
-            rules_channel = guild.get_channel(12345678)
-            announcements_channel = guild.get_channel(87654321)
-            custom_emoji = utils.get(guild.emojis, name='loudspeaker')
+            rules_channel = await guild.get_channel(12345678)
+            announcements_channel = await guild.get_channel(87654321)
+            custom_emoji = utils.get(await guild.get_emojis(), name="loudspeaker")
             await welcome_screen.edit(
-                description='This is a very cool community server!',
+                description="This is a very cool community server!",
                 welcome_channels=[
-                    WelcomeChannel(channel=rules_channel, description='Read the rules!', emoji='👨‍🏫'),
-                    WelcomeChannel(channel=announcements_channel, description='Watch out for announcements!',
-                                   emoji=custom_emoji),
-                ]
+                    WelcomeChannel(
+                        channel=rules_channel,
+                        description="Read the rules!",
+                        emoji="👨‍🏫",
+                    ),
+                    WelcomeChannel(
+                        channel=announcements_channel,
+                        description="Watch out for announcements!",
+                        emoji=custom_emoji,
+                    ),
+                ],
             )
 
         .. note::
             Welcome channels can only accept custom emojis if :attr:`~Guild.premium_tier` is level 2 or above.
         """
-
-        welcome_channels = options.get("welcome_channels", [])
-        welcome_channels_data = []
+        welcome_channels: list[Any] = options.get("welcome_channels", [])
+        welcome_channels_data: list[WelcomeScreenChannelPayload] = []
 
         for channel in welcome_channels:
             if not isinstance(channel, WelcomeScreenChannel):

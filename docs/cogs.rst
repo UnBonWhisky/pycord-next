@@ -95,3 +95,47 @@ Just as we remove a cog by its name, we can also retrieve it by its name as well
                 await economy.withdraw_money(ctx.author, money)
                 if self.coinflip() == 1:
                     await economy.deposit_money(ctx.author, money * 1.5)
+
+Slash command groups across cogs
+--------------------------------
+
+Several cogs can add commands to the same :class:`SlashCommandGroup`. Create the group once, in a module
+the cogs share, and use its decorators in each cog. The bot keeps one canonical group for a name and a set of
+guilds (two groups with the same name and guilds are merged) and sends a single payload to Discord.
+
+.. code-block:: python3
+
+    admin = discord.SlashCommandGroup("admin", "Admin commands")
+
+    class Moderation(discord.Cog):
+        @admin.command()                        # /admin ban, `self` is the Moderation cog
+        async def ban(self, ctx, member: discord.Member): ...
+
+    class Settings(discord.Cog):
+        config = admin.create_subgroup("config")   # /admin config, owned by Settings
+
+        @config.command()                       # /admin config prefix
+        async def prefix(self, ctx, value: str): ...
+
+- Each subcommand is bound to the cog that declares it, so ``self`` is that cog and its ``cog_before_invoke``,
+  ``cog_after_invoke`` and ``cog_command_error`` apply to it.
+- Cogs load and unload in any order. Unloading a cog removes only the commands it declared, and the group is
+  unregistered when nothing is left in it. A duplicate subcommand name raises :exc:`ClientException` naming
+  both cogs.
+- Loading or unloading a cog on a ready bot syncs the commands once, when ``auto_sync_commands`` is enabled.
+- :class:`discord.ext.bridge.BridgeCommandGroup` works the same way.
+
+A cog can also **own** the group by keeping it as a class attribute (``owned_admin = admin``). Its ``cog_check``,
+hooks and error handler then apply to every command of the group, in this order for a subcommand:
+
+1. the ``cog_check`` of the cog that owns the group;
+2. the group checks, then the subgroup checks;
+3. the ``cog_check`` of the cog that owns the subcommand, then the checks of the subcommand.
+
+For hooks, the owner's ``cog_before_invoke`` runs first, then the one of the subcommand's cog, the command,
+the subcommand cog's ``cog_after_invoke`` and the owner's ``cog_after_invoke`` last. A cog that owns both the
+group and the command runs its hooks once. Errors go to the ``cog_command_error`` of the subcommand's cog
+first, then to the owner's if they were not handled.
+
+See ``examples/app_commands/slash_multi_cog_groups.py`` for a complete example and
+``examples/app_commands/slash_cog_groups.py`` for a group inside a single cog.

@@ -25,7 +25,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from . import utils
 from .asset import Asset
@@ -36,18 +36,21 @@ from .permissions import Permissions
 if TYPE_CHECKING:
     from .guild import Guild
     from .state import ConnectionState
-    from .types.appinfo import AppInfo as AppInfoPayload
-    from .types.appinfo import AppInstallParams as AppInstallParamsPayload
-    from .types.appinfo import PartialAppInfo as PartialAppInfoPayload
-    from .types.appinfo import Team as TeamPayload
+    from .types.appinfo import (
+        AppInfo as AppInfoPayload,
+        AppInstallParams as AppInstallParamsPayload,
+        PartialAppInfo as PartialAppInfoPayload,
+        Team as TeamPayload,
+    )
+    from .types.user import User as UserPayload
     from .user import User
 
 __all__ = (
     "AppInfo",
-    "PartialAppInfo",
     "AppInstallParams",
-    "IntegrationTypesConfig",
     "ApplicationEventWebhookStatus",
+    "IntegrationTypesConfig",
+    "PartialAppInfo",
 )
 
 
@@ -187,42 +190,42 @@ class AppInfo:
     """
 
     __slots__ = (
+        "_cover_image",
+        "_flags",
+        "_icon",
         "_state",
-        "description",
-        "id",
-        "name",
-        "rpc_origins",
+        "_summary",
+        "approximate_guild_count",
+        "approximate_user_authorization_count",
+        "approximate_user_install_count",
+        "bot",
         "bot_public",
         "bot_require_code_grant",
-        "owner",
-        "bot",
-        "_icon",
-        "_summary",
-        "verify_key",
-        "team",
-        "guild_id",
-        "primary_sku_id",
-        "slug",
-        "_cover_image",
-        "terms_of_service_url",
-        "privacy_policy_url",
-        "approximate_guild_count",
-        "approximate_user_install_count",
-        "approximate_user_authorization_count",
-        "_flags",
-        "redirect_uris",
-        "interactions_endpoint_url",
-        "role_connections_verification_url",
-        "event_webhooks_url",
+        "custom_install_url",
+        "description",
         "event_webhooks_status",
         "event_webhooks_types",
-        "integration_types_config",
+        "event_webhooks_url",
+        "guild_id",
+        "id",
         "install_params",
+        "integration_types_config",
+        "interactions_endpoint_url",
+        "name",
+        "owner",
+        "primary_sku_id",
+        "privacy_policy_url",
+        "redirect_uris",
+        "role_connections_verification_url",
+        "rpc_origins",
+        "slug",
         "tags",
-        "custom_install_url",
+        "team",
+        "terms_of_service_url",
+        "verify_key",
     )
 
-    def __init__(self, state: ConnectionState, data: AppInfoPayload):
+    def __init__(self, state: ConnectionState, data: AppInfoPayload) -> None:
         from .team import Team
 
         self._state: ConnectionState = state
@@ -234,7 +237,7 @@ class AppInfo:
         self.bot_public: bool = data.get("bot_public", True)
         self.bot_require_code_grant: bool = data.get("bot_require_code_grant", False)
         self.owner: User | None = (
-            state.create_user(owner)
+            state.create_user(cast("UserPayload", owner))
             if (owner := data.get("owner")) is not None
             else None
         )
@@ -245,7 +248,9 @@ class AppInfo:
         self._summary: str | None = data.get("summary")
         self.verify_key: str = data["verify_key"]
         self.bot: User | None = (
-            state.create_user(bot) if (bot := data.get("bot")) is not None else None
+            state.create_user(cast("UserPayload", bot))
+            if (bot := data.get("bot")) is not None
+            else None
         )
 
         self.guild_id: int | None = utils._get_as_snowflake(data, "guild_id")
@@ -264,7 +269,11 @@ class AppInfo:
         self.approximate_user_authorization_count: int | None = data.get(
             "approximate_user_authorization_count"
         )
-        self._flags: int = data.get("flags", 0)
+        self._flags: int = (
+            int(flags_new)
+            if (flags_new := data.get("flags_new")) is not None
+            else data.get("flags", 0)
+        )
         self.redirect_uris: list[str] = data.get("redirect_uris", [])
         self.interactions_endpoint_url: str | None = data.get(
             "interactions_endpoint_url"
@@ -288,7 +297,12 @@ class AppInfo:
         self.tags: list[str] = data.get("tags", [])
         self.custom_install_url: str | None = data.get("custom_install_url")
         self.integration_types_config: IntegrationTypesConfig | None = (
-            IntegrationTypesConfig.from_payload(data.get("integration_types_config"))
+            IntegrationTypesConfig.from_payload(
+                cast(
+                    "dict[int | str, dict[str, Any] | None] | None",
+                    data.get("integration_types_config"),
+                )
+            )
         )
 
     def __repr__(self) -> str:
@@ -302,7 +316,8 @@ class AppInfo:
     def flags(self) -> ApplicationFlags:
         """The public application flags.
 
-        Returns an :class:`ApplicationFlags` instance.
+        Returns an :class:`ApplicationFlags` instance. The bits are read from
+        ``flags_new`` when Discord sends it, since ``flags`` never grows past 31 bits.
 
         .. versionadded:: 2.8
         """
@@ -443,17 +458,34 @@ class AppInfo:
 
     @property
     def guild(self) -> Guild | None:
-        """If this application is a game sold on Discord,
-        this field will be the guild to which it has been linked.
+        """If this application is a game sold on Discord, this field will be the guild to which it has been linked.
+
+        This reads the in-memory cache, use :meth:`get_guild` with any cache backend.
 
         .. versionadded:: 1.3
         """
-        return self._state._get_guild(self.guild_id)
+        if self.guild_id is None:
+            return None
+        return self._state._guilds.get_nowait(self.guild_id)
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the guild to which this application has been linked, if it is a
+        game sold on Discord and the guild is cached.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Optional[:class:`Guild`]
+            The guild, or ``None`` if it is not cached.
+        """
+        return await self._state._get_guild(self.guild_id)
 
     @property
     def summary(self) -> str | None:
-        """If this application is a game sold on Discord,
-        this field will be the summary field for the store page of its primary SKU.
+        """If this application is a game sold on Discord, this field will be the summary field for the store page of its primary SKU.
 
         It currently returns an empty string.
 
@@ -495,26 +527,26 @@ class PartialAppInfo:
     """
 
     __slots__ = (
+        "_icon",
         "_state",
+        "description",
         "id",
         "name",
-        "description",
+        "privacy_policy_url",
         "rpc_origins",
         "summary",
-        "verify_key",
         "terms_of_service_url",
-        "privacy_policy_url",
-        "_icon",
+        "verify_key",
     )
 
-    def __init__(self, *, state: ConnectionState, data: PartialAppInfoPayload):
+    def __init__(self, *, state: ConnectionState, data: PartialAppInfoPayload) -> None:
         self._state: ConnectionState = state
         self.id: int = int(data["id"])
         self.name: str = data["name"]
         self._icon: str | None = data.get("icon")
         self.description: str = data["description"]
         self.rpc_origins: list[str] | None = data.get("rpc_origins")
-        self.summary: str = data["summary"]
+        self.summary: str = data.get("summary", "")
         self.verify_key: str = data["verify_key"]
         self.terms_of_service_url: str | None = data.get("terms_of_service_url")
         self.privacy_policy_url: str | None = data.get("privacy_policy_url")
@@ -543,7 +575,7 @@ class AppInstallParams:
         The permissions to request for the bot role in the guild.
     """
 
-    __slots__ = ("scopes", "permissions")
+    __slots__ = ("permissions", "scopes")
 
     def __init__(self, data: AppInstallParamsPayload) -> None:
         self.scopes: list[str] = data.get("scopes", [])
@@ -619,6 +651,18 @@ class IntegrationTypesConfig:
     def from_payload(
         cls, data: dict[int | str, dict[str, Any] | None] | None
     ) -> IntegrationTypesConfig | None:
+        """Create the configuration from the integration types payload.
+
+        Parameters
+        ----------
+        data: Optional[:class:`dict`]
+            The payload.
+
+        Returns
+        -------
+        Optional[:class:`IntegrationTypesConfig`]
+            The configuration, or ``None`` if ``data`` is ``None``.
+        """
         if data is None:
             return None
         guild_ctx = cls._decode_ctx(cls._get_ctx(data, 0))

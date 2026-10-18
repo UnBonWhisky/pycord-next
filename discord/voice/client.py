@@ -26,11 +26,14 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import asyncio
-import datetime
+import datetime as dt
 import logging
 import struct
 import warnings
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
+
+import nacl.secret
+import nacl.utils
 
 from discord import opus
 from discord.enums import SpeakingState, try_enum
@@ -45,18 +48,16 @@ from ._types import VoiceProtocol
 from .enums import OpCodes
 from .receive import AudioReader
 from .state import VoiceConnectionState
-from .utils.dependencies import HAS_DAVEY, HAS_NACL
-
-if HAS_NACL:
-    import nacl.secret
-    import nacl.utils
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
     from typing import ParamSpec
+
+    from typing_extensions import TypeVarTuple, Unpack
 
     from discord import abc
     from discord.client import Client
-    from discord.guild import Guild, VocalGuildChannel
+    from discord.guild import Guild, PartialGuild, VocalGuildChannel
     from discord.member import Member
     from discord.opus import APPLICATION_CTL, BAND_CTL, SIGNAL_CTL, Encoder
     from discord.raw_models import (
@@ -71,13 +72,17 @@ if TYPE_CHECKING:
     from .receive.reader import AfterCallback
 
     P = ParamSpec("P")
+    PlayAfterCallback = Callable[[Exception | None], Any]
+    Ts = TypeVarTuple("Ts")
+    AnyAudioReader = AudioReader[Unpack[tuple[Any, ...]]]
+    EventListener = Callable[..., Coroutine[Any, Any, Any]]
 
 _log = logging.getLogger(__name__)
 
 __all__ = ("VoiceClient",)
 
 
-class VoiceClient(VoiceProtocol):
+class VoiceClient(VoiceProtocol["Client"]):
     """Represents a Discord voice connection.
 
     You do not create these, you typically get them from e.g.
@@ -130,8 +135,12 @@ class VoiceClient(VoiceProtocol):
 
         self._ssrc_to_id: dict[int, int] = {}
         self._id_to_ssrc: dict[int, int] = {}
-        self._event_listeners: dict[str, list] = {}
-        self._reader: AudioReader = MISSING
+        self._event_listeners: dict[str, list[EventListener]] = {}
+        self._dispatch_task_set: set[asyncio.Task[None]] = set()
+        self._reader: AnyAudioReader = MISSING
+        self._member_cache: dict[int, Member | User | None] = {}
+        self._members_resolving: set[int] = set()
+        self._resolve_tasks: set[asyncio.Task[None]] = set()
 
     @staticmethod
     def _set_future_result_if_pending(
@@ -148,15 +157,15 @@ class VoiceClient(VoiceProtocol):
     )
 
     @property
-    def guild(self) -> Guild:
+    def guild(self) -> Guild | PartialGuild:
         """Returns the guild the channel we're connecting to is bound to."""
-        channel: VocalGuildChannel = self.channel
+        channel = cast("VocalGuildChannel", self.channel)
         return channel.guild
 
     @property
     def user(self) -> ClientUser:
         """The user connected to voice (i.e. ourselves)"""
-        return self._state.user  # type: ignore
+        return cast("ClientUser", self._state.user)
 
     @property
     def session_id(self) -> str | None:
@@ -190,6 +199,7 @@ class VoiceClient(VoiceProtocol):
 
     @property
     def ws(self) -> VoiceWebSocket:
+        """The voice websocket this client is using."""
         return self._connection.ws
 
     @property
@@ -203,6 +213,17 @@ class VoiceClient(VoiceProtocol):
         return session is not None
 
     def checked_add(self, attr: str, value: int, limit: int) -> None:
+        """Add to an integer attribute, wrapping it back to ``0`` past a limit.
+
+        Parameters
+        ----------
+        attr: :class:`str`
+            The name of the attribute to increase.
+        value: :class:`int`
+            The amount to add.
+        limit: :class:`int`
+            The maximum value the attribute can hold.
+        """
         val = getattr(self, attr)
         if val + value > limit:
             setattr(self, attr, 0)
@@ -210,6 +231,13 @@ class VoiceClient(VoiceProtocol):
             setattr(self, attr, val + value)
 
     def create_connection_state(self) -> VoiceConnectionState:
+        """Create the connection state used by this voice client.
+
+        Returns
+        -------
+        :class:`VoiceConnectionState`
+            The new connection state.
+        """
         return VoiceConnectionState(self, hook=self._recv_hook)
 
     async def _recv_hook(self, ws: VoiceWebSocket, msg: dict[str, Any]) -> None:
@@ -217,21 +245,21 @@ class VoiceClient(VoiceProtocol):
         data = msg.get("d", {})
 
         if op == OpCodes.ready:
-            self._add_ssrc(self.guild.me.id, data["ssrc"])
+            self._add_ssrc(self.user.id, data["ssrc"])
         elif op == OpCodes.speaking:
             uid = int(data["user_id"])
             ssrc = data["ssrc"]
 
             self._add_ssrc(uid, ssrc)
 
-            member = self.guild.get_member(uid)
+            member = await self._resolve_member(uid)
             state = try_enum(SpeakingState, data["speaking"])
             self.dispatch("member_speaking_state_update", member, ssrc, state)
         elif op == OpCodes.clients_connect:
             uids = list(map(int, data["user_ids"]))
 
             for uid in uids:
-                member = self.guild.get_member(uid)
+                member = await self._resolve_member(uid)
                 if not member:
                     _log.warning(
                         "Skipping member referencing ID %d on member_connect", uid
@@ -247,13 +275,44 @@ class VoiceClient(VoiceProtocol):
                 self._reader.packet_router.destroy_decoder(ssrc)
 
             self._remove_ssrc(user_id=uid)
-            member = self.guild.get_member(uid)
+            member = await self._resolve_member(uid)
+            self._member_cache.pop(uid, None)
             self.dispatch("member_disconnect", member, ssrc)
 
         # maybe handle video and such things?
 
+    async def _resolve_member(self, user_id: int) -> Member | None:
+        state = self._state
+        member = await state._guild_bucket("members", self.guild.id).get(user_id)
+        self._member_cache[user_id] = member or await state._users.get(user_id)
+        return member
+
+    def _peek_member(self, user_id: int) -> Member | User | None:
+        if user_id in self._member_cache:
+            return self._member_cache[user_id]
+        if user_id not in self._members_resolving:
+            self._members_resolving.add(user_id)
+            try:
+                self.loop.call_soon_threadsafe(self._schedule_member_resolve, user_id)
+            except RuntimeError:
+                self._members_resolving.discard(user_id)
+        return None
+
+    def _schedule_member_resolve(self, user_id: int) -> None:
+        async def resolve() -> None:
+            try:
+                await self._resolve_member(user_id)
+            except Exception:
+                _log.debug("Could not resolve voice member %d", user_id, exc_info=True)
+            finally:
+                self._members_resolving.discard(user_id)
+
+        task = self.loop.create_task(resolve(), name=f"voice-member-resolve: {user_id}")
+        self._resolve_tasks.add(task)
+        task.add_done_callback(self._resolve_tasks.discard)
+
     async def _run_event(
-        self, coro, event_name: str, *args: Any, **kwargs: Any
+        self, coro: EventListener, event_name: str, *args: Any, **kwargs: Any
     ) -> None:
         try:
             await coro(*args, **kwargs)
@@ -263,26 +322,46 @@ class VoiceClient(VoiceProtocol):
             _log.exception("Error calling %s", event_name)
 
     def _schedule_event(
-        self, coro, event_name: str, *args: Any, **kwargs: Any
-    ) -> asyncio.Task:
+        self, coro: EventListener, event_name: str, *args: Any, **kwargs: Any
+    ) -> asyncio.Task[None]:
         wrapped = self._run_event(coro, event_name, *args, **kwargs)
         return self.client.loop.create_task(
             wrapped, name=f"voice-receiver-event-dispatch: {event_name}"
         )
 
     def dispatch(self, event: str, /, *args: Any, **kwargs: Any) -> None:
+        """Dispatch an event to the listeners of this voice client and to the sinks.
+
+        Parameters
+        ----------
+        event: :class:`str`
+            The name of the event, without the ``on_`` prefix.
+        *args
+            The positional arguments of the event.
+        **kwargs
+            The keyword arguments of the event.
+        """
         _log.debug("Dispatching voice_client event %s", event)
 
         event_name = f"on_{event}"
         for coro in self._event_listeners.get(event_name, []):
             task = self._schedule_event(coro, event_name, *args, **kwargs)
-            self._connection._dispatch_task_set.add(task)
-            task.add_done_callback(self._connection._dispatch_task_set.discard)
+            self._dispatch_task_set.add(task)
+            task.add_done_callback(self._dispatch_task_set.discard)
 
         self._dispatch_sink(event, *args, **kwargs)
         self.client.dispatch(event, *args, **kwargs)
 
     async def on_voice_state_update(self, data: RawVoiceStateUpdateEvent) -> None:
+        """|coro|
+
+        Called when the voice state of the client changes.
+
+        Parameters
+        ----------
+        data: :class:`RawVoiceStateUpdateEvent`
+            The voice state payload.
+        """
         old_channel_id = self.channel.id if self.channel else None
         await self._connection.voice_state_update(data)
 
@@ -294,6 +373,15 @@ class VoiceClient(VoiceProtocol):
             self._reader.packet_router.destroy_all_decoders()
 
     async def on_voice_server_update(self, data: RawVoiceServerUpdateEvent) -> None:
+        """|coro|
+
+        Called when the voice server of the client changes.
+
+        Parameters
+        ----------
+        data: :class:`RawVoiceServerUpdateEvent`
+            The voice server payload.
+        """
         await self._connection.voice_server_update(data)
 
     def _dispatch_sink(self, event: str, /, *args: Any, **kwargs: Any) -> None:
@@ -311,7 +399,8 @@ class VoiceClient(VoiceProtocol):
         ssrc = self._id_to_ssrc.pop(user_id, None)
 
         if ssrc:
-            self._reader.speaking_timer.drop_ssrc(ssrc)
+            if self._reader:
+                self._reader.speaking_timer.drop_ssrc(ssrc)
             self._ssrc_to_id.pop(ssrc, None)
 
     async def connect(
@@ -322,6 +411,21 @@ class VoiceClient(VoiceProtocol):
         self_deaf: bool = False,
         self_mute: bool = False,
     ) -> None:
+        """|coro|
+
+        Connect to the voice channel.
+
+        Parameters
+        ----------
+        reconnect: :class:`bool`
+            Whether to reconnect on failure.
+        timeout: :class:`float`
+            The maximum time in seconds to wait for the connection.
+        self_deaf: :class:`bool`
+            Whether to join deafened.
+        self_mute: :class:`bool`
+            Whether to join muted.
+        """
         await self._connection.connect(
             reconnect=reconnect,
             timeout=timeout,
@@ -331,6 +435,21 @@ class VoiceClient(VoiceProtocol):
         )
 
     def wait_until_connected(self, timeout: float | None = 30.0) -> bool:
+        """Block until the client is connected to voice.
+
+        This blocks the calling thread, it is meant to be called from a thread
+        that is not the event loop.
+
+        Parameters
+        ----------
+        timeout: :class:`float` | None
+            The maximum time in seconds to wait, or ``None`` to wait forever.
+
+        Returns
+        -------
+        :class:`bool`
+            Whether the client is connected.
+        """
         self._connection.wait_for(timeout=timeout)
         return self._connection.is_connected()
 
@@ -357,8 +476,9 @@ class VoiceClient(VoiceProtocol):
 
     @property
     def privacy_code(self) -> str | None:
-        """Returns the current voice session's privacy code, only available if the call has upgraded to use the
-        DAVE protocol
+        """Returns the current voice session's privacy code.
+
+        This is only available if the call has upgraded to use the DAVE protocol.
         """
         session = self._connection.dave_session
         return session and session.voice_privacy_code
@@ -368,7 +488,6 @@ class VoiceClient(VoiceProtocol):
 
         Disconnects this voice client from voice.
         """
-
         self.stop()
         await self._connection.disconnect(force=force, wait=True)
         self.cleanup()
@@ -468,7 +587,7 @@ class VoiceClient(VoiceProtocol):
         self,
         source: AudioSource,
         *,
-        after: AfterCallback | None = ...,
+        after: PlayAfterCallback | None = ...,
         application: APPLICATION_CTL = ...,
         bitrate: int = ...,
         fec: bool = ...,
@@ -483,7 +602,7 @@ class VoiceClient(VoiceProtocol):
         self,
         source: AudioSource,
         *,
-        after: AfterCallback = ...,
+        after: PlayAfterCallback = ...,
         application: APPLICATION_CTL = ...,
         bitrate: int = ...,
         fec: bool = ...,
@@ -497,7 +616,7 @@ class VoiceClient(VoiceProtocol):
         self,
         source: AudioSource,
         *,
-        after: AfterCallback | None = None,
+        after: PlayAfterCallback | None = None,
         application: APPLICATION_CTL = "audio",
         bitrate: int = 128,
         fec: bool = True,
@@ -505,7 +624,7 @@ class VoiceClient(VoiceProtocol):
         bandwidth: BAND_CTL = "full",
         signal_type: SIGNAL_CTL = "auto",
         wait_finish: bool = False,
-    ) -> None | asyncio.Future[None]:
+    ) -> asyncio.Future[None] | None:
         """Plays an :class:`AudioSource`.
 
         The finalizer, ``after`` is called after the source has been exhausted
@@ -558,12 +677,11 @@ class VoiceClient(VoiceProtocol):
         OpusNotLoaded
             Source is not opus encoded and opus is not loaded.
         """
-
         if not self.is_connected():
             raise ClientException("Not connected to voice")
         if self.is_playing():
             raise ClientException("Already playing audio")
-        if not isinstance(source, AudioSource):
+        if not isinstance(cast("object", source), AudioSource):
             raise TypeError(
                 f"Source must be an AudioSource, not {source.__class__.__name__}",
             )
@@ -603,9 +721,9 @@ class VoiceClient(VoiceProtocol):
             self.loop.call_soon_threadsafe(
                 self._set_future_result_if_pending, self._player_future, None
             )
-        if self._reader is not MISSING:
-            self._reader.stop()
-            self._reader = MISSING
+        reader, self._reader = self._reader, MISSING
+        if reader is not MISSING:
+            reader.stop()
 
         self._player = None
         self._player_future = None
@@ -630,7 +748,7 @@ class VoiceClient(VoiceProtocol):
 
     @source.setter
     def source(self, value: AudioSource) -> None:
-        if not isinstance(value, AudioSource):
+        if not isinstance(cast("object", value), AudioSource):
             raise TypeError(f"expected AudioSource, not {value.__class__.__name__}")
 
         if self._player is None:
@@ -657,7 +775,6 @@ class VoiceClient(VoiceProtocol):
         opus.OpusError
             Encoding the data failed.
         """
-
         self.checked_add("sequence", 1, 65535)
         if encode:
             encoded = self.encoder.encode(data, self.encoder.SAMPLES_PER_FRAME)
@@ -676,26 +793,45 @@ class VoiceClient(VoiceProtocol):
 
         self.checked_add("timestamp", opus.Encoder.SAMPLES_PER_FRAME, 4294967295)
 
-    def elapsed(self) -> datetime.timedelta:
+    def elapsed(self) -> dt.timedelta:
         """Returns the elapsed time of the playing audio."""
         if self._player:
-            return datetime.timedelta(milliseconds=self._player.played_frames() * 20)
-        return datetime.timedelta()
+            return dt.timedelta(milliseconds=self._player.played_frames() * 20)
+        return dt.timedelta()
+
+    @overload
+    def start_recording(
+        self,
+        sink: Sink,
+        callback: Callable[[Exception | None], Any] | None = None,
+        *args: Any,
+        on_finish: None = None,
+        sync_start: bool = MISSING,
+    ) -> None: ...
+
+    @overload
+    def start_recording(
+        self,
+        sink: Sink,
+        callback: Callable[[Exception | None], Any] | None = None,
+        *args: Unpack[Ts],
+        on_finish: AfterCallback[Unpack[Ts]],
+        sync_start: bool = MISSING,
+    ) -> None: ...
 
     def start_recording(
         self,
         sink: Sink,
-        callback: AfterCallback | None = None,
-        *args: Any,
+        callback: Callable[[Exception | None], Any] | None = None,
+        *args: Unpack[Ts],
+        on_finish: AfterCallback[Unpack[Ts]] | None = None,
         sync_start: bool = MISSING,
     ) -> None:
         r"""Start recording the audio from the current connected channel to the provided sink.
 
         .. versionadded:: 2.0
 
-        .. warning::
-
-            Recording may not work as expected due to the new DAVE (End-to-End Encryption) for voice calls.
+        Voice reception works with Discord's DAVE (End-to-End Encryption) protocol.
 
         Parameters
         ----------
@@ -708,10 +844,17 @@ class VoiceClient(VoiceProtocol):
             .. versionchanged:: 2.7
                 This parameter is now optional, and must take exactly one parameter, ``exception``.
         \*args:
-            The arguments to pass to the callback coroutine.
+            The arguments to pass to ``on_finish``. Without ``on_finish`` they are ignored.
 
             .. deprecated:: 2.7
-                Passing custom arguments to the callback is now deprecated and ignored.
+                Passing custom arguments to ``callback`` is deprecated and ignored,
+                pass ``on_finish`` to receive them.
+        on_finish: Callable[[:class:`~.Sink`, ...], Any]
+            A (potentially async) function which is called once, and always, after the bot has stopped
+            recording and the sink was cleaned up (its audio is formatted). It is called as
+            ``on_finish(sink, *args)``, after ``callback`` if both are given.
+
+            .. versionadded:: 3.0
         sync_start: :class:`bool`
             If ``True``, the recordings of subsequent users will start with silence.
             This is useful for recording audio just as it was heard.
@@ -726,31 +869,35 @@ class VoiceClient(VoiceProtocol):
         TypeError
             You did not provide a Sink object.
         """
-        warnings.warn(
-            "Voice reception is currently broken due to Discord's DAVE (End-to-End Encryption) protocol. "
-            + "Follow development progress at https://github.com/Pycord-Development/pycord/issues/3139",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        # TODO: remove warning in voice-recv fix PR
         if not self.is_connected():
             raise RecordingException("not connected to a voice channel")
-        if not isinstance(sink, Sink):
+        if not isinstance(cast("object", sink), Sink):
             raise TypeError(f"expected a Sink object, got {sink.__class__.__name__}")
 
         if self.is_recording():
             raise ClientException("Already recording audio")
 
-        if len(args) > 0:
-            warnings.warn(
-                "'args' parameter is deprecated since 2.7 and will be removed in 3.0"
-            )
         if sync_start is not MISSING:
             warnings.warn(
-                "'sync_start' parameter is deprecated since 2.7 and will be removed in 3.0"
+                "'sync_start' parameter is deprecated since 2.7 and will be removed in 3.0",
+                stacklevel=2,
             )
 
-        self._reader = AudioReader(sink, self, after=callback, start=True)
+        if len(args) > 0 and on_finish is None:
+            warnings.warn(
+                "'args' parameter is deprecated since 2.7 and will be removed in 3.0, "
+                "pass 'on_finish' to receive them",
+                stacklevel=2,
+            )
+
+        self._reader = AudioReader(
+            sink,
+            self,
+            after=callback,
+            on_finish=on_finish,
+            args=args,
+            start=True,
+        )
 
     start_listening = start_recording
 
@@ -764,23 +911,19 @@ class VoiceClient(VoiceProtocol):
         RecordingException
             You are not recording.
         """
-        warnings.warn(
-            "Voice reception is currently broken due to Discord's DAVE (End-to-End Encryption) protocol. "
-            + "Follow development progress at https://github.com/Pycord-Development/pycord/issues/3139",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        if self._reader is not MISSING:
-            self._reader.stop()
-            self._reader = MISSING
-        else:
+        reader = self._reader
+        if reader is MISSING:
             raise RecordingException("You are not recording")
+
+        self._reader = MISSING
+        reader.stop()
 
     stop_listening = stop_recording
 
     def is_recording(self) -> bool:
         """Whether the current client is recording in any sink."""
-        return self._reader and self._reader.is_listening()
+        reader = self._reader
+        return reader is not MISSING and reader.is_listening()
 
     def is_speaking(self, member: Member | User) -> bool | None:
         """Whether a user is speaking.
@@ -791,14 +934,9 @@ class VoiceClient(VoiceProtocol):
 
         .. versionadded:: 2.7
         """
-        warnings.warn(
-            "Voice reception is currently broken due to Discord's DAVE (End-to-End Encryption) protocol. "
-            + "Follow development progress at https://github.com/Pycord-Development/pycord/issues/3139",
-            RuntimeWarning,
-            stacklevel=2,
-        )
         ssrc = self._id_to_ssrc.get(member.id)
         if ssrc is None:
             return None
         if self._reader:
             return self._reader.speaking_timer.get_speaking(ssrc)
+        return None

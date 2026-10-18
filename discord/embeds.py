@@ -25,18 +25,22 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import datetime
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, TypeVar
+import contextlib
+import datetime as dt
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from . import utils
+from ._internal.aliases import AliasMixin
 from .colour import Colour
+from .components import _component_factory
+from .limits import EmbedLimits
 
 __all__ = (
     "Embed",
-    "EmbedField",
     "EmbedAuthor",
+    "EmbedField",
     "EmbedFooter",
+    "EmbedLimits",
     "EmbedMedia",
     "EmbedProvider",
 )
@@ -44,8 +48,13 @@ __all__ = (
 E = TypeVar("E", bound="Embed")
 
 if TYPE_CHECKING:
-    from discord.types.embed import Embed as EmbedData
-    from discord.types.embed import EmbedType
+    from collections.abc import Mapping
+
+    from typing_extensions import Self
+
+    from discord.components import Component
+    from discord.types.components import Component as ComponentPayload
+    from discord.types.embed import Embed as EmbedData, EmbedType
 
 
 class EmbedAuthor:
@@ -65,6 +74,13 @@ class EmbedAuthor:
         The proxied URL of the author icon image. This can't be set directly, it is set by Discord.
     """
 
+    __slots__ = (
+        "icon_url",
+        "name",
+        "proxy_icon_url",
+        "url",
+    )
+
     def __init__(
         self,
         name: str,
@@ -77,7 +93,24 @@ class EmbedAuthor:
         self.proxy_icon_url: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, str | None]) -> EmbedAuthor:
+    def from_dict(cls, data: Mapping[str, str | None]) -> EmbedAuthor:
+        """Converts a :class:`dict` to an :class:`EmbedAuthor`.
+
+        Parameters
+        ----------
+        data
+            The author payload. It must contain a ``name``.
+
+        Returns
+        -------
+        :class:`EmbedAuthor`
+            The converted author.
+
+        Raises
+        ------
+        ValueError
+            The ``name`` field is missing or empty.
+        """
         self = cls.__new__(cls)
         name = data.get("name")
         if not name:
@@ -89,6 +122,13 @@ class EmbedAuthor:
         return self
 
     def to_dict(self) -> dict[str, str]:
+        """Converts this author into a :class:`dict`.
+
+        Returns
+        -------
+        Dict[:class:`str`, :class:`str`]
+            The author payload.
+        """
         d = {"name": str(self.name)}
         if self.url:
             d["url"] = str(self.url)
@@ -119,6 +159,12 @@ class EmbedFooter:
         The proxied URL of the footer icon image. This can't be set directly, it is set by Discord.
     """
 
+    __slots__ = (
+        "icon_url",
+        "proxy_icon_url",
+        "text",
+    )
+
     def __init__(
         self,
         text: str,
@@ -129,7 +175,24 @@ class EmbedFooter:
         self.proxy_icon_url: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, str | None]) -> EmbedFooter:
+    def from_dict(cls, data: Mapping[str, str | None]) -> EmbedFooter:
+        """Converts a :class:`dict` to an :class:`EmbedFooter`.
+
+        Parameters
+        ----------
+        data
+            The footer payload. It must contain a ``text``.
+
+        Returns
+        -------
+        :class:`EmbedFooter`
+            The converted footer.
+
+        Raises
+        ------
+        ValueError
+            The ``text`` field is missing or empty.
+        """
         self = cls.__new__(cls)
         text = data.get("text")
         if not text:
@@ -140,6 +203,13 @@ class EmbedFooter:
         return self
 
     def to_dict(self) -> dict[str, Any]:
+        """Converts this footer into a :class:`dict`.
+
+        Returns
+        -------
+        Dict[:class:`str`, Any]
+            The footer payload.
+        """
         d = {"text": str(self.text)}
         if self.icon_url:
             d["icon_url"] = str(self.icon_url)
@@ -155,6 +225,7 @@ class EmbedFooter:
 
 class EmbedMedia:  # Thumbnail, Image, Video
     """Represents a media on the :class:`Embed` object.
+
     This includes thumbnails, images, and videos.
 
     .. versionadded:: 2.5
@@ -171,19 +242,38 @@ class EmbedMedia:  # Thumbnail, Image, Video
         The width of the media.
     """
 
+    __slots__ = (
+        "height",
+        "proxy_url",
+        "url",
+        "width",
+    )
+
     url: str
     proxy_url: str | None
     height: int | None
     width: int | None
 
-    def __init__(self, url: str):
+    def __init__(self, url: str) -> None:
         self.url = url
         self.proxy_url = None
         self.height = None
         self.width = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, str | int]) -> EmbedMedia:
+    def from_dict(cls, data: Mapping[str, str | int]) -> EmbedMedia:
+        """Converts a :class:`dict` to an :class:`EmbedMedia`.
+
+        Parameters
+        ----------
+        data
+            The media payload.
+
+        Returns
+        -------
+        :class:`EmbedMedia`
+            The converted media.
+        """
         self = cls.__new__(cls)
         self.url = str(data.get("url"))
         self.proxy_url = (
@@ -210,11 +300,28 @@ class EmbedProvider:
         The URL of the provider.
     """
 
+    __slots__ = (
+        "name",
+        "url",
+    )
+
     name: str | None
     url: str | None
 
     @classmethod
-    def from_dict(cls, data: dict[str, str | None]) -> EmbedProvider:
+    def from_dict(cls, data: Mapping[str, str | None]) -> EmbedProvider:
+        """Converts a :class:`dict` to an :class:`EmbedProvider`.
+
+        Parameters
+        ----------
+        data
+            The provider payload.
+
+        Returns
+        -------
+        :class:`EmbedProvider`
+            The converted provider.
+        """
         self = cls.__new__(cls)
         self.name = data.get("name")
         self.url = data.get("url")
@@ -239,15 +346,22 @@ class EmbedField:
         Whether the field should be displayed inline.
     """
 
-    def __init__(self, name: str, value: str, inline: bool | None = False):
+    __slots__ = (
+        "inline",
+        "name",
+        "value",
+    )
+
+    def __init__(self, name: str, value: str, inline: bool | None = False) -> None:
         self.name = name
         self.value = value
         self.inline = inline
 
     @classmethod
     def from_dict(cls, data: dict[str, str | bool]) -> EmbedField:
-        """Converts a :class:`dict` to a :class:`EmbedField` provided it is in the
-        format that Discord expects it to be in.
+        """Converts a :class:`dict` to a :class:`EmbedField`.
+
+        The :class:`dict` must be in the format that Discord expects it to be in.
 
         You can find out about this format in the `official Discord documentation`__.
 
@@ -259,6 +373,11 @@ class EmbedField:
         ----------
         data: :class:`dict`
             The dictionary to convert into an EmbedField object.
+
+        Returns
+        -------
+        :class:`EmbedField`
+            The converted field.
         """
         self = cls.__new__(cls)
 
@@ -286,7 +405,7 @@ class EmbedField:
         return f"<EmbedField name={self.name!r} value={self.value!r} inline={self.inline!r}>"
 
 
-class Embed:
+class Embed(AliasMixin):
     """Represents a Discord embed.
 
     .. container:: operations
@@ -328,25 +447,37 @@ class Embed:
         If a naive datetime is passed, it is converted to an aware
         datetime with the local timezone.
     colour: Union[:class:`Colour`, :class:`int`]
-        The colour code of the embed. Aliased to ``color`` as well.
+        The colour code of the embed.
         This can be set during initialisation.
     """
 
     __slots__ = (
-        "title",
-        "url",
-        "type",
-        "_timestamp",
+        "_author",
         "_colour",
+        "_components",
+        "_fields",
         "_footer",
         "_image",
-        "_thumbnail",
-        "_video",
         "_provider",
-        "_author",
-        "_fields",
+        "_thumbnail",
+        "_timestamp",
+        "_video",
         "description",
+        "title",
+        "type",
+        "url",
     )
+
+    if TYPE_CHECKING:
+        _author: dict[str, str]
+        _colour: Colour | None
+        _components: list[ComponentPayload]
+        _footer: dict[str, str]
+        _image: dict[str, str]
+        _provider: Mapping[str, str | None]
+        _thumbnail: dict[str, str]
+        _timestamp: dt.datetime | None
+        _video: Mapping[str, str | int]
 
     def __init__(
         self,
@@ -357,14 +488,14 @@ class Embed:
         type: EmbedType = "rich",
         url: Any | None = None,
         description: Any | None = None,
-        timestamp: datetime.datetime | None = None,
+        timestamp: dt.datetime | None = None,
         fields: list[EmbedField] | None = None,
         author: EmbedAuthor | None = None,
         footer: EmbedFooter | None = None,
         image: str | EmbedMedia | None = None,
         thumbnail: str | EmbedMedia | None = None,
-    ):
-        self.colour = colour if colour is not None else color
+    ) -> None:
+        self.colour = colour
         self.title = title
         self.type = type
         self.url = url
@@ -390,9 +521,10 @@ class Embed:
         self.thumbnail = thumbnail
 
     @classmethod
-    def from_dict(cls: type[E], data: Mapping[str, Any]) -> E:
-        """Converts a :class:`dict` to a :class:`Embed` provided it is in the
-        format that Discord expects it to be in.
+    def from_dict(cls, data: Mapping[str, Any]) -> Self:
+        """Converts a :class:`dict` to a :class:`Embed`.
+
+        The :class:`dict` must be in the format that Discord expects it to be in.
 
         You can find out about this format in the `official Discord documentation`__.
 
@@ -411,7 +543,7 @@ class Embed:
             The converted embed object.
         """
         # we are bypassing __init__ here since it doesn't apply here
-        self: E = cls.__new__(cls)
+        self: Self = cls.__new__(cls)
 
         # fill in the basic fields
 
@@ -431,15 +563,11 @@ class Embed:
 
         # try to fill in the more rich fields
 
-        try:
+        with contextlib.suppress(KeyError):
             self._colour = Colour(value=data["color"])
-        except KeyError:
-            pass
 
-        try:
+        with contextlib.suppress(KeyError):
             self._timestamp = utils.parse_time(data["timestamp"])
-        except KeyError:
-            pass
 
         for attr in (
             "thumbnail",
@@ -449,6 +577,7 @@ class Embed:
             "fields",
             "image",
             "footer",
+            "components",
         ):
             if attr == "fields":
                 value = data.get(attr, [])
@@ -463,7 +592,7 @@ class Embed:
 
         return self
 
-    def copy(self: E) -> E:
+    def copy(self) -> Self:
         """Creates a shallow copy of the :class:`Embed` object.
 
         Returns
@@ -474,6 +603,7 @@ class Embed:
         return self.__class__.from_dict(self.to_dict())
 
     def __len__(self) -> int:
+        """Returns the total size of the embed."""
         total = 0
         if self.title:
             total += len(self.title)
@@ -499,6 +629,7 @@ class Embed:
         return total
 
     def __bool__(self) -> bool:
+        """Returns whether the embed has any data set."""
         return any(
             (
                 self.title,
@@ -513,26 +644,27 @@ class Embed:
                 self.image,
                 self.provider,
                 self.video,
+                getattr(self, "_components", None),
             )
         )
 
     @property
     def colour(self) -> Colour | None:
+        """The colour code of the embed."""
         return getattr(self, "_colour", None)
 
     @colour.setter
-    def colour(self, value: int | Colour | None):  # type: ignore
+    def colour(self, value: int | Colour | None) -> None:
         self._colour = Colour.resolve_value(value)
 
-    color = colour
-
     @property
-    def timestamp(self) -> datetime.datetime | None:
+    def timestamp(self) -> dt.datetime | None:
+        """The timestamp of the embed content, as an aware datetime."""
         return getattr(self, "_timestamp", None)
 
     @timestamp.setter
-    def timestamp(self, value: datetime.datetime | None):
-        if isinstance(value, datetime.datetime):
+    def timestamp(self, value: dt.datetime | None) -> None:
+        if isinstance(value, dt.datetime):
             if value.tzinfo is None:
                 value = value.astimezone()
             self._timestamp = value
@@ -558,10 +690,10 @@ class Embed:
         return EmbedFooter.from_dict(foot)
 
     @footer.setter
-    def footer(self, value: EmbedFooter | None):
+    def footer(self, value: EmbedFooter | None) -> None:
         if value is None:
             self.remove_footer()
-        elif isinstance(value, EmbedFooter):
+        elif isinstance(cast("object", value), EmbedFooter):
             self._footer = value.to_dict()
         else:
             raise TypeError(
@@ -570,11 +702,11 @@ class Embed:
             )
 
     def set_footer(
-        self: E,
+        self,
         *,
         text: Any | None = None,
         icon_url: Any | None = None,
-    ) -> E:
+    ) -> Self:
         """Sets the footer for the embed content.
 
         This function returns the class instance to allow for fluent-style
@@ -588,7 +720,6 @@ class Embed:
         icon_url: :class:`str`
             The URL of the footer icon. Only HTTP(S) is supported.
         """
-
         self._footer = {}
         if text:
             self._footer["text"] = str(text)
@@ -598,7 +729,7 @@ class Embed:
 
         return self
 
-    def remove_footer(self: E) -> E:
+    def remove_footer(self) -> Self:
         """Clears embed's footer information.
 
         This function returns the class instance to allow for fluent-style
@@ -606,10 +737,8 @@ class Embed:
 
         .. versionadded:: 2.0
         """
-        try:
+        with contextlib.suppress(AttributeError):
             del self._footer
-        except AttributeError:
-            pass
 
         return self
 
@@ -632,12 +761,12 @@ class Embed:
         return EmbedMedia.from_dict(img)
 
     @image.setter
-    def image(self, value: str | EmbedMedia | None):
+    def image(self, value: str | EmbedMedia | None) -> None:
         if value is None:
             self.remove_image()
         elif isinstance(value, str):
             self.set_image(url=value)
-        elif isinstance(value, EmbedMedia):
+        elif isinstance(cast("object", value), EmbedMedia):
             self.set_image(url=value.url)
         else:
             raise TypeError(
@@ -645,7 +774,7 @@ class Embed:
                 f" {value.__class__.__name__} instead."
             )
 
-    def set_image(self: E, *, url: Any | None) -> E:
+    def set_image(self, *, url: Any | None) -> Self:
         """Sets the image for the embed content.
 
         This function returns the class instance to allow for fluent-style
@@ -659,12 +788,9 @@ class Embed:
         url: :class:`str`
             The source URL for the image. Only HTTP(S) is supported.
         """
-
         if url is None:
-            try:
+            with contextlib.suppress(AttributeError):
                 del self._image
-            except AttributeError:
-                pass
         else:
             self._image = {
                 "url": str(url),
@@ -672,7 +798,7 @@ class Embed:
 
         return self
 
-    def remove_image(self: E) -> E:
+    def remove_image(self) -> Self:
         """Removes the embed's image.
 
         This function returns the class instance to allow for fluent-style
@@ -680,10 +806,8 @@ class Embed:
 
         .. versionadded:: 2.0
         """
-        try:
+        with contextlib.suppress(AttributeError):
             del self._image
-        except AttributeError:
-            pass
 
         return self
 
@@ -706,12 +830,12 @@ class Embed:
         return EmbedMedia.from_dict(thumb)
 
     @thumbnail.setter
-    def thumbnail(self, value: str | EmbedMedia | None):
+    def thumbnail(self, value: str | EmbedMedia | None) -> None:
         if value is None:
             self.remove_thumbnail()
         elif isinstance(value, str):
             self.set_thumbnail(url=value)
-        elif isinstance(value, EmbedMedia):
+        elif isinstance(cast("object", value), EmbedMedia):
             self.set_thumbnail(url=value.url)
         else:
             raise TypeError(
@@ -719,7 +843,7 @@ class Embed:
                 f" {value.__class__.__name__} instead."
             )
 
-    def set_thumbnail(self: E, *, url: Any | None) -> E:
+    def set_thumbnail(self, *, url: Any | None) -> Self:
         """Sets the thumbnail for the embed content.
 
         This function returns the class instance to allow for fluent-style
@@ -733,12 +857,9 @@ class Embed:
         url: :class:`str`
             The source URL for the thumbnail. Only HTTP(S) is supported.
         """
-
         if url is None:
-            try:
+            with contextlib.suppress(AttributeError):
                 del self._thumbnail
-            except AttributeError:
-                pass
         else:
             self._thumbnail = {
                 "url": str(url),
@@ -746,7 +867,7 @@ class Embed:
 
         return self
 
-    def remove_thumbnail(self: E) -> E:
+    def remove_thumbnail(self) -> Self:
         """Removes the embed's thumbnail.
 
         This function returns the class instance to allow for fluent-style
@@ -754,10 +875,8 @@ class Embed:
 
         .. versionadded:: 2.0
         """
-        try:
+        with contextlib.suppress(AttributeError):
             del self._thumbnail
-        except AttributeError:
-            pass
 
         return self
 
@@ -792,6 +911,19 @@ class Embed:
         return EmbedProvider.from_dict(prov)
 
     @property
+    def components(self) -> list[Component]:
+        """The components that make up the embed.
+
+        Only embeds of the ``components`` type, link previews built by a website
+        from components, have components. Such embeds are read-only: Discord only
+        accepts ``rich`` embeds from apps.
+
+        .. versionadded:: 3.0
+        """
+        raw: list[ComponentPayload] = getattr(self, "_components", [])
+        return [_component_factory(component) for component in raw]
+
+    @property
     def author(self) -> EmbedAuthor | None:
         """Returns an :class:`EmbedAuthor` denoting the author contents.
 
@@ -805,10 +937,10 @@ class Embed:
         return EmbedAuthor.from_dict(auth)
 
     @author.setter
-    def author(self, value: EmbedAuthor | None):
+    def author(self, value: EmbedAuthor | None) -> None:
         if value is None:
             self.remove_author()
-        elif isinstance(value, EmbedAuthor):
+        elif isinstance(cast("object", value), EmbedAuthor):
             self._author = value.to_dict()
         else:
             raise TypeError(
@@ -817,12 +949,12 @@ class Embed:
             )
 
     def set_author(
-        self: E,
+        self,
         *,
         name: Any,
         url: Any | None = None,
         icon_url: Any | None = None,
-    ) -> E:
+    ) -> Self:
         """Sets the author for the embed content.
 
         This function returns the class instance to allow for fluent-style
@@ -838,7 +970,6 @@ class Embed:
         icon_url: :class:`str`
             The URL of the author icon. Only HTTP(S) is supported.
         """
-
         self._author = {
             "name": str(name),
         }
@@ -851,7 +982,7 @@ class Embed:
 
         return self
 
-    def remove_author(self: E) -> E:
+    def remove_author(self) -> Self:
         """Clears embed's author information.
 
         This function returns the class instance to allow for fluent-style
@@ -859,10 +990,8 @@ class Embed:
 
         .. versionadded:: 1.4
         """
-        try:
+        with contextlib.suppress(AttributeError):
             del self._author
-        except AttributeError:
-            pass
 
         return self
 
@@ -885,7 +1014,7 @@ class Embed:
         value: List[:class:`EmbedField`]
             The list of :class:`EmbedField` objects to include in the embed.
         """
-        if not all(isinstance(x, EmbedField) for x in value):
+        if not all(isinstance(cast("object", x), EmbedField) for x in value):
             raise TypeError("Expected a list of EmbedField objects.")
 
         self._fields = value
@@ -900,12 +1029,12 @@ class Embed:
         field: :class:`EmbedField`
             The field to add.
         """
-        if not isinstance(field, EmbedField):
+        if not isinstance(cast("object", field), EmbedField):
             raise TypeError("Expected an EmbedField object.")
 
         self._fields.append(field)
 
-    def add_field(self: E, *, name: str, value: str, inline: bool = True) -> E:
+    def add_field(self, *, name: str, value: str, inline: bool = True) -> Self:
         """Adds a field to the embed object.
 
         This function returns the class instance to allow for fluent-style
@@ -927,8 +1056,8 @@ class Embed:
         return self
 
     def insert_field_at(
-        self: E, index: int, *, name: Any, value: Any, inline: bool = True
-    ) -> E:
+        self, index: int, *, name: Any, value: Any, inline: bool = True
+    ) -> Self:
         """Inserts a field before a specified index to the embed.
 
         This function returns the class instance to allow for fluent-style
@@ -949,7 +1078,6 @@ class Embed:
         inline: :class:`bool`
             Whether the field should be displayed inline.
         """
-
         field = EmbedField(name=str(name), value=str(value), inline=inline)
 
         self._fields.insert(index, field)
@@ -976,14 +1104,12 @@ class Embed:
         index: :class:`int`
             The index of the field to remove.
         """
-        try:
+        with contextlib.suppress(IndexError):
             del self._fields[index]
-        except IndexError:
-            pass
 
     def set_field_at(
-        self: E, index: int, *, name: Any, value: Any, inline: bool = True
-    ) -> E:
+        self, index: int, *, name: Any, value: Any, inline: bool = True
+    ) -> Self:
         """Modifies a field to the embed object.
 
         The index must point to a valid pre-existing field. There must be 25 fields or fewer.
@@ -1009,11 +1135,10 @@ class Embed:
         IndexError
             An invalid index was provided.
         """
-
         try:
             field = self._fields[index]
         except (TypeError, IndexError):
-            raise IndexError("field index out of range")
+            raise IndexError("field index out of range") from None
 
         field.name = str(name)
         field.value = str(value)
@@ -1028,7 +1153,6 @@ class Embed:
         Dict[:class:`str`, Union[:class:`str`, :class:`int`, :class:`bool`]]
             A dictionary of :class:`str` embed keys bound to the respective value.
         """
-
         # add in the raw data into the dict
         result = {
             key[1:]: getattr(self, key)
@@ -1057,11 +1181,11 @@ class Embed:
             if timestamp:
                 if timestamp.tzinfo:
                     result["timestamp"] = timestamp.astimezone(
-                        tz=datetime.timezone.utc
+                        tz=dt.timezone.utc
                     ).isoformat()
                 else:
                     result["timestamp"] = timestamp.replace(
-                        tzinfo=datetime.timezone.utc
+                        tzinfo=dt.timezone.utc
                     ).isoformat()
 
         # add in the non-raw attribute ones
@@ -1077,4 +1201,7 @@ class Embed:
         if self.title:
             result["title"] = self.title
 
-        return result  # type: ignore
+        return cast("EmbedData", result)
+
+    if TYPE_CHECKING:
+        color = colour

@@ -35,7 +35,8 @@ class RoleButton(discord.ui.Button):
         # Get the user who clicked the button.
         user = interaction.user
         # Get the role this button is for (stored in the custom ID).
-        role = interaction.guild.get_role(int(self.custom_id))
+        guild = await interaction.get_guild()
+        role = await guild.get_role(int(self.custom_id))
 
         if role is None:
             # If the specified role does not exist, return nothing.
@@ -76,10 +77,11 @@ class ButtonRoleCog(commands.Cog):
         # timeout is None because we want this view to be persistent.
         view = discord.ui.View(timeout=None)
 
+        guild = await ctx.get_guild()
         # Loop through the list of roles and add a new button to the view for each role.
         for role_id in role_ids:
             # Get the role from the guild by ID.
-            role = ctx.guild.get_role(role_id)
+            role = await guild.get_role(role_id)
             view.add_item(RoleButton(role))
 
         await ctx.respond("Click a button to assign yourself a role", view=view)
@@ -94,9 +96,9 @@ class ButtonRoleCog(commands.Cog):
         # We recreate the view as we did in the /post command.
         view = discord.ui.View(timeout=None)
         # Make sure to set the guild ID here to whatever server you want the buttons in!
-        guild = self.bot.get_guild(...)
+        guild = await self.bot.get_guild(...)
         for role_id in role_ids:
-            role = guild.get_role(role_id)
+            role = await guild.get_role(role_id)
             view.add_item(RoleButton(role))
 
         # Add the view to the bot so that it will watch for button interactions.

@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import random
 import time
-from collections.abc import Callable
-from typing import Generic, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 T = TypeVar("T", bool, Literal[True], Literal[False])
 
@@ -57,7 +59,7 @@ class ExponentialBackoff(Generic[T]):
         number in between may be returned.
     """
 
-    def __init__(self, base: int = 1, *, integral: T = False):
+    def __init__(self, base: int = 1, *, integral: T = False) -> None:
         self._base: int = base
 
         self._exp: int = 0
@@ -69,7 +71,9 @@ class ExponentialBackoff(Generic[T]):
         rand = random.Random()
         rand.seed()
 
-        self._randfunc: Callable[..., int | float] = rand.randrange if integral else rand.uniform  # type: ignore
+        self._randfunc: Callable[..., int | float] = (
+            rand.randrange if integral else rand.uniform
+        )
 
     @overload
     def delay(self: ExponentialBackoff[Literal[False]]) -> float: ...

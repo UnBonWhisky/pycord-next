@@ -22,9 +22,12 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-import os
+from __future__ import annotations
 
-cur_path = os.getcwd()
+import os
+from pathlib import Path
+
+cur_path = str(Path.cwd())
 ignore_set = {"__init__.py", "count_sourcelines.py", "docs-json-exporter.py"}
 
 loc_list = []
@@ -32,9 +35,9 @@ loc_list = []
 for py_dir, _, py_files in os.walk(cur_path):
     for py_file in py_files:
         if py_file.endswith(".py") and py_file not in ignore_set:
-            total_path = os.path.join(py_dir, py_file)
+            total_path = str(Path(py_dir) / py_file)
             try:
-                with open(total_path, encoding="utf-8") as file:
+                with Path(total_path).open(encoding="utf-8") as file:
                     loc_list.append(
                         (len(file.read().splitlines()), total_path.split(cur_path)[1])
                     )
@@ -42,6 +45,6 @@ for py_dir, _, py_files in os.walk(cur_path):
                 print(f"Skipping file {total_path} due to encoding error: {e}")
 
 for line_number_count, filename in loc_list:
-    print("%05d lines in %s" % (line_number_count, filename))
+    print(f"{line_number_count:05d} lines in {filename}")
 
 print(f"\nTotal: {sum([x[0] for x in loc_list])} lines ({cur_path})")

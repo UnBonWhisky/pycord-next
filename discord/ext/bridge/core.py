@@ -25,11 +25,11 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import inspect
-from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
-import discord.commands.options
+from typing_extensions import override
+
+import discord
 from discord import (
     ApplicationCommand,
     Attachment,
@@ -40,63 +40,70 @@ from discord import (
     SlashCommandOptionType,
 )
 
-from ...utils import MISSING, find, get, warn_deprecated
+from ...utils import MISSING, find, get
 from ..commands import (
     BadArgument,
-)
-from ..commands import Bot as ExtBot
-from ..commands import (
+    Bot as ExtBot,
     Command,
     Context,
     Converter,
     Group,
     GuildChannelConverter,
     MemberConverter,
+    NoPrivateMessage,
     RoleConverter,
     UserConverter,
 )
 from ..commands.converter import _convert_to_bool, run_converters
 
+T = TypeVar("T")
+
 if TYPE_CHECKING:
+    import inspect
+    from collections.abc import Callable, Coroutine, Iterator
+
+    from discord import ApplicationContext
+
     from .context import BridgeApplicationContext, BridgeExtContext
+
+    CommandCallback = Callable[..., Coroutine[Any, Any, Any]]
 
 
 __all__ = (
     "BridgeCommand",
     "BridgeCommandGroup",
+    "BridgeExtCommand",
+    "BridgeExtGroup",
+    "BridgeOption",
+    "BridgeSlashCommand",
+    "BridgeSlashGroup",
     "bridge_command",
     "bridge_group",
     "bridge_option",
-    "BridgeExtCommand",
-    "BridgeSlashCommand",
-    "BridgeExtGroup",
-    "BridgeSlashGroup",
-    "BridgeOption",
-    "map_to",
     "guild_only",
     "has_permissions",
     "is_nsfw",
+    "map_to",
 )
 
 
 class BridgeSlashCommand(SlashCommand):
     """A subclass of :class:`.SlashCommand` that is used for bridge commands."""
 
-    def __init__(self, func, **kwargs):
-        self.brief = kwargs.pop("brief", None)
+    def __init__(self, func: CommandCallback, **kwargs: Any) -> None:
+        self.brief: str | None = kwargs.pop("brief", None)
         super().__init__(func, **kwargs)
 
-    async def dispatch_error(
-        self, ctx: BridgeApplicationContext, error: Exception
-    ) -> None:
+    @override
+    async def dispatch_error(self, ctx: ApplicationContext, error: Exception) -> None:
         await super().dispatch_error(ctx, error)
         ctx.bot.dispatch("bridge_command_error", ctx, error)
 
 
-class BridgeExtCommand(Command):
+class BridgeExtCommand(Command[Any, Any, Any]):
     """A subclass of :class:`.ext.commands.Command` that is used for bridge commands."""
 
-    def __init__(self, func, **kwargs):
+    def __init__(self, func: CommandCallback, **kwargs: Any) -> None:
         super().__init__(func, **kwargs)
 
         for option in self.params.values():
@@ -107,24 +114,25 @@ class BridgeExtCommand(Command):
                     f"{option.annotation.__class__.__name__} is not supported in bridge commands. Use BridgeOption instead."
                 )
 
-    async def dispatch_error(self, ctx: BridgeExtContext, error: Exception) -> None:
+    @override
+    async def dispatch_error(self, ctx: Context[Any], error: Exception) -> None:
         await super().dispatch_error(ctx, error)
         ctx.bot.dispatch("bridge_command_error", ctx, error)
 
-    async def transform(self, ctx: Context, param: inspect.Parameter) -> Any:
+    @override
+    async def transform(self, ctx: Context[Any], param: inspect.Parameter) -> Any:
         if param.annotation is Attachment:
             # skip the parameter checks for bridge attachments
             return await run_converters(ctx, AttachmentConverter, None, param)
-        else:
-            return await super().transform(ctx, param)
+        return await super().transform(ctx, param)
 
 
 class BridgeSlashGroup(SlashCommandGroup):
     """A subclass of :class:`.SlashCommandGroup` that is used for bridge commands."""
 
-    __slots__ = ("module",)
+    __slots__ = ("module",)  # pyright: ignore[reportIncompatibleMethodOverride]
 
-    def __init__(self, callback, *args, **kwargs):
+    def __init__(self, callback: CommandCallback, *args: Any, **kwargs: Any) -> None:
         if perms := getattr(callback, "__default_member_permissions__", None):
             kwargs["default_member_permissions"] = perms
         super().__init__(*args, **kwargs)
@@ -132,21 +140,28 @@ class BridgeSlashGroup(SlashCommandGroup):
         self.__original_kwargs__["callback"] = callback
         self.__command = None
 
-    async def _invoke(self, ctx: BridgeApplicationContext) -> None:
-        if not (options := ctx.interaction.data.get("options")):
+    @override
+    async def _invoke(self, ctx: ApplicationContext) -> None:
+        interaction = cast("Any", ctx.interaction)
+        data = interaction.data
+        if not (options := data and data.get("options")):
             if not self.__command:
                 self.__command = BridgeSlashCommand(self.callback)
             ctx.command = self.__command
-            return await ctx.command.invoke(ctx)
+            await self.__command.invoke(cast("BridgeApplicationContext", ctx))
+            return
         option = options[0]
-        resolved = ctx.interaction.data.get("resolved", None)
-        command = find(lambda x: x.name == option["name"], self.subcommands)
+        resolved = data and data.get("resolved", None)
+        command = cast(
+            "BridgeSlashCommand",
+            find(lambda x: x.name == option["name"], self.subcommands),
+        )
         option["resolved"] = resolved
-        ctx.interaction.data = option
-        await command.invoke(ctx)
+        interaction.data = option
+        await command.invoke(cast("BridgeApplicationContext", ctx))
 
 
-class BridgeExtGroup(BridgeExtCommand, Group):
+class BridgeExtGroup(BridgeExtCommand, Group[Any, Any, Any]):
     """A subclass of :class:`.ext.commands.Group` that is used for bridge commands."""
 
 
@@ -173,10 +188,10 @@ class BridgeCommand:
 
     __bridge__: bool = True
 
-    __special_attrs__ = ["slash_variant", "ext_variant", "parent"]
+    __special_attrs__: ClassVar[list[str]] = ["slash_variant", "ext_variant", "parent"]
 
-    def __init__(self, callback, **kwargs):
-        self.parent = kwargs.pop("parent", None)
+    def __init__(self, callback: CommandCallback, **kwargs: Any) -> None:
+        self.parent: BridgeCommandGroup | None = kwargs.pop("parent", None)
         self.slash_variant: BridgeSlashCommand = kwargs.pop(
             "slash_variant", None
         ) or BridgeSlashCommand(callback, **kwargs)
@@ -186,8 +201,7 @@ class BridgeCommand:
 
     @property
     def name_localizations(self) -> dict[str, str] | None:
-        """Returns name_localizations from :attr:`slash_variant`
-           You can edit/set name_localizations directly with
+        """Returns name_localizations from :attr:`slash_variant` You can edit/set name_localizations directly with
 
         .. code-block:: python3
 
@@ -198,49 +212,50 @@ class BridgeCommand:
         return self.slash_variant.name_localizations
 
     @name_localizations.setter
-    def name_localizations(self, value):
-        self.slash_variant.name_localizations = value
+    def name_localizations(self, value: dict[str, str] | None) -> None:
+        self.slash_variant.name_localizations = cast("Any", value)
 
     @property
     def description_localizations(self) -> dict[str, str] | None:
-        """Returns description_localizations from :attr:`slash_variant`
-           You can edit/set description_localizations directly with
+        """Returns description_localizations from :attr:`slash_variant` You can edit/set description_localizations directly with
 
         .. code-block:: python3
 
-            bridge_command.description_localizations["en-UK"] = ...  # or any other locale
+            bridge_command.description_localizations[
+                "en-UK"
+            ] = ...  # or any other locale
             # or
             bridge_command.description_localizations = {"en-UK": ..., "fr-FR": ...}
         """
         return self.slash_variant.description_localizations
 
     @description_localizations.setter
-    def description_localizations(self, value):
-        self.slash_variant.description_localizations = value
+    def description_localizations(self, value: dict[str, str] | None) -> None:
+        self.slash_variant.description_localizations = cast("Any", value)
 
-    def __getattribute__(self, name):
+    def __getattribute__(self, name: str) -> Any:
         try:
             # first, look for the attribute on the bridge command
             return super().__getattribute__(name)
-        except AttributeError as e:
+        except AttributeError:
             # if it doesn't exist, check this list, if the name of
             # the parameter is here
             if name in self.__special_attrs__:
-                raise e
+                raise
 
             # looks up the result in the variants.
             # slash cmd prioritized
             result = getattr(self.slash_variant, name, MISSING)
-            try:
-                if result is MISSING:
-                    return getattr(self.ext_variant, name)
+            if result is not MISSING:
                 return result
+            try:
+                return getattr(self.ext_variant, name)
             except AttributeError:
                 raise AttributeError(
                     f"'{self.__class__.__name__}' object has no attribute '{name}'"
-                )
+                ) from None
 
-    def __setattr__(self, name, value) -> None:
+    def __setattr__(self, name: str, value: Any) -> None:
         if name not in self.__special_attrs__:
             setattr(self.slash_variant, name, value)
             setattr(self.ext_variant, name, value)
@@ -259,13 +274,28 @@ class BridgeCommand:
         bot.add_command(self.ext_variant)
 
     async def invoke(
-        self, ctx: BridgeExtContext | BridgeApplicationContext, /, *args, **kwargs
-    ):
-        if ctx.is_app:
-            return await self.slash_variant.invoke(ctx)
-        return await self.ext_variant.invoke(ctx)
+        self,
+        ctx: BridgeExtContext | BridgeApplicationContext,
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """|coro|
 
-    def error(self, coro):
+        Invoke the slash or the prefixed variant of this command depending on ``ctx``.
+
+        Parameters
+        ----------
+        ctx: Union[:class:`.BridgeExtContext`, :class:`.BridgeApplicationContext`]
+            The invocation context.
+        """
+        if ctx.is_app:
+            return await self.slash_variant.invoke(
+                cast("BridgeApplicationContext", ctx)
+            )
+        return await self.ext_variant.invoke(cast("BridgeExtContext", ctx))
+
+    def error(self, coro: Any) -> Any:
         """A decorator that registers a coroutine as a local error handler.
 
         This error handler is limited to the command it is defined to.
@@ -291,7 +321,7 @@ class BridgeCommand:
 
         return coro
 
-    def before_invoke(self, coro):
+    def before_invoke(self, coro: Any) -> Any:
         """A decorator that registers a coroutine as a pre-invoke hook.
 
         This hook is called directly before the command is called, making
@@ -315,7 +345,7 @@ class BridgeCommand:
 
         return coro
 
-    def after_invoke(self, coro):
+    def after_invoke(self, coro: Any) -> Any:
         """A decorator that registers a coroutine as a post-invoke hook.
 
         This hook is called directly after the command is called, making it
@@ -357,13 +387,13 @@ class BridgeCommandGroup(BridgeCommand):
         The slash command version of this command group.
     ext_variant: :class:`.ext.commands.Group`
         The prefix-based version of this command group.
-    subcommands: List[:class:`.BridgeCommand`]
-        List of bridge commands in this group
+    subcommands: List[Union[:class:`.BridgeCommand`, :class:`.BridgeCommandGroup`]]
+        List of bridge commands and subgroups in this group
     mapped: Optional[:class:`.SlashCommand`]
         If :func:`map_to` is used, the mapped slash command.
     """
 
-    __special_attrs__ = [
+    __special_attrs__: ClassVar[list[str]] = [
         "slash_variant",
         "ext_variant",
         "parent",
@@ -371,37 +401,47 @@ class BridgeCommandGroup(BridgeCommand):
         "mapped",
     ]
 
-    ext_variant: BridgeExtGroup
-    slash_variant: BridgeSlashGroup
+    ext_variant: BridgeExtGroup  # pyright: ignore[reportIncompatibleVariableOverride]
+    slash_variant: BridgeSlashGroup  # pyright: ignore[reportIncompatibleVariableOverride]
 
-    def __init__(self, callback, *args, **kwargs):
-        ext_var = BridgeExtGroup(callback, *args, **kwargs)
+    def __init__(self, callback: CommandCallback, *args: Any, **kwargs: Any) -> None:
+        ext_var = kwargs.pop("ext_variant", None) or BridgeExtGroup(
+            callback, *args, **kwargs
+        )
         kwargs.update({"name": ext_var.name})
+        slash_var = kwargs.pop("slash_variant", None) or BridgeSlashGroup(
+            callback, *args, **kwargs
+        )
         super().__init__(
             callback,
             ext_variant=ext_var,
-            slash_variant=BridgeSlashGroup(callback, *args, **kwargs),
+            slash_variant=slash_var,
             parent=kwargs.pop("parent", None),
         )
 
-        self.subcommands: list[BridgeCommand] = []
+        self.subcommands: list[BridgeCommand | BridgeCommandGroup] = []
 
         self.mapped: SlashCommand | None = None
         if map_to := getattr(callback, "__custom_map_to__", None):
             kwargs.update(map_to)
             self.mapped = self.slash_variant.command(**kwargs)(callback)
 
-    def walk_commands(self) -> Iterator[BridgeCommand]:
+    def walk_commands(self) -> Iterator[BridgeCommand | BridgeCommandGroup]:
         """An iterator that recursively walks through all the bridge group's subcommands.
 
         Yields
         ------
-        :class:`.BridgeCommand`
-            A bridge command of this bridge group.
+        Union[:class:`.BridgeCommand`, :class:`.BridgeCommandGroup`]
+            A bridge command or subgroup of this bridge group.
         """
-        yield from self.subcommands
+        for command in self.subcommands:
+            yield command
+            if isinstance(command, BridgeCommandGroup):
+                yield from command.walk_commands()
 
-    def command(self, *args, **kwargs):
+    def command(
+        self, *args: Any, **kwargs: Any
+    ) -> Callable[[CommandCallback], BridgeCommand]:
         """A decorator to register a function as a subcommand.
 
         Parameters
@@ -410,7 +450,7 @@ class BridgeCommandGroup(BridgeCommand):
             Keyword arguments that are directly passed to the respective command constructors. (:class:`.SlashCommand` and :class:`.ext.commands.Command`)
         """
 
-        def wrap(callback):
+        def wrap(callback: CommandCallback) -> BridgeCommand:
             slash = self.slash_variant.command(
                 *args,
                 **kwargs,
@@ -429,8 +469,55 @@ class BridgeCommandGroup(BridgeCommand):
 
         return wrap
 
+    def subgroup(
+        self,
+        *,
+        name: str = MISSING,
+        description: str | None = None,
+        **kwargs: Any,
+    ) -> Callable[[Callable[..., Any]], BridgeCommandGroup]:
+        """A decorator to register a function as a subgroup.
 
-def bridge_command(**kwargs):
+        .. versionadded:: 3.0
+
+        Parameters
+        ----------
+        name: :class:`str`
+            The name of the subgroup. Defaults to the name of the function.
+        description: Optional[:class:`str`]
+            The description of the subgroup.
+        kwargs: Optional[Dict[:class:`str`, Any]]
+            Keyword arguments that are directly passed to the respective command constructors. (:class:`.SlashCommandGroup` and :class:`.ext.commands.Group`)
+        """
+
+        def wrap(callback: Callable[..., Any]) -> BridgeCommandGroup:
+            group_name = callback.__name__ if name is MISSING else name
+            slash = self.slash_variant.create_subgroup(
+                name=group_name,
+                description=description,
+                **kwargs,
+            )
+            ext_kwargs = dict(kwargs)
+            if description is not None:
+                ext_kwargs["description"] = description
+            ext = self.ext_variant.group(
+                name=group_name,
+                **ext_kwargs,
+                cls=BridgeExtGroup,
+            )(callback)
+            group = BridgeCommandGroup(
+                callback,
+                parent=self,
+                slash_variant=slash,
+                ext_variant=ext,
+            )
+            self.subcommands.append(group)
+            return group
+
+        return wrap
+
+
+def bridge_command(**kwargs: Any) -> Callable[[CommandCallback], BridgeCommand]:
     """A decorator that is used to wrap a function as a bridge command.
 
     Parameters
@@ -439,13 +526,13 @@ def bridge_command(**kwargs):
         Keyword arguments that are directly passed to the respective command constructors. (:class:`.SlashCommand` and :class:`.ext.commands.Command`)
     """
 
-    def decorator(callback):
+    def decorator(callback: CommandCallback) -> BridgeCommand:
         return BridgeCommand(callback, **kwargs)
 
     return decorator
 
 
-def bridge_group(**kwargs):
+def bridge_group(**kwargs: Any) -> Callable[[CommandCallback], BridgeCommandGroup]:
     """A decorator that is used to wrap a function as a bridge command group.
 
     Parameters
@@ -454,13 +541,13 @@ def bridge_group(**kwargs):
         Keyword arguments that are directly passed to the respective command constructors (:class:`.SlashCommandGroup` and :class:`.ext.commands.Group`).
     """
 
-    def decorator(callback):
-        return BridgeCommandGroup(callback, **kwargs)
+    def decorator(callback: CommandCallback) -> BridgeCommandGroup:
+        return BridgeCommandGroup(callback, **{"name": callback.__name__, **kwargs})
 
     return decorator
 
 
-def map_to(name, description=None):
+def map_to(name: str, description: str | None = None) -> Callable[[Any], Any]:
     """To be used with bridge command groups, map the main command to a slash subcommand.
 
     Parameters
@@ -477,12 +564,11 @@ def map_to(name, description=None):
 
         @bot.bridge_group()
         @bridge.map_to("show")
-        async def config(ctx: BridgeContext):
-            ...
+        async def config(ctx: BridgeContext): ...
+
 
         @config.command()
-        async def toggle(ctx: BridgeContext):
-            ...
+        async def toggle(ctx: BridgeContext): ...
 
     Prefixed commands will not be affected, but slash commands will appear as:
 
@@ -492,25 +578,25 @@ def map_to(name, description=None):
         /config toggle
     """
 
-    def decorator(callback):
+    def decorator(callback: Any) -> Any:
         callback.__custom_map_to__ = {"name": name, "description": description}
         return callback
 
     return decorator
 
 
-def guild_only():
-    """Intended to work with :class:`.ApplicationCommand` and :class:`BridgeCommand`, adds a :func:`~ext.commands.check`
-    that locks the command to only run in guilds, and also registers the command as guild only client-side (on discord).
+def guild_only() -> Callable[[T], T]:
+    """Intended to work with :class:`.ApplicationCommand` and :class:`BridgeCommand`, adds a :func:`~ext.commands.check` that locks the command to only run in guilds, and also registers the command as guild only client-side (on discord).
 
     Basically a utility function that wraps both :func:`discord.ext.commands.guild_only` and :func:`discord.commands.guild_only`.
     """
 
-    def predicate(func: Callable | ApplicationCommand):
-        if isinstance(func, ApplicationCommand):
-            func.guild_only = True
+    def predicate(func: T) -> T:
+        target = cast("Any", func)
+        if isinstance(target, ApplicationCommand):
+            target.guild_only = True
         else:
-            func.__guild_only__ = True
+            target.__guild_only__ = True
 
         from ..commands import guild_only
 
@@ -519,9 +605,8 @@ def guild_only():
     return predicate
 
 
-def is_nsfw():
-    """Intended to work with :class:`.ApplicationCommand` and :class:`BridgeCommand`, adds a :func:`~ext.commands.check`
-    that locks the command to only run in nsfw contexts, and also registers the command as nsfw client-side (on discord).
+def is_nsfw() -> Callable[[T], T]:
+    """Intended to work with :class:`.ApplicationCommand` and :class:`BridgeCommand`, adds a :func:`~ext.commands.check` that locks the command to only run in nsfw contexts, and also registers the command as nsfw client-side (on discord).
 
     Basically a utility function that wraps both :func:`discord.ext.commands.is_nsfw` and :func:`discord.commands.is_nsfw`.
 
@@ -530,11 +615,12 @@ def is_nsfw():
         In DMs, the prefix-based command will always run as the user's privacy settings cannot be checked directly.
     """
 
-    def predicate(func: Callable | ApplicationCommand):
-        if isinstance(func, ApplicationCommand):
-            func.nsfw = True
+    def predicate(func: T) -> T:
+        target = cast("Any", func)
+        if isinstance(target, ApplicationCommand):
+            target.nsfw = True
         else:
-            func.__nsfw__ = True
+            target.__nsfw__ = True
 
         from ..commands import is_nsfw
 
@@ -543,10 +629,8 @@ def is_nsfw():
     return predicate
 
 
-def has_permissions(**perms: bool):
-    r"""Intended to work with :class:`.SlashCommand` and :class:`BridgeCommand`, adds a
-    :func:`~ext.commands.check` that locks the command to be run by people with certain
-    permissions inside guilds, and also registers the command as locked behind said permissions.
+def has_permissions(**perms: bool) -> Callable[[T], T]:
+    r"""Intended to work with :class:`.SlashCommand` and :class:`BridgeCommand`, adds a :func:`~ext.commands.check` that locks the command to be run by people with certain permissions inside guilds, and also registers the command as locked behind said permissions.
 
     Basically a utility function that wraps both :func:`discord.ext.commands.has_permissions`
     and :func:`discord.commands.default_permissions`.
@@ -557,28 +641,30 @@ def has_permissions(**perms: bool):
         An argument list of permissions to check for.
     """
 
-    def predicate(func: Callable | ApplicationCommand):
+    def predicate(func: T) -> T:
         from ..commands import has_permissions
 
         func = has_permissions(**perms)(func)
+        target = cast("Any", func)
         _perms = Permissions(**perms)
-        if isinstance(func, ApplicationCommand):
-            func.default_member_permissions = _perms
+        if isinstance(target, ApplicationCommand):
+            target.default_member_permissions = _perms
         else:
-            func.__default_member_permissions__ = _perms
+            target.__default_member_permissions__ = _perms
 
         return func
 
     return predicate
 
 
-class MentionableConverter(Converter):
+class MentionableConverter(Converter[Any]):
     """A converter that can convert a mention to a member, a user or a role."""
 
-    async def convert(self, ctx, argument):
+    @override
+    async def convert(self, ctx: Context[Any], argument: str) -> Any:
         try:
             return await RoleConverter().convert(ctx, argument)
-        except BadArgument:
+        except (BadArgument, NoPrivateMessage):
             pass
 
         if ctx.guild:
@@ -590,19 +676,21 @@ class MentionableConverter(Converter):
         return await UserConverter().convert(ctx, argument)
 
 
-class AttachmentConverter(Converter):
-    async def convert(self, ctx: Context, arg: str):
+class AttachmentConverter(Converter[discord.Attachment]):
+    @override
+    async def convert(self, ctx: Context[Any], argument: str) -> discord.Attachment:
         try:
             attach = ctx.message.attachments[0]
-        except IndexError:
-            raise BadArgument("At least 1 attachment is needed")
+        except IndexError as exc:
+            raise BadArgument("At least 1 attachment is needed") from exc
         else:
             return attach
 
 
-class BooleanConverter(Converter):
-    async def convert(self, ctx, arg: bool):
-        return _convert_to_bool(str(arg))
+class BooleanConverter(Converter[bool]):
+    @override
+    async def convert(self, ctx: Context[Any], argument: str) -> bool:
+        return _convert_to_bool(str(argument))
 
 
 BRIDGE_CONVERTER_MAPPING = {
@@ -619,52 +707,55 @@ BRIDGE_CONVERTER_MAPPING = {
 }
 
 
-class BridgeOption(Option, Converter):
-    """A subclass of :class:`discord.Option` which represents a selectable slash
-    command option and a prefixed command argument for bridge commands.
-    """
+class BridgeOption(Option, Converter[Any]):
+    """A subclass of :class:`discord.Option` which represents a selectable slash command option and a prefixed command argument for bridge commands."""
 
-    def __init__(self, input_type, *args, **kwargs):
-        self.converter = kwargs.pop("converter", None)
+    def __init__(self, input_type: Any, *args: Any, **kwargs: Any) -> None:
+        self.converter: Any = kwargs.pop("converter", None)
         super().__init__(input_type, *args, **kwargs)
 
         self.converter = self.converter or BRIDGE_CONVERTER_MAPPING.get(input_type)
 
-    async def convert(self, ctx, argument: str) -> Any:
+    @override
+    async def convert(self, ctx: Context[Any], argument: str) -> Any:
         try:
-            if self.converter is not None:
-                converted = await self.converter().convert(ctx, argument)
-            else:
-                converter = BRIDGE_CONVERTER_MAPPING.get(self.input_type)
-                if isinstance(converter, type) and issubclass(converter, Converter):
-                    converted = await converter().convert(ctx, argument)  # type: ignore # protocol class
-                elif callable(converter):
-                    converted = converter(argument)
-                else:
-                    raise TypeError(f"Invalid converter: {converter}")
-
+            converted = await self._convert_value(ctx, argument)
             if self.choices:
-                choices_names: list[str | int | float] = [
-                    choice.name for choice in self.choices
-                ]
-                if converted in choices_names and (
-                    choice := get(self.choices, name=converted)
-                ):
-                    converted = choice.value
-                else:
-                    choices = [choice.value for choice in self.choices]
-                    if converted not in choices:
-                        raise ValueError(
-                            f"{argument} is not a valid choice. Valid choices:"
-                            f" {list(set(choices_names + choices))}"
-                        )
-
-            return converted
+                converted = self._match_choice(converted, argument)
         except ValueError as exc:
-            raise BadArgument() from exc
+            raise BadArgument from exc
+        return converted
+
+    async def _convert_value(self, ctx: Context[Any], argument: str) -> Any:
+        converter: Any = (
+            self.converter
+            if self.converter is not None
+            else BRIDGE_CONVERTER_MAPPING.get(self.input_type)
+        )
+        if isinstance(converter, type) and issubclass(converter, Converter):
+            return await cast("Any", converter)().convert(ctx, argument)
+        if callable(cast("Any", converter)):
+            return converter(argument)
+        raise TypeError(f"Invalid converter: {converter}")
+
+    def _match_choice(self, converted: Any, argument: str) -> Any:
+        choices_names: list[str | int | float] = [
+            choice.name for choice in self.choices
+        ]
+        if converted in choices_names and (choice := get(self.choices, name=converted)):
+            return choice.value
+        choices = [choice.value for choice in self.choices]
+        if converted not in choices:
+            raise ValueError(
+                f"{argument} is not a valid choice. Valid choices:"
+                f" {list(set(choices_names + choices))}"
+            )
+        return converted
 
 
-def bridge_option(name, input_type=None, **kwargs):
+def bridge_option(
+    name: str, input_type: Any = None, **kwargs: Any
+) -> Callable[[Any], Any]:
     """A decorator that can be used instead of typehinting :class:`.BridgeOption`.
 
     .. versionadded:: 2.6
@@ -676,7 +767,7 @@ def bridge_option(name, input_type=None, **kwargs):
         This allows you to have a separate UI ``name`` and parameter name.
     """
 
-    def decorator(func):
+    def decorator(func: Any) -> Any:
         resolved_name = kwargs.pop("parameter_name", None) or name
         itype = (
             kwargs.pop("type", None)

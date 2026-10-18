@@ -63,8 +63,11 @@ class ActivityParty(TypedDict, total=False):
 class ActivityAssets(TypedDict, total=False):
     large_image: str
     large_text: str
+    large_url: str
     small_image: str
     small_text: str
+    small_url: str
+    invite_cover_image: str
 
 
 class ActivitySecrets(TypedDict, total=False):
@@ -99,7 +102,10 @@ class _BaseActivity(SendableActivity):
 
 class Activity(_BaseActivity, total=False):
     state: str | None
+    state_url: str | None
     details: str | None
+    details_url: str | None
+    status_display_type: int | None
     timestamps: ActivityTimestamps
     assets: ActivityAssets
     party: ActivityParty

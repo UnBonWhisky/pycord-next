@@ -25,23 +25,29 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import threading
 from collections import deque
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from discord.opus import PacketDecoder
 
+from ...sinks.errors import RecordingException
 from ..utils.multidataevent import MultiDataEvent
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from typing_extensions import Unpack
+
     from discord.sinks import Sink
 
     from ..packets import RTCPPacket, RTPPacket
     from .reader import AudioReader
 
+    AnyAudioReader = AudioReader[Unpack[tuple[Any, ...]]]
     EventCB = Callable[..., Any]
     EventData = tuple[str, tuple[Any, ...], dict[str, Any]]
 
@@ -49,7 +55,19 @@ _log = logging.getLogger(__name__)
 
 
 class PacketRouter(threading.Thread):
-    def __init__(self, sink: Sink, reader: AudioReader) -> None:
+    """A thread that routes the received RTP packets to per-SSRC decoders and the sink.
+
+    Parameters
+    ----------
+    sink: :class:`~discord.sinks.Sink`
+        The sink the decoded audio is written to.
+    reader: :class:`AudioReader`
+        The reader that owns this router.
+    """
+
+    _poll_interval: float = 0.25
+
+    def __init__(self, sink: Sink, reader: AnyAudioReader) -> None:
         super().__init__(
             daemon=True,
             name=f"voice-receiver-packet-router:{id(self):#x}",
@@ -57,7 +75,7 @@ class PacketRouter(threading.Thread):
 
         self.sink: Sink = sink
         self.decoders: dict[int, PacketDecoder] = {}
-        self.reader: AudioReader = reader
+        self.reader: AnyAudioReader = reader
         self.waiter: MultiDataEvent[PacketDecoder] = MultiDataEvent()
 
         self._lock: threading.RLock = threading.RLock()
@@ -65,20 +83,53 @@ class PacketRouter(threading.Thread):
         self._dropped_ssrcs: deque[int] = deque(maxlen=16)
 
     def feed_rtp(self, packet: RTPPacket) -> None:
+        """Route a received RTP packet to its decoder.
+
+        Parameters
+        ----------
+        packet: :class:`RTPPacket`
+            The decrypted packet.
+        """
         if packet.ssrc in self._dropped_ssrcs:
             _log.debug("Ignoring packet from dropped ssrc %s", packet.ssrc)
+            return
 
         with self._lock:
             decoder = self.get_decoder(packet.ssrc)
-            if decoder is not None:
+            if decoder is None:
+                return
+
+            if self.sink.is_opus():
                 decoder.push_packet(packet)
+            else:
+                data = decoder.process_packet(packet)
+                self.sink.write(data, data.source)
 
     def feed_rtcp(self, packet: RTCPPacket) -> None:
+        """Dispatch a received RTCP packet as an ``rtcp_packet`` event.
+
+        Parameters
+        ----------
+        packet: :class:`RTCPPacket`
+            The packet.
+        """
         guild = self.sink.client.guild if self.sink.client else None
         event_router = self.reader.event_router
         event_router.dispatch("rtcp_packet", packet, guild)
 
     def get_decoder(self, ssrc: int) -> PacketDecoder | None:
+        """Get the decoder of an SSRC, creating it if needed.
+
+        Parameters
+        ----------
+        ssrc: :class:`int`
+            The SSRC of the stream.
+
+        Returns
+        -------
+        :class:`PacketDecoder` | None
+            The decoder of the stream.
+        """
         with self._lock:
             decoder = self.decoders.get(ssrc)
             if decoder is None:
@@ -86,10 +137,26 @@ class PacketRouter(threading.Thread):
             return decoder
 
     def set_sink(self, sink: Sink) -> None:
+        """Replace the sink the decoded audio is written to.
+
+        Parameters
+        ----------
+        sink: :class:`~discord.sinks.Sink`
+            The new sink.
+        """
         with self._lock:
             self.sink = sink
 
     def set_user_id(self, ssrc: int, user_id: int) -> None:
+        """Associate an SSRC with a user.
+
+        Parameters
+        ----------
+        ssrc: :class:`int`
+            The SSRC of the stream.
+        user_id: :class:`int`
+            The ID of the user the stream belongs to.
+        """
         with self._lock:
             if ssrc in self._dropped_ssrcs:
                 self._dropped_ssrcs.remove(ssrc)
@@ -99,6 +166,13 @@ class PacketRouter(threading.Thread):
                 decoder.set_user_id(user_id)
 
     def destroy_decoder(self, ssrc: int) -> None:
+        """Destroy the decoder of an SSRC.
+
+        Parameters
+        ----------
+        ssrc: :class:`int`
+            The SSRC of the stream.
+        """
         with self._lock:
             decoder = self.decoders.pop(ssrc, None)
             if decoder is not None:
@@ -106,27 +180,34 @@ class PacketRouter(threading.Thread):
                 decoder.destroy()
 
     def destroy_all_decoders(self) -> None:
+        """Destroy every decoder."""
         with self._lock:
-            for ssrc in self.decoders.keys():
+            for ssrc in list(self.decoders):
                 self.destroy_decoder(ssrc)
 
     def stop(self) -> None:
+        """Ask the router thread to stop."""
         self._end_thread.set()
         self.waiter.notify()
 
     def run(self) -> None:
+        """Route the buffered packets to the sink until stopped."""
         try:
             self._do_run()
         except Exception as exc:
             _log.exception("Error in %s loop", self)
             self.reader.error = exc
         finally:
-            self.reader.client.stop_recording()
+            self._drain_all_decoders()
+            client = self.reader.client
+            if client._reader is self.reader:
+                with contextlib.suppress(RecordingException):
+                    client.stop_recording()
             self.waiter.clear()
 
     def _do_run(self) -> None:
         while not self._end_thread.is_set():
-            self.waiter.wait()
+            self.waiter.wait(self._poll_interval)
 
             with self._lock:
                 for decoder in self.waiter.items:
@@ -134,15 +215,38 @@ class PacketRouter(threading.Thread):
                     if data is not None:
                         self.sink.write(data, data.source)
 
+    def _drain_all_decoders(self) -> None:
+        with self._lock:
+            for decoder in list(self.decoders.values()):
+                try:
+                    for packet in decoder._buffer.flush():
+                        data = decoder.process_packet(packet)
+                        self.sink.write(data, data.source)
+                except Exception:
+                    _log.exception(
+                        "Error draining decoder for ssrc=%s at end-of-recording",
+                        decoder.ssrc,
+                    )
+
 
 class SinkEventRouter(threading.Thread):
-    def __init__(self, sink: Sink, reader: AudioReader) -> None:
+    """A thread that dispatches voice events to the listeners of a sink.
+
+    Parameters
+    ----------
+    sink: :class:`~discord.sinks.Sink`
+        The sink whose listeners receive the events.
+    reader: :class:`AudioReader`
+        The reader that owns this router.
+    """
+
+    def __init__(self, sink: Sink, reader: AnyAudioReader) -> None:
         super().__init__(
             daemon=True, name=f"voice-receiver-sink-event-router:{id(self):#x}"
         )
 
         self.sink: Sink = sink
-        self.reader: AudioReader = reader
+        self.reader: AnyAudioReader = reader
 
         self._event_listeners: dict[str, list[EventCB]] = {}
         self._buffer: queue.SimpleQueue[EventData] = queue.SimpleQueue()
@@ -152,22 +256,42 @@ class SinkEventRouter(threading.Thread):
         self.register_events()
 
     def dispatch(self, event: str, /, *args: Any, **kwargs: Any) -> None:
+        """Queue an event for the sink listeners.
+
+        Parameters
+        ----------
+        event: :class:`str`
+            The name of the event, without the ``on_`` prefix.
+        *args
+            The positional arguments of the event.
+        **kwargs
+            The keyword arguments of the event.
+        """
         _log.debug("Dispatch voice event %s", event)
         self._buffer.put_nowait((event, args, kwargs))
 
     def set_sink(self, sink: Sink) -> None:
+        """Replace the sink whose listeners receive the events.
+
+        Parameters
+        ----------
+        sink: :class:`~discord.sinks.Sink`
+            The new sink.
+        """
         with self._lock:
             self.unregister_events()
             self.sink = sink
             self.register_events()
 
     def register_events(self) -> None:
+        """Register the listeners of the sink and of its children."""
         with self._lock:
             self._register_listeners(self.sink)
             for child in self.sink.walk_children():
                 self._register_listeners(child)
 
     def unregister_events(self) -> None:
+        """Unregister the listeners of the sink and of its children."""
         with self._lock:
             self._unregister_listeners(self.sink)
             for child in self.sink.walk_children():
@@ -190,10 +314,8 @@ class SinkEventRouter(threading.Thread):
             func = getattr(sink, method_name)
 
             if name in self._event_listeners:
-                try:
+                with contextlib.suppress(ValueError):
                     self._event_listeners[name].remove(func)
-                except ValueError:
-                    pass
 
     def _dispatch_to_listeners(self, event: str, *args: Any, **kwargs: Any) -> None:
         for listener in self._event_listeners.get(f"on_{event}", []):
@@ -209,9 +331,11 @@ class SinkEventRouter(threading.Thread):
                 )
 
     def stop(self) -> None:
+        """Ask the router thread to stop."""
         self._end_thread.set()
 
     def run(self) -> None:
+        """Dispatch the queued events to the listeners until stopped."""
         try:
             self._do_run()
         except Exception as exc:
@@ -226,6 +350,5 @@ class SinkEventRouter(threading.Thread):
             except queue.Empty:
                 continue
             else:
-                with self._lock:
-                    with self.reader.packet_router._lock:
-                        self._dispatch_to_listeners(event, *args, **kwargs)
+                with self._lock, self.reader.packet_router._lock:
+                    self._dispatch_to_listeners(event, *args, **kwargs)

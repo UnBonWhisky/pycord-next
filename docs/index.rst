@@ -22,6 +22,8 @@ Is this your first time using the library? This is the place to get started!
 
 - **First steps:** :doc:`installing` | :doc:`quickstart` | :doc:`logging` | :doc:`faq` | :resource:`Guide <guide>`
 - **Working with Discord:** :doc:`discord` | :doc:`intents`
+- **Running a bot at scale:** :doc:`caching` | :doc:`gateway`
+- **Coming from pycord:** :doc:`migrating_to_next`
 - **Examples:** Many examples are available in the :resource:`repository <examples>`.
 
 Getting help
@@ -67,6 +69,20 @@ These extensions help you during development when it comes to common tasks.
 - :doc:`ext/pages/index` - A pagination extension module
 - :doc:`ext/bridge/index` - A module that bridges slash commands to prefixed commands
 
+Guides
+~~~~~~
+
+.. toctree::
+  :caption: Guides
+  :maxdepth: 1
+  :hidden:
+
+  caching
+  gateway
+
+- :doc:`caching` - In-process and remote (Redis, Memcached) caches, synchronous and awaitable accessors.
+- :doc:`gateway` - Transports, sharding, rate limits, and the Redis Streams proxy and workers.
+
 Meta
 ----
 
@@ -78,11 +94,15 @@ If you're looking for something related to the project itself, it's here.
   :hidden:
 
   changelog
+  changes
   version_guarantees
+  migrating_to_next
   migrating_to_v1
   migrating_to_v2
 
 - :doc:`changelog` - The changelog for the library.
+- :doc:`changes` - Every difference between Pycord and Pycord Next.
 - :doc:`version_guarantees` - The version guarantees for the library.
+- :doc:`migrating_to_next` - How to migrate from Pycord to Pycord Next.
 - :doc:`migrating_to_v1` - How to migrate from v0.x to v1.x.
 - :doc:`migrating_to_v2` - How to migrate from v1.x to v2.x.

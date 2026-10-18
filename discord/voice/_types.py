@@ -40,12 +40,12 @@ if TYPE_CHECKING:
     P = ParamSpec("P")
     R = TypeVar("R")
 
-ClientT = TypeVar("ClientT", bound="Client", covariant=True)
+ClientT_co = TypeVar("ClientT_co", bound="Client", covariant=True)
 
 __all__ = ("VoiceProtocol",)
 
 
-class VoiceProtocol(Generic[ClientT]):
+class VoiceProtocol(Generic[ClientT_co]):
     """A class that represents the Discord voice protocol.
 
     .. warning::
@@ -73,8 +73,8 @@ class VoiceProtocol(Generic[ClientT]):
         The voice channel that is being connected to.
     """
 
-    def __init__(self, client: ClientT, channel: abc.Connectable) -> None:
-        self.client: ClientT = client
+    def __init__(self, client: ClientT_co, channel: abc.Connectable) -> None:
+        self.client: ClientT_co = client
         self.channel: abc.Connectable = channel
 
     async def on_voice_state_update(self, data: RawVoiceStateUpdateEvent) -> None:
@@ -151,7 +151,9 @@ class VoiceProtocol(Generic[ClientT]):
         """
 
     def cleanup(self) -> None:
-        """This method *must* be called to ensure proper clean-up during a disconnect.
+        """Clean up this voice protocol instance.
+
+        This method *must* be called to ensure proper clean-up during a disconnect.
 
         It is advisable to call this from within :meth:`disconnect` when you are completely
         done with the voice protocol instance.

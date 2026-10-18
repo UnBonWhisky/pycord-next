@@ -80,6 +80,7 @@ class AppInfo(BaseAppInfo, total=False):
     primary_sku_id: Snowflake
     slug: str
     flags: int
+    flags_new: str
     approximate_guild_count: int
     approximate_user_install_count: int
     approximate_user_authorization_count: int
@@ -92,4 +93,4 @@ class AppInfo(BaseAppInfo, total=False):
 
 
 class PartialAppInfo(BaseAppInfo, total=False):
-    pass
+    summary: str

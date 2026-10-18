@@ -22,19 +22,22 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-try:
-    import davey
-except ImportError:
-    HAS_DAVEY = False
-    DAVE_PROTOCOL_VERSION = 0
-else:
-    HAS_DAVEY = True
-    DAVE_PROTOCOL_VERSION = davey.DAVE_PROTOCOL_VERSION
+from __future__ import annotations
 
-try:
-    import nacl.secret
-    import nacl.utils
-except ImportError:
-    HAS_NACL = False
-else:
-    HAS_NACL = True
+import importlib
+
+
+def _is_importable(*names: str) -> bool:
+    try:
+        for name in names:
+            importlib.import_module(name)
+    except ImportError:
+        return False
+    return True
+
+
+HAS_DAVEY: bool = _is_importable("davey")
+DAVE_PROTOCOL_VERSION: int = (
+    int(importlib.import_module("davey").DAVE_PROTOCOL_VERSION) if HAS_DAVEY else 0
+)
+HAS_NACL: bool = _is_importable("nacl.secret", "nacl.utils")

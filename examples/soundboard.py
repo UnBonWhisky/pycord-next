@@ -86,7 +86,7 @@ class SoundboardCog(discord.Cog):
 
             await ctx.respond(f"Added new sound: {new_sound.emoji} {new_sound.name}")
         except Exception as e:
-            await ctx.respond(f"Failed to add sound: {str(e)}")
+            await ctx.respond(f"Failed to add sound: {e!s}")
 
     @discord.slash_command()
     @discord.default_permissions(manage_guild=True)
@@ -120,7 +120,7 @@ class SoundboardCog(discord.Cog):
             )
             await ctx.respond(f"Updated sound: {sound.emoji} {sound.name}")
         except Exception as e:
-            await ctx.respond(f"Failed to edit sound: {str(e)}")
+            await ctx.respond(f"Failed to edit sound: {e!s}")
 
     @discord.slash_command()
     async def play_sound(
@@ -162,7 +162,7 @@ class SoundboardCog(discord.Cog):
                 await voice_client.disconnect()
 
         except Exception as e:
-            await ctx.respond(f"Failed to play sound: {str(e)}")
+            await ctx.respond(f"Failed to play sound: {e!s}")
 
 
 bot.add_cog(SoundboardCog(bot))

@@ -25,15 +25,21 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from discord.errors import ClientException, DiscordException
+from discord._internal.aliases import export_module_aliases
+from discord.errors import (
+    CheckFailure as _AppCheckFailure,
+    ClientException,
+    DiscordException,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from inspect import Parameter
 
     from discord.abc import GuildChannel
+    from discord.message import Message
     from discord.threads import Thread
     from discord.types.snowflake import Snowflake, SnowflakeList
 
@@ -44,57 +50,57 @@ if TYPE_CHECKING:
 
 
 __all__ = (
-    "CommandError",
-    "MissingRequiredArgument",
-    "BadArgument",
-    "PrivateMessageOnly",
-    "NoPrivateMessage",
-    "CheckFailure",
-    "CheckAnyFailure",
-    "CommandNotFound",
-    "DisabledCommand",
-    "CommandInvokeError",
-    "TooManyArguments",
-    "UserInputError",
-    "CommandOnCooldown",
-    "MaxConcurrencyReached",
-    "NotOwner",
-    "MessageNotFound",
-    "ObjectNotFound",
-    "MemberNotFound",
-    "GuildNotFound",
-    "UserNotFound",
-    "ChannelNotFound",
-    "ThreadNotFound",
-    "ChannelNotReadable",
-    "BadColourArgument",
-    "BadColorArgument",
-    "RoleNotFound",
-    "BadInviteArgument",
-    "EmojiNotFound",
-    "GuildStickerNotFound",
-    "PartialEmojiConversionFailure",
-    "BadBoolArgument",
-    "MissingRole",
-    "BotMissingRole",
-    "MissingAnyRole",
-    "BotMissingAnyRole",
-    "MissingPermissions",
-    "BotMissingPermissions",
-    "NSFWChannelRequired",
-    "ConversionError",
-    "BadUnionArgument",
-    "BadLiteralArgument",
     "ArgumentParsingError",
-    "UnexpectedQuoteError",
-    "InvalidEndOfQuotedStringError",
-    "ExpectedClosingQuoteError",
-    "CommandRegistrationError",
-    "FlagError",
+    "BadArgument",
+    "BadBoolArgument",
+    "BadColorArgument",
+    "BadColourArgument",
     "BadFlagArgument",
+    "BadInviteArgument",
+    "BadLiteralArgument",
+    "BadUnionArgument",
+    "BotMissingAnyRole",
+    "BotMissingPermissions",
+    "BotMissingRole",
+    "ChannelNotFound",
+    "ChannelNotReadable",
+    "CheckAnyFailure",
+    "CheckFailure",
+    "CommandError",
+    "CommandInvokeError",
+    "CommandNotFound",
+    "CommandOnCooldown",
+    "CommandRegistrationError",
+    "ConversionError",
+    "DisabledCommand",
+    "EmojiNotFound",
+    "ExpectedClosingQuoteError",
+    "FlagError",
+    "GuildNotFound",
+    "GuildStickerNotFound",
+    "InvalidEndOfQuotedStringError",
+    "MaxConcurrencyReached",
+    "MemberNotFound",
+    "MessageNotFound",
+    "MissingAnyRole",
     "MissingFlagArgument",
-    "TooManyFlags",
+    "MissingPermissions",
+    "MissingRequiredArgument",
     "MissingRequiredFlag",
+    "MissingRole",
+    "NSFWChannelRequired",
+    "NoPrivateMessage",
+    "NotOwner",
+    "ObjectNotFound",
+    "PartialEmojiConversionFailure",
+    "PrivateMessageOnly",
+    "RoleNotFound",
+    "ThreadNotFound",
+    "TooManyArguments",
+    "TooManyFlags",
+    "UnexpectedQuoteError",
+    "UserInputError",
+    "UserNotFound",
 )
 
 
@@ -133,22 +139,20 @@ class ConversionError(CommandError):
         the ``__cause__`` attribute.
     """
 
-    def __init__(self, converter: Converter, original: Exception) -> None:
-        self.converter: Converter = converter
+    def __init__(self, converter: Converter[Any], original: Exception) -> None:
+        self.converter: Converter[Any] = converter
         self.original: Exception = original
 
 
 class UserInputError(CommandError):
-    """The base exception type for errors that involve errors
-    regarding user input.
+    """The base exception type for errors that involve errors regarding user input.
 
     This inherits from :exc:`CommandError`.
     """
 
 
 class CommandNotFound(CommandError):
-    """Exception raised when a command is attempted to be invoked
-    but no command under that name is found.
+    """Exception raised when a command is attempted to be invoked but no command under that name is found.
 
     This is not raised for invalid subcommands, rather just the
     initial main command that is attempted to be invoked.
@@ -158,8 +162,7 @@ class CommandNotFound(CommandError):
 
 
 class MissingRequiredArgument(UserInputError):
-    """Exception raised when parsing a command and a parameter
-    that is required is not encountered.
+    """Exception raised when parsing a command and a parameter that is required is not encountered.
 
     This inherits from :exc:`UserInputError`
 
@@ -175,25 +178,25 @@ class MissingRequiredArgument(UserInputError):
 
 
 class TooManyArguments(UserInputError):
-    """Exception raised when the command was passed too many arguments and its
-    :attr:`.Command.ignore_extra` attribute was not set to ``True``.
+    """Exception raised when the command was passed too many arguments and its :attr:`.Command.ignore_extra` attribute was not set to ``True``.
 
     This inherits from :exc:`UserInputError`
     """
 
 
 class BadArgument(UserInputError):
-    """Exception raised when a parsing or conversion failure is encountered
-    on an argument to pass into a command.
+    """Exception raised when a parsing or conversion failure is encountered on an argument to pass into a command.
 
     This inherits from :exc:`UserInputError`
     """
 
 
-class CheckFailure(CommandError):
+class CheckFailure(CommandError, _AppCheckFailure):
     """Exception raised when the predicates in :attr:`.Command.checks` have failed.
 
-    This inherits from :exc:`CommandError`
+    This inherits from :exc:`CommandError` and :exc:`discord.CheckFailure`, so
+    ``except discord.CheckFailure`` also catches the check errors raised by
+    ext checks used on application commands.
     """
 
 
@@ -213,16 +216,15 @@ class CheckAnyFailure(CheckFailure):
     """
 
     def __init__(
-        self, checks: list[Callable[[Context], bool]], errors: list[CheckFailure]
+        self, checks: list[Callable[[Context[Any]], bool]], errors: list[CheckFailure]
     ) -> None:
-        self.checks: list[Callable[[Context], bool]] = checks
+        self.checks: list[Callable[[Context[Any]], bool]] = checks
         self.errors: list[CheckFailure] = errors
         super().__init__("You do not have permission to run this command.")
 
 
 class PrivateMessageOnly(CheckFailure):
-    """Exception raised when an operation does not work outside of private
-    message contexts.
+    """Exception raised when an operation does not work outside of private message contexts.
 
     This inherits from :exc:`CheckFailure`
     """
@@ -234,8 +236,7 @@ class PrivateMessageOnly(CheckFailure):
 
 
 class NoPrivateMessage(CheckFailure):
-    """Exception raised when an operation does not work in private message
-    contexts.
+    """Exception raised when an operation does not work in private message contexts.
 
     This inherits from :exc:`CheckFailure`
     """
@@ -252,8 +253,7 @@ class NotOwner(CheckFailure):
 
 
 class ObjectNotFound(BadArgument):
-    """Exception raised when the argument provided did not match the format
-    of an ID or a mention.
+    """Exception raised when the argument provided did not match the format of an ID or a mention.
 
     This inherits from :exc:`BadArgument`
 
@@ -271,8 +271,7 @@ class ObjectNotFound(BadArgument):
 
 
 class MemberNotFound(BadArgument):
-    """Exception raised when the member provided was not found in the bot's
-    cache.
+    """Exception raised when the member provided was not found in the bot's cache.
 
     This inherits from :exc:`BadArgument`
 
@@ -308,8 +307,7 @@ class GuildNotFound(BadArgument):
 
 
 class UserNotFound(BadArgument):
-    """Exception raised when the user provided was not found in the bot's
-    cache.
+    """Exception raised when the user provided was not found in the bot's cache.
 
     This inherits from :exc:`BadArgument`
 
@@ -345,8 +343,7 @@ class MessageNotFound(BadArgument):
 
 
 class ChannelNotReadable(BadArgument):
-    """Exception raised when the bot does not have permission to read messages
-    in the channel.
+    """Exception raised when the bot does not have permission to read messages in the channel.
 
     This inherits from :exc:`BadArgument`
 
@@ -372,12 +369,12 @@ class ChannelNotFound(BadArgument):
 
     Attributes
     ----------
-    argument: :class:`str`
+    argument: Union[:class:`str`, :class:`int`, None]
         The channel supplied by the caller that was not found
     """
 
-    def __init__(self, argument: str) -> None:
-        self.argument: str = argument
+    def __init__(self, argument: str | int | None) -> None:
+        self.argument: str | int | None = argument
         super().__init__(f'Channel "{argument}" not found.')
 
 
@@ -417,7 +414,8 @@ class BadColourArgument(BadArgument):
         super().__init__(f'Colour "{argument}" is invalid.')
 
 
-BadColorArgument = BadColourArgument
+if TYPE_CHECKING:
+    BadColorArgument = BadColourArgument
 
 
 class RoleNotFound(BadArgument):
@@ -470,8 +468,7 @@ class EmojiNotFound(BadArgument):
 
 
 class PartialEmojiConversionFailure(BadArgument):
-    """Exception raised when the emoji provided does not match the correct
-    format.
+    """Exception raised when the emoji provided does not match the correct format.
 
     This inherits from :exc:`BadArgument`
 
@@ -558,18 +555,21 @@ class CommandOnCooldown(CommandError):
     cooldown: :class:`.Cooldown`
         A class with attributes ``rate`` and ``per`` similar to the
         :func:`.cooldown` decorator.
-    type: :class:`BucketType`
+    type: Union[:class:`BucketType`, Callable[[:class:`.Message`], Any]]
         The type associated with the cooldown.
     retry_after: :class:`float`
         The amount of seconds to wait before you can retry again.
     """
 
     def __init__(
-        self, cooldown: Cooldown, retry_after: float, type: BucketType
+        self,
+        cooldown: Cooldown,
+        retry_after: float,
+        type: BucketType | Callable[[Message], Any],
     ) -> None:
         self.cooldown: Cooldown = cooldown
         self.retry_after: float = retry_after
-        self.type: BucketType = type
+        self.type: BucketType | Callable[[Message], Any] = type
         super().__init__(f"You are on cooldown. Try again in {retry_after:.2f}s")
 
 
@@ -640,8 +640,7 @@ class BotMissingRole(CheckFailure):
 
 
 class MissingAnyRole(CheckFailure):
-    """Exception raised when the command invoker lacks any of
-    the roles specified to run a command.
+    """Exception raised when the command invoker lacks any of the roles specified to run a command.
 
     This inherits from :exc:`CheckFailure`
 
@@ -669,8 +668,7 @@ class MissingAnyRole(CheckFailure):
 
 
 class BotMissingAnyRole(CheckFailure):
-    """Exception raised when the bot's member lacks any of
-    the roles specified to run a command.
+    """Exception raised when the bot's member lacks any of the roles specified to run a command.
 
     This inherits from :exc:`CheckFailure`
 
@@ -718,8 +716,7 @@ class NSFWChannelRequired(CheckFailure):
 
 
 class MissingPermissions(CheckFailure):
-    """Exception raised when the command invoker lacks permissions to run a
-    command.
+    """Exception raised when the command invoker lacks permissions to run a command.
 
     This inherits from :exc:`CheckFailure`
 
@@ -746,8 +743,7 @@ class MissingPermissions(CheckFailure):
 
 
 class BotMissingPermissions(CheckFailure):
-    """Exception raised when the bot's member lacks permissions to run a
-    command.
+    """Exception raised when the bot's member lacks permissions to run a command.
 
     This inherits from :exc:`CheckFailure`
 
@@ -774,8 +770,7 @@ class BotMissingPermissions(CheckFailure):
 
 
 class BadUnionArgument(UserInputError):
-    """Exception raised when a :data:`typing.Union` converter fails for all
-    its associated types.
+    """Exception raised when a :data:`typing.Union` converter fails for all its associated types.
 
     This inherits from :exc:`UserInputError`
 
@@ -796,7 +791,7 @@ class BadUnionArgument(UserInputError):
         self.converters: tuple[type, ...] = converters
         self.errors: list[CommandError] = errors
 
-        def _get_name(x):
+        def _get_name(x: Any) -> str:
             try:
                 return x.__name__
             except AttributeError:
@@ -814,8 +809,7 @@ class BadUnionArgument(UserInputError):
 
 
 class BadLiteralArgument(UserInputError):
-    """Exception raised when a :data:`typing.Literal` converter fails for all
-    its associated values.
+    """Exception raised when a :data:`typing.Literal` converter fails for all its associated values.
 
     This inherits from :exc:`UserInputError`
 
@@ -838,7 +832,7 @@ class BadLiteralArgument(UserInputError):
         self.literals: tuple[Any, ...] = literals
         self.errors: list[CommandError] = errors
 
-        to_string = [repr(l) for l in literals]
+        to_string = [repr(literal) for literal in literals]
         if len(to_string) > 2:
             fmt = f"{', '.join(to_string[:-1])}, or {to_string[-1]}"
         else:
@@ -874,8 +868,7 @@ class UnexpectedQuoteError(ArgumentParsingError):
 
 
 class InvalidEndOfQuotedStringError(ArgumentParsingError):
-    """An exception raised when a space is expected after the closing quote in a string
-    but a different character is found.
+    """An exception raised when a space is expected after the closing quote in a string but a different character is found.
 
     This inherits from :exc:`ArgumentParsingError`.
 
@@ -909,8 +902,7 @@ class ExpectedClosingQuoteError(ArgumentParsingError):
 
 
 class CommandRegistrationError(ClientException):
-    """An exception raised when the command can't be added
-    because the name is already taken by a different command.
+    """An exception raised when the command can't be added because the name is already taken by a different command.
 
     This inherits from :exc:`discord.ClientException`
 
@@ -1021,3 +1013,6 @@ class MissingFlagArgument(FlagError):
     def __init__(self, flag: Flag) -> None:
         self.flag: Flag = flag
         super().__init__(f"Flag {flag.name!r} does not have an argument")
+
+
+export_module_aliases(globals())

@@ -26,34 +26,36 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import unicodedata
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast, overload
 
 from .asset import Asset, AssetMixin
 from .enums import StickerFormatType, StickerType, try_enum
 from .errors import InvalidData
 from .mixins import Hashable
-from .utils import MISSING, cached_slot_property, find, get, snowflake_time
+from .utils import MISSING, _get_as_snowflake, find, get, snowflake_time
 
 __all__ = (
-    "StickerPack",
-    "StickerItem",
-    "Sticker",
-    "StandardSticker",
     "GuildSticker",
+    "StandardSticker",
+    "Sticker",
+    "StickerItem",
+    "StickerPack",
 )
 
 if TYPE_CHECKING:
-    import datetime
+    import datetime as dt
 
-    from .guild import Guild
+    from .guild import Guild, PartialGuild
     from .state import ConnectionState
-    from .types.sticker import EditGuildSticker
-    from .types.sticker import GuildSticker as GuildStickerPayload
-    from .types.sticker import ListPremiumStickerPacks as ListPremiumStickerPacksPayload
-    from .types.sticker import StandardSticker as StandardStickerPayload
-    from .types.sticker import Sticker as StickerPayload
-    from .types.sticker import StickerItem as StickerItemPayload
-    from .types.sticker import StickerPack as StickerPackPayload
+    from .types.sticker import (
+        EditGuildSticker,
+        GuildSticker as GuildStickerPayload,
+        ListPremiumStickerPacks as ListPremiumStickerPacksPayload,
+        StandardSticker as StandardStickerPayload,
+        Sticker as StickerPayload,
+        StickerItem as StickerItemPayload,
+        StickerPack as StickerPackPayload,
+    )
     from .user import User
 
 
@@ -88,22 +90,24 @@ class StickerPack(Hashable):
         The stickers of this sticker pack.
     sku_id: :class:`int`
         The SKU ID of the sticker pack.
-    cover_sticker_id: :class:`int`
+    cover_sticker_id: Optional[:class:`int`]
          The ID of the sticker used for the cover of the sticker pack.
-    cover_sticker: :class:`StandardSticker`
-        The sticker used for the cover of the sticker pack.
+         ``None`` when Discord does not send it.
+    cover_sticker: Optional[:class:`StandardSticker`]
+        The sticker used for the cover of the sticker pack, ``None`` when there is
+        no cover sticker ID or it is not one of :attr:`stickers`.
     """
 
     __slots__ = (
+        "_banner",
         "_state",
+        "cover_sticker",
+        "cover_sticker_id",
+        "description",
         "id",
-        "stickers",
         "name",
         "sku_id",
-        "cover_sticker_id",
-        "cover_sticker",
-        "description",
-        "_banner",
+        "stickers",
     )
 
     def __init__(self, *, state: ConnectionState, data: StickerPackPayload) -> None:
@@ -118,14 +122,21 @@ class StickerPack(Hashable):
         ]
         self.name: str = data["name"]
         self.sku_id: int = int(data["sku_id"])
-        self.cover_sticker_id: int = int(data["cover_sticker_id"])
-        self.cover_sticker: StandardSticker = get(self.stickers, id=self.cover_sticker_id)  # type: ignore
+        cover_sticker_id = _get_as_snowflake(data, "cover_sticker_id")
+        self.cover_sticker_id: int | None = cover_sticker_id
+        self.cover_sticker: StandardSticker | None = (
+            get(self.stickers, id=cover_sticker_id)
+            if cover_sticker_id is not None
+            else None
+        )
         self.description: str = data["description"]
-        self._banner: int = int(data["banner_asset_id"])
+        self._banner: int | None = _get_as_snowflake(data, "banner_asset_id")
 
     @property
-    def banner(self) -> Asset:
-        """The banner asset of the sticker pack."""
+    def banner(self) -> Asset | None:
+        """The banner asset of the sticker pack, ``None`` when Discord does not send one."""
+        if self._banner is None:
+            return None
         return Asset._from_sticker_banner(self._state, self._banner)
 
     def __repr__(self) -> str:
@@ -143,6 +154,16 @@ class _StickerTag(Hashable, AssetMixin):
 
     id: int
     format: StickerFormatType
+    _url: str
+
+    @property
+    def url(self) -> str:
+        """The URL for the sticker's image."""
+        return self._url
+
+    @url.setter
+    def url(self, value: str) -> None:
+        self._url = value
 
     async def read(self) -> bytes:
         """|coro|
@@ -203,9 +224,9 @@ class StickerItem(_StickerTag):
         The URL for the sticker's image.
     """
 
-    __slots__ = ("_state", "name", "id", "format", "url")
+    __slots__ = ("_state", "_url", "format", "id", "name")
 
-    def __init__(self, *, state: ConnectionState, data: StickerItemPayload):
+    def __init__(self, *, state: ConnectionState, data: StickerItemPayload) -> None:
         self._state: ConnectionState = state
         self.name: str = data["name"]
         self.id: int = int(data["id"])
@@ -217,7 +238,7 @@ class StickerItem(_StickerTag):
             if self.format is StickerFormatType.gif
             else Asset.BASE
         )
-        self.url: str = f"{base}/stickers/{self.id}.{self.format.file_extension}"
+        self._url = f"{base}/stickers/{self.id}.{self.format.file_extension}"
 
     def __repr__(self) -> str:
         return f"<StickerItem id={self.id} name={self.name!r} format={self.format}>"
@@ -225,7 +246,7 @@ class StickerItem(_StickerTag):
     def __str__(self) -> str:
         return self.name
 
-    async def fetch(self) -> Sticker | StandardSticker | GuildSticker:
+    async def fetch(self) -> StandardSticker | GuildSticker:
         """|coro|
 
         Attempts to retrieve the full sticker data of the sticker item.
@@ -240,9 +261,9 @@ class StickerItem(_StickerTag):
         HTTPException
             Retrieving the sticker failed.
         """
-        data: StickerPayload = await self._state.http.get_sticker(self.id)
-        cls, _ = _sticker_factory(data["type"])  # type: ignore
-        return cls(state=self._state, data=data)
+        data = await self._state.http.get_sticker(self.id)
+        cls, _ = _sticker_factory(data["type"])
+        return await self._state._cache_fetched(cls(state=self._state, data=data))
 
 
 class Sticker(_StickerTag):
@@ -270,7 +291,7 @@ class Sticker(_StickerTag):
         The sticker's name.
     id: :class:`int`
         The id of the sticker.
-    description: :class:`str`
+    description: Optional[:class:`str`]
         The description of the sticker.
     pack_id: :class:`int`
         The id of the sticker's pack.
@@ -280,7 +301,7 @@ class Sticker(_StickerTag):
         The URL for the sticker's image.
     """
 
-    __slots__ = ("_state", "id", "name", "description", "format", "url")
+    __slots__ = ("_state", "_url", "description", "format", "id", "name")
 
     def __init__(self, *, state: ConnectionState, data: StickerPayload) -> None:
         self._state: ConnectionState = state
@@ -289,7 +310,7 @@ class Sticker(_StickerTag):
     def _from_data(self, data: StickerPayload) -> None:
         self.id: int = int(data["id"])
         self.name: str = data["name"]
-        self.description: str = data["description"]
+        self.description: str | None = data["description"]
         self.format: StickerFormatType = try_enum(
             StickerFormatType, data["format_type"]
         )
@@ -298,7 +319,7 @@ class Sticker(_StickerTag):
             if self.format is StickerFormatType.gif
             else Asset.BASE
         )
-        self.url: str = f"{base}/stickers/{self.id}.{self.format.file_extension}"
+        self._url = f"{base}/stickers/{self.id}.{self.format.file_extension}"
 
     def __repr__(self) -> str:
         return f"<Sticker id={self.id} name={self.name!r}>"
@@ -307,7 +328,7 @@ class Sticker(_StickerTag):
         return self.name
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """Returns the sticker's creation time in UTC."""
         return snowflake_time(self.id)
 
@@ -337,7 +358,7 @@ class StandardSticker(Sticker):
         The sticker's name.
     id: :class:`int`
         The id of the sticker.
-    description: :class:`str`
+    description: Optional[:class:`str`]
         The description of the sticker.
     pack_id: :class:`int`
         The id of the sticker's pack.
@@ -349,16 +370,17 @@ class StandardSticker(Sticker):
         The sticker's sort order within its pack.
     """
 
-    __slots__ = ("sort_value", "pack_id", "type", "tags")
+    __slots__ = ("pack_id", "sort_value", "tags", "type")
 
-    def _from_data(self, data: StandardStickerPayload) -> None:
+    def _from_data(self, data: StickerPayload) -> None:
         super()._from_data(data)
-        self.sort_value: int = data["sort_value"]
-        self.pack_id: int = int(data["pack_id"])
+        standard = cast("StandardStickerPayload", data)
+        self.sort_value: int = standard["sort_value"]
+        self.pack_id: int = int(standard["pack_id"])
         self.type: StickerType = StickerType.standard
 
         try:
-            self.tags: list[str] = [tag.strip() for tag in data["tags"].split(",")]
+            self.tags: list[str] = [tag.strip() for tag in standard["tags"].split(",")]
         except KeyError:
             self.tags = []
 
@@ -420,7 +442,7 @@ class GuildSticker(Sticker):
         The sticker's name.
     id: :class:`int`
         The id of the sticker.
-    description: :class:`str`
+    description: Optional[:class:`str`]
         The description of the sticker.
     format: :class:`StickerFormatType`
         The format for the sticker's image.
@@ -435,15 +457,16 @@ class GuildSticker(Sticker):
         The name of a unicode emoji that represents this sticker.
     """
 
-    __slots__ = ("available", "guild_id", "user", "emoji", "type", "_cs_guild")
+    __slots__ = ("available", "emoji", "guild_id", "type", "user")
 
-    def _from_data(self, data: GuildStickerPayload) -> None:
+    def _from_data(self, data: StickerPayload) -> None:
         super()._from_data(data)
-        self.available: bool = data["available"]
-        self.guild_id: int = int(data["guild_id"])
-        user = data.get("user")
-        self.user: User | None = self._state.store_user(user) if user else None
-        self.emoji: str = data["tags"]
+        guild_sticker = cast("GuildStickerPayload", data)
+        self.available: bool = guild_sticker["available"]
+        self.guild_id: int = int(guild_sticker["guild_id"])
+        user = guild_sticker.get("user")
+        self.user: User | None = self._state.create_user(user) if user else None
+        self.emoji: str = guild_sticker["tags"]
         self.type: StickerType = StickerType.guild
 
     def __repr__(self) -> str:
@@ -452,20 +475,27 @@ class GuildSticker(Sticker):
             f" name={self.name!r} id={self.id} guild_id={self.guild_id} user={self.user!r}>"
         )
 
-    @cached_slot_property("_cs_guild")
-    def guild(self) -> Guild | None:
+    @property
+    def guild(self) -> Guild | PartialGuild:
         """The guild that this sticker is from.
-        Could be ``None`` if the bot is not in the guild.
 
-        .. versionadded:: 2.0
+        This is the cached :class:`Guild` when the in-process cache holds it,
+        otherwise a :class:`PartialGuild` handle (always the case with a remote cache backend).
         """
-        return self._state._get_guild(self.guild_id)
+        from .guild import PartialGuild
+
+        state = self._state
+        if state.cache.supports_sync:
+            guild = state._guilds.get_nowait(self.guild_id)
+            if guild is not None:
+                return guild
+        return PartialGuild(state=state, id=self.guild_id)
 
     async def edit(
         self,
         *,
         name: str = MISSING,
-        description: str = MISSING,
+        description: str | None = MISSING,
         emoji: str = MISSING,
         reason: str | None = None,
     ) -> GuildSticker:
@@ -542,13 +572,20 @@ class GuildSticker(Sticker):
         await self._state.http.delete_guild_sticker(self.guild_id, self.id, reason)
 
 
+@overload
+def _sticker_factory(
+    sticker_type: Literal[1],
+) -> tuple[type[StandardSticker], StickerType]: ...
+@overload
+def _sticker_factory(
+    sticker_type: Literal[2],
+) -> tuple[type[GuildSticker], StickerType]: ...
 def _sticker_factory(
     sticker_type: Literal[1, 2],
 ) -> tuple[type[StandardSticker | GuildSticker | Sticker], StickerType]:
     value = try_enum(StickerType, sticker_type)
     if value == StickerType.standard:
         return StandardSticker, value
-    elif value == StickerType.guild:
+    if value == StickerType.guild:
         return GuildSticker, value
-    else:
-        return Sticker, value
+    return Sticker, value

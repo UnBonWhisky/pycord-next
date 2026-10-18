@@ -25,7 +25,6 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Literal
 
 from .asset import Asset, AssetMixin
@@ -34,16 +33,17 @@ from .user import User
 from .utils import MISSING, SnowflakeList, snowflake_time
 
 __all__ = (
+    "AppEmoji",
     "Emoji",
     "GuildEmoji",
-    "AppEmoji",
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from datetime import datetime
 
     from .abc import Snowflake
-    from .guild import Guild
+    from .guild import Guild, PartialGuild
     from .role import Role
     from .state import ConnectionState
     from .types.emoji import Emoji as EmojiPayload
@@ -51,25 +51,25 @@ if TYPE_CHECKING:
 
 class BaseEmoji(_EmojiTag, AssetMixin):
     __slots__: tuple[str, ...] = (
-        "require_colons",
-        "animated",
-        "managed",
-        "id",
-        "name",
         "_state",
-        "user",
+        "animated",
         "available",
+        "id",
+        "managed",
+        "name",
+        "require_colons",
+        "user",
     )
 
-    def __init__(self, *, state: ConnectionState, data: EmojiPayload):
+    def __init__(self, *, state: ConnectionState, data: EmojiPayload) -> None:
         self._state: ConnectionState = state
         self._from_data(data)
 
-    def _from_data(self, emoji: EmojiPayload):
+    def _from_data(self, emoji: EmojiPayload) -> None:
         self.require_colons: bool = emoji.get("require_colons", False)
         self.managed: bool = emoji.get("managed", False)
-        self.id: int = int(emoji["id"])  # type: ignore
-        self.name: str = emoji["name"]  # type: ignore
+        self.id: int = int(emoji["id"])  # pyright: ignore[reportIncompatibleVariableOverride]
+        self.name: str = emoji["name"]
         self.animated: bool = emoji.get("animated", False)
         self.available: bool = emoji.get("available", True)
         user = emoji.get("user")
@@ -93,7 +93,7 @@ class BaseEmoji(_EmojiTag, AssetMixin):
     def __repr__(self) -> str:
         return f"<BaseEmoji id={self.id} name={self.name!r} animated={self.animated}>"
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, _EmojiTag) and self.id == other.id
 
     def __hash__(self) -> int:
@@ -183,7 +183,9 @@ class GuildEmoji(BaseEmoji):
         "guild_id",
     )
 
-    def __init__(self, *, guild: Guild, state: ConnectionState, data: EmojiPayload):
+    def __init__(
+        self, *, guild: Guild | PartialGuild, state: ConnectionState, data: EmojiPayload
+    ) -> None:
         self.guild_id: int = guild.id
         self._roles: SnowflakeList = SnowflakeList(map(int, data.get("roles", [])))
         super().__init__(state=state, data=data)
@@ -195,24 +197,70 @@ class GuildEmoji(BaseEmoji):
         )
 
     @property
+    def role_ids(self) -> list[int]:
+        """The IDs of the roles that are allowed to use this emoji.
+
+        If empty, the emoji is unrestricted.
+
+        .. versionadded:: 3.0
+        """
+        return list(self._roles)
+
+    @property
     def roles(self) -> list[Role]:
         """A :class:`list` of roles that is allowed to use this emoji.
 
         If roles is empty, the emoji is unrestricted.
-        """
-        guild = self.guild
-        if guild is None:
-            return []
 
-        return [role for role in guild.roles if self._roles.has(role.id)]
+        This reads the in-process cache and raises :exc:`SyncCacheAccessError`
+        with a remote cache backend, use :meth:`get_roles` instead.
+        """
+        bucket = self._state._guild_bucket("roles", self.guild_id)
+        roles = [bucket.get_nowait(role_id) for role_id in self.role_ids]
+        return sorted(role for role in roles if role is not None)
+
+    async def get_roles(self) -> list[Role]:
+        """|coro|
+
+        Returns the cached roles that are allowed to use this emoji, in hierarchy order.
+
+        If the list is empty, the emoji is unrestricted or the roles are not cached.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        List[:class:`Role`]
+            The cached roles.
+        """
+        bucket = self._state._guild_bucket("roles", self.guild_id)
+        roles = [await bucket.get(role_id) for role_id in self.role_ids]
+        return sorted(role for role in roles if role is not None)
 
     @property
-    def guild(self) -> Guild:
-        """The guild this emoji belongs to."""
-        return self._state._get_guild(self.guild_id)
+    def guild(self) -> Guild | PartialGuild:
+        """The guild this emoji belongs to.
+
+        This is the cached :class:`Guild` when the in-process cache holds it,
+        otherwise a :class:`PartialGuild` handle (always the case with a remote cache backend).
+        """
+        from .guild import PartialGuild
+
+        state = self._state
+        if state.cache.supports_sync:
+            guild = state._guilds.get_nowait(self.guild_id)
+            if guild is not None:
+                return guild
+        return PartialGuild(state=state, id=self.guild_id)
 
     def is_usable(self) -> bool:
         """Whether the bot can use this emoji.
+
+        This returns ``False`` if the emoji is restricted to roles and the
+        bot's member is not cached.
+
+        This reads the in-process cache and raises :exc:`SyncCacheAccessError`
+        with a remote cache backend, use :meth:`check_usable` instead.
 
         .. versionadded:: 1.3
         """
@@ -220,8 +268,34 @@ class GuildEmoji(BaseEmoji):
             return False
         if not self._roles:
             return True
-        emoji_roles, my_roles = self._roles, self.guild.me._roles
-        return any(my_roles.has(role_id) for role_id in emoji_roles)
+        self_id = self._state.self_id
+        me = (
+            None
+            if self_id is None
+            else self._state._guild_bucket("members", self.guild_id).get_nowait(self_id)
+        )
+        if me is None:
+            return False
+        return any(me._roles.has(role_id) for role_id in self.role_ids)
+
+    async def check_usable(self) -> bool:
+        """|coro|
+
+        Whether the bot can use this emoji, without reading the in-memory cache synchronously.
+
+        This returns ``False`` if the emoji is restricted to roles and the
+        bot's member is not cached.
+
+        .. versionadded:: 3.0
+        """
+        if not self.available:
+            return False
+        if not self._roles:
+            return True
+        me = await self._state._get_member(self.guild_id, self._state.self_id)
+        if me is None:
+            return False
+        return any(me._roles.has(role_id) for role_id in self.role_ids)
 
     async def delete(self, *, reason: str | None = None) -> None:
         """|coro|
@@ -243,7 +317,6 @@ class GuildEmoji(BaseEmoji):
         HTTPException
             An error occurred deleting the emoji.
         """
-
         await self._state.http.delete_custom_emoji(
             self.guild.id, self.id, reason=reason
         )
@@ -266,7 +339,7 @@ class GuildEmoji(BaseEmoji):
             The newly updated emoji is returned.
 
         Parameters
-        -----------
+        ----------
         name: :class:`str`
             The new emoji name.
         roles: Optional[List[:class:`~discord.abc.Snowflake`]]
@@ -275,19 +348,18 @@ class GuildEmoji(BaseEmoji):
             The reason for editing this emoji. Shows up on the audit log.
 
         Raises
-        -------
+        ------
         Forbidden
             You are not allowed to edit emojis.
         HTTPException
             An error occurred editing the emoji.
 
         Returns
-        --------
+        -------
         :class:`GuildEmoji`
             The newly updated emoji.
         """
-
-        payload = {}
+        payload: dict[str, Any] = {}
         if name is not MISSING:
             payload["name"] = name
         if roles is not MISSING:
@@ -357,7 +429,7 @@ class AppEmoji(BaseEmoji):
 
     def __init__(
         self, *, application_id: int, state: ConnectionState, data: EmojiPayload
-    ):
+    ) -> None:
         self.application_id: int = application_id
         super().__init__(state=state, data=data)
 
@@ -370,13 +442,39 @@ class AppEmoji(BaseEmoji):
         return None
 
     @property
+    def role_ids(self) -> list[int]:
+        """The IDs of the roles that are allowed to use this emoji. This is always empty for :class:`AppEmoji`.
+
+        .. versionadded:: 3.0
+        """
+        return []
+
+    @property
     def roles(self) -> list[Role]:
         """A :class:`list` of roles that is allowed to use this emoji. This is always empty for :class:`AppEmoji`."""
+        return []
+
+    async def get_roles(self) -> list[Role]:
+        """|coro|
+
+        Returns the roles that are allowed to use this emoji. This is always empty for :class:`AppEmoji`.
+
+        .. versionadded:: 3.0
+        """
         return []
 
     def is_usable(self) -> bool:
         """Whether the bot can use this emoji."""
         return self.application_id == self._state.application_id
+
+    async def check_usable(self) -> bool:
+        """|coro|
+
+        Whether the bot can use this emoji.
+
+        .. versionadded:: 3.0
+        """
+        return self.is_usable()
 
     async def delete(self) -> None:
         """|coro|
@@ -392,10 +490,9 @@ class AppEmoji(BaseEmoji):
         HTTPException
             An error occurred deleting the emoji.
         """
-
         await self._state.http.delete_application_emoji(self.application_id, self.id)
-        if self._state.cache_app_emojis and self._state.get_emoji(self.id):
-            self._state._remove_emoji(self)
+        if self._state.cache_app_emojis and await self._state.get_emoji(self.id):
+            await self._state._remove_emoji(self)
 
     async def edit(
         self,
@@ -409,28 +506,27 @@ class AppEmoji(BaseEmoji):
         You must own the emoji to do this.
 
         Parameters
-        -----------
+        ----------
         name: :class:`str`
             The new emoji name.
 
         Raises
-        -------
+        ------
         Forbidden
             You are not allowed to edit the emoji.
         HTTPException
             An error occurred editing the emoji.
 
         Returns
-        --------
+        -------
         :class:`AppEmoji`
             The newly updated emoji.
         """
-
-        payload = {}
+        payload: dict[str, Any] = {}
         if name is not MISSING:
             payload["name"] = name
 
         data = await self._state.http.edit_application_emoji(
             self.application_id, self.id, payload=payload
         )
-        return self._state.maybe_store_app_emoji(self.application_id, data)
+        return await self._state.maybe_store_app_emoji(self.application_id, data)

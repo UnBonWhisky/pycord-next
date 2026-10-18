@@ -22,24 +22,34 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-from .core import Filters, Sink, default_filters
+from __future__ import annotations
+
+from typing import Any
+
+from .core import AudioData, Filters, Sink, default_filters
 
 
 class PCMSink(Sink):
     """A special sink for .pcm files.
 
     .. versionadded:: 2.0
+
+    Parameters
+    ----------
+    filters: dict[:class:`str`, Any] | None
+        The filters of the sink, see :class:`~discord.sinks.Filters`.
     """
 
-    def __init__(self, *, filters=None):
+    def __init__(self, *, filters: dict[str, Any] | None = None) -> None:
         if filters is None:
             filters = default_filters
         self.filters = filters
         Filters.__init__(self, **self.filters)
 
-        self.encoding = "pcm"
+        self.encoding: str = "pcm"
         self.vc = None
         self.audio_data = {}
 
-    def format_audio(self, audio):
+    def format_audio(self, audio: AudioData) -> None:
+        """Does nothing, PCM audio needs no formatting."""
         return

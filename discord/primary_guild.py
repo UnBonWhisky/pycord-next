@@ -22,14 +22,15 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-from functools import cached_property
-from typing import TYPE_CHECKING
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .state import ConnectionState
+    from .types.primary_guild import PrimaryGuild as PrimaryGuildPayload
 
 from .asset import Asset
-from .types.primary_guild import PrimaryGuild as PrimaryGuildPayload
 
 __all__ = ("PrimaryGuild",)
 
@@ -63,14 +64,22 @@ class PrimaryGuild:
         The tag of the primary guild.
     """
 
-    def __init__(self, data: PrimaryGuildPayload, state: "ConnectionState") -> None:
+    __slots__ = (
+        "_badge",
+        "_state",
+        "identity_enabled",
+        "identity_guild_id",
+        "tag",
+    )
+
+    def __init__(self, data: PrimaryGuildPayload, state: ConnectionState) -> None:
         self.identity_guild_id: int | None = (
             int(data.get("identity_guild_id") or 0) or None
         )
         self.identity_enabled: bool | None = data.get("identity_enabled", None)
         self.tag: str | None = data.get("tag", None)
         self._badge: str | None = data.get("badge", None)
-        self._state: "ConnectionState" = state
+        self._state: ConnectionState = state
 
     def __repr__(self) -> str:
         return f"<PrimaryGuild identity_guild_id={self.identity_guild_id} identity_enabled={self.identity_enabled} tag={self.tag}>"
@@ -85,7 +94,10 @@ class PrimaryGuild:
             and self.tag == other.tag
         )
 
-    @cached_property
+    def __hash__(self) -> int:
+        return hash((self.identity_guild_id, self.identity_enabled, self.tag))
+
+    @property
     def badge(self) -> Asset | None:
         """Returns the badge asset, if available.
 
@@ -94,5 +106,5 @@ class PrimaryGuild:
         if self._badge is None:
             return None
         return Asset._from_user_primary_guild_tag(
-            self._state, self.identity_guild_id, self._badge
+            self._state, cast("int", self.identity_guild_id), self._badge
         )

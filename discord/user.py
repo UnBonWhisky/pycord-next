@@ -25,13 +25,15 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import discord.abc
 
+from ._internal.aliases import AliasMixin
 from .asset import Asset
 from .collectibles import Collectibles, Nameplate
 from .colour import Colour
+from .errors import ClientException
 from .flags import PublicUserFlags
 from .iterators import EntitlementIterator
 from .monetization import Entitlement
@@ -41,21 +43,79 @@ from .utils import MISSING, _bytes_to_base64_data, snowflake_time
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from typing_extensions import Self
+
     from .abc import Snowflake, SnowflakeTime
     from .channel import DMChannel
     from .guild import Guild
     from .message import Message
     from .state import ConnectionState
     from .types.channel import DMChannel as DMChannelPayload
-    from .types.user import PartialUser as PartialUserPayload
-    from .types.user import User as UserPayload
+    from .types.collectibles import (
+        AvatarDecoration as AvatarDecorationPayload,
+        Collectibles as CollectiblesPayload,
+    )
+    from .types.monetization import (
+        CreateTestEntitlementPayload,
+    )
+    from .types.user import (
+        DisplayNameStyles as DisplayNameStylesPayload,
+        PartialUser as PartialUserPayload,
+        User as UserPayload,
+    )
 
 __all__ = (
-    "User",
     "ClientUser",
+    "DisplayNameStyles",
+    "User",
 )
 
 BU = TypeVar("BU", bound="BaseUser")
+
+
+class DisplayNameStyles(AliasMixin):
+    """Represents the style a user's display name is rendered with.
+
+    .. versionadded:: 3.0
+
+    Attributes
+    ----------
+    colours: List[:class:`Colour`]
+        The colours of the display name.
+    effect_id: :class:`int`
+        The ID of the effect applied to the display name.
+    font_id: :class:`int`
+        The ID of the font used for the display name.
+    """
+
+    __slots__ = ("colours", "effect_id", "font_id")
+
+    def __init__(self, *, data: DisplayNameStylesPayload) -> None:
+        self.colours: list[Colour] = [Colour(value) for value in data["colors"]]
+        self.effect_id: int = data["effect_id"]
+        self.font_id: int = data["font_id"]
+
+    def __repr__(self) -> str:
+        return (
+            f"<DisplayNameStyles colours={self.colours!r} effect_id={self.effect_id}"
+            f" font_id={self.font_id}>"
+        )
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, DisplayNameStyles)
+            and self.colours == other.colours
+            and self.effect_id == other.effect_id
+            and self.font_id == other.font_id
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (tuple(c.value for c in self.colours), self.effect_id, self.font_id)
+        )
+
+    if TYPE_CHECKING:
+        colors: list[Colour]
 
 
 class _UserTag:
@@ -63,22 +123,23 @@ class _UserTag:
     id: int
 
 
-class BaseUser(_UserTag):
+class BaseUser(_UserTag, AliasMixin):
     __slots__ = (
-        "name",
-        "id",
+        "_accent_colour",
+        "_avatar",
+        "_avatar_decoration",
+        "_banner",
+        "_collectibles",
+        "_display_name_styles",
+        "_public_flags",
+        "_state",
+        "bot",
         "discriminator",
         "global_name",
-        "_avatar",
-        "_banner",
-        "_accent_colour",
-        "bot",
-        "system",
-        "_public_flags",
-        "_avatar_decoration",
-        "_state",
+        "id",
+        "name",
         "primary_guild",
-        "_collectibles",
+        "system",
     )
 
     if TYPE_CHECKING:
@@ -92,11 +153,11 @@ class BaseUser(_UserTag):
         _avatar: str | None
         _banner: str | None
         _accent_colour: int | None
-        _avatar_decoration: dict | None
+        _avatar_decoration: AvatarDecorationPayload | None
+        _collectibles: CollectiblesPayload | None
+        _display_name_styles: DisplayNameStylesPayload | None
         _public_flags: int
-        nameplate: Nameplate | None
         primary_guild: PrimaryGuild | None
-        collectibles: Collectibles
 
     def __init__(
         self, *, state: ConnectionState, data: UserPayload | PartialUserPayload
@@ -134,13 +195,13 @@ class BaseUser(_UserTag):
             )
         )
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, _UserTag) and other.id == self.id
 
     def __hash__(self) -> int:
         return self.id >> 22
 
-    def _update(self, data: UserPayload) -> None:
+    def _update(self, data: UserPayload | PartialUserPayload) -> None:
         self.name = data["username"]
         self.id = int(data["id"])
         self.discriminator = data["discriminator"]
@@ -150,6 +211,7 @@ class BaseUser(_UserTag):
         self._accent_colour = data.get("accent_color", None)
         self._avatar_decoration = data.get("avatar_decoration_data", None)
         self._collectibles = data.get("collectibles")
+        self._display_name_styles = data.get("display_name_styles")
         primary_guild_payload = data.get("primary_guild", None)
         if primary_guild_payload and primary_guild_payload.get("identity_enabled"):
             self.primary_guild = PrimaryGuild(
@@ -162,7 +224,7 @@ class BaseUser(_UserTag):
         self.system = data.get("system", False)
 
     @classmethod
-    def _copy(cls: type[BU], user: BU) -> BU:
+    def _copy(cls, user: Self) -> Self:
         self = cls.__new__(cls)  # bypass __init__
 
         self.name = user.name
@@ -178,11 +240,12 @@ class BaseUser(_UserTag):
         self._public_flags = user._public_flags
         self.primary_guild = user.primary_guild
         self._collectibles = user._collectibles
+        self._display_name_styles = user._display_name_styles
         self.system = user.system
 
         return self
 
-    def _to_minimal_user_json(self) -> dict[str, Any]:
+    def _to_minimal_user_json(self) -> UserPayload:
         return {
             "username": self.name,
             "id": self.id,
@@ -191,6 +254,16 @@ class BaseUser(_UserTag):
             "global_name": self.global_name,
             "bot": self.bot,
         }
+
+    @property
+    def display_name_styles(self) -> DisplayNameStyles | None:
+        """The style the user's display name is rendered with, if any.
+
+        .. versionadded:: 3.0
+        """
+        if self._display_name_styles is None:
+            return None
+        return DisplayNameStyles(data=self._display_name_styles)
 
     @property
     def collectibles(self) -> Collectibles | None:
@@ -241,6 +314,7 @@ class BaseUser(_UserTag):
     @property
     def default_avatar(self) -> Asset:
         """Returns the default avatar for a given user.
+
         This is calculated by the user's ID if they're on the new username system, otherwise their discriminator.
         """
         eq = (self.id >> 22) if self.is_migrated else int(self.discriminator)
@@ -287,8 +361,6 @@ class BaseUser(_UserTag):
     def accent_colour(self) -> Colour | None:
         """Returns the user's accent colour, if applicable.
 
-        There is an alias for this named :attr:`accent_color`.
-
         .. versionadded:: 2.0
 
         .. note::
@@ -300,36 +372,12 @@ class BaseUser(_UserTag):
         return Colour(self._accent_colour)
 
     @property
-    def accent_color(self) -> Colour | None:
-        """Returns the user's accent color, if applicable.
-
-        There is an alias for this named :attr:`accent_colour`.
-
-        .. versionadded:: 2.0
-
-        .. note::
-
-            This information is only available via :meth:`Client.fetch_user`.
-        """
-        return self.accent_colour
-
-    @property
     def colour(self) -> Colour:
-        """A property that returns a colour denoting the rendered colour
-        for the user. This always returns :meth:`Colour.default`.
+        """A property that returns a colour denoting the rendered colour for the user.
 
-        There is an alias for this named :attr:`color`.
+        This always returns :meth:`Colour.default`.
         """
         return Colour.default()
-
-    @property
-    def color(self) -> Colour:
-        """A property that returns a color denoting the rendered color
-        for the user. This always returns :meth:`Colour.default`.
-
-        There is an alias for this named :attr:`colour`.
-        """
-        return self.colour
 
     @property
     def mention(self) -> str:
@@ -347,6 +395,7 @@ class BaseUser(_UserTag):
     @property
     def display_name(self) -> str:
         """Returns the user's display name.
+
         This will be their global name if set, otherwise their username.
         """
         return self.global_name or self.name
@@ -364,7 +413,6 @@ class BaseUser(_UserTag):
         :class:`bool`
             Indicates if the user is mentioned in the message.
         """
-
         if message.mention_everyone:
             return True
 
@@ -374,6 +422,10 @@ class BaseUser(_UserTag):
     def is_migrated(self) -> bool:
         """Checks whether the user is already migrated to global name."""
         return self.discriminator == "0"
+
+    if TYPE_CHECKING:
+        accent_color = accent_colour
+        color = colour
 
 
 class ClientUser(BaseUser):
@@ -427,7 +479,7 @@ class ClientUser(BaseUser):
         Specifies if the user has MFA turned on and working.
     """
 
-    __slots__ = ("locale", "_flags", "verified", "mfa_enabled", "__weakref__")
+    __slots__ = ("__weakref__", "_flags", "locale", "mfa_enabled", "verified")
 
     if TYPE_CHECKING:
         verified: bool
@@ -457,7 +509,7 @@ class ClientUser(BaseUser):
             f" bot={self.bot} verified={self.verified} mfa_enabled={self.mfa_enabled}>"
         )
 
-    def _update(self, data: UserPayload) -> None:
+    def _update(self, data: UserPayload | PartialUserPayload) -> None:
         super()._update(data)
         # There's actually an Optional[str] phone field as well, but I won't use it
         self.verified = data.get("verified", False)
@@ -470,8 +522,8 @@ class ClientUser(BaseUser):
         self,
         *,
         username: str = MISSING,
-        avatar: bytes = MISSING,
-        banner: bytes = MISSING,
+        avatar: bytes | None = MISSING,
+        banner: bytes | None = MISSING,
     ) -> ClientUser:
         """|coro|
 
@@ -580,11 +632,7 @@ class User(BaseUser, discord.abc.Messageable):
         .. versionadded:: 2.7
     """
 
-    __slots__ = ("_stored",)
-
-    def __init__(self, *, state: ConnectionState, data: UserPayload) -> None:
-        super().__init__(state=state, data=data)
-        self._stored: bool = False
+    __slots__ = ()
 
     def __repr__(self) -> str:
         if self.is_migrated:
@@ -593,28 +641,14 @@ class User(BaseUser, discord.abc.Messageable):
                     "<User"
                     f" id={self.id} username={self.name!r} global_name={self.global_name!r} bot={self.bot}>"
                 )
-            return "<User" f" id={self.id} username={self.name!r} bot={self.bot}>"
+            return f"<User id={self.id} username={self.name!r} bot={self.bot}>"
         return (
             "<User"
             f" id={self.id} name={self.name!r} discriminator={self.discriminator!r} bot={self.bot}>"
         )
 
-    def __del__(self) -> None:
-        try:
-            if self._stored:
-                self._state.deref_user(self.id)
-        except Exception:
-            pass
-
-    @classmethod
-    def _copy(cls, user: User):
-        self = super()._copy(user)
-        self._stored = False
-        return self
-
     async def _get_channel(self) -> DMChannel:
-        ch = await self.create_dm()
-        return ch
+        return await self.create_dm()
 
     @property
     def dm_channel(self) -> DMChannel | None:
@@ -623,7 +657,27 @@ class User(BaseUser, discord.abc.Messageable):
         If this returns ``None``, you can create a DM channel by calling the
         :meth:`create_dm` coroutine function.
         """
-        return self._state._get_private_channel_by_user(self.id)
+        channel_id = self._state._private_channels_by_user.get_nowait(self.id)
+        if channel_id is None:
+            return None
+        return cast(
+            "DMChannel | None", self._state._private_channels.get_nowait(channel_id)
+        )
+
+    async def get_dm_channel(self) -> DMChannel | None:
+        """|coro|
+
+        Returns the channel associated with this user if it exists.
+
+        If this returns ``None``, you can create a DM channel by calling the
+        :meth:`create_dm` coroutine function.
+
+        Returns
+        -------
+        Optional[:class:`.DMChannel`]
+            The cached DM channel, if any.
+        """
+        return await self._state._get_private_channel_by_user(self.id)
 
     @property
     def mutual_guilds(self) -> list[Guild]:
@@ -635,8 +689,33 @@ class User(BaseUser, discord.abc.Messageable):
 
         .. versionadded:: 1.7
         """
+        state = self._state
         return [
-            guild for guild in self._state._guilds.values() if guild.get_member(self.id)
+            guild
+            for guild in state._guilds.values_nowait()
+            if state._guild_bucket("members", guild.id).contains_nowait(self.id)
+        ]
+
+    async def get_mutual_guilds(self) -> list[Guild]:
+        """|coro|
+
+        Returns the guilds that the user shares with the client.
+
+        .. note::
+
+            This will only return mutual guilds within the client's internal cache.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        List[:class:`.Guild`]
+            The cached guilds that the user is a member of.
+        """
+        return [
+            guild
+            for guild in await self._state.get_guilds()
+            if await guild.get_member(self.id)
         ]
 
     async def create_dm(self) -> DMChannel:
@@ -652,13 +731,13 @@ class User(BaseUser, discord.abc.Messageable):
         :class:`.DMChannel`
             The channel that was created.
         """
-        found = self.dm_channel
+        found = await self.get_dm_channel()
         if found is not None:
             return found
 
         state = self._state
         data: DMChannelPayload = await state.http.start_private_message(self.id)
-        return state.add_dm_channel(data)
+        return await state.add_dm_channel(data)
 
     async def create_test_entitlement(self, sku: discord.abc.Snowflake) -> Entitlement:
         """|coro|
@@ -675,14 +754,15 @@ class User(BaseUser, discord.abc.Messageable):
         :class:`Entitlement`
             The created entitlement.
         """
-        payload = {
+        application_id = self._state.application_id
+        if application_id is None:
+            raise ClientException("The application ID is not known yet.")
+        payload: CreateTestEntitlementPayload = {
             "sku_id": sku.id,
             "owner_id": self.id,
             "owner_type": 2,
         }
-        data = await self._state.http.create_test_entitlement(
-            self._state.application_id, payload
-        )
+        data = await self._state.http.create_test_entitlement(application_id, payload)
         return Entitlement(data=data, state=self._state)
 
     def entitlements(

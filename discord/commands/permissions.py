@@ -23,18 +23,32 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-from collections.abc import Callable
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from ..enums import InteractionContextType
 from ..permissions import Permissions
-from .core import ApplicationCommand
+from .core import ApplicationCommand, _mark_callback
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 __all__ = ("default_permissions", "guild_only", "is_nsfw")
 
+CommandOrCallbackT = TypeVar("CommandOrCallbackT", bound="Callable[..., Any]")
 
-def default_permissions(**perms: bool) -> Callable:
-    """A decorator that limits the usage of an application command to members with certain
-    permissions.
+
+def _as_command(value: object) -> ApplicationCommand[Any, ..., Any] | None:
+    if isinstance(value, ApplicationCommand):
+        return cast("ApplicationCommand[Any, ..., Any]", value)
+    return None
+
+
+def default_permissions(
+    **perms: bool,
+) -> Callable[[CommandOrCallbackT], CommandOrCallbackT]:
+    """A decorator that limits the usage of an application command to members with certain permissions.
 
     The permissions passed in must be exactly like the properties shown under
     :class:`.discord.Permissions`.
@@ -56,32 +70,35 @@ def default_permissions(**perms: bool) -> Callable:
 
         from discord import default_permissions
 
+
         @bot.slash_command()
         @default_permissions(manage_messages=True)
         async def test(ctx):
-            await ctx.respond('You can manage messages.')
+            await ctx.respond("You can manage messages.")
     """
-
     invalid = set(perms) - set(Permissions.VALID_FLAGS)
     if invalid:
         raise TypeError(f"Invalid permission(s): {', '.join(invalid)}")
 
-    def inner(command: Callable):
-        if isinstance(command, ApplicationCommand):
-            if command.parent is not None:
+    def inner(command: CommandOrCallbackT) -> CommandOrCallbackT:
+        if (app_command := _as_command(command)) is not None:
+            if app_command.parent is not None:
                 raise RuntimeError(
                     "Permission restrictions can only be set on top-level commands"
                 )
-            command.default_member_permissions = Permissions(**perms)
+            app_command.default_member_permissions = Permissions(**perms)
         else:
-            command.__default_member_permissions__ = Permissions(**perms)
+            _mark_callback(
+                command, "__default_member_permissions__", Permissions(**perms)
+            )
         return command
 
     return inner
 
 
-def guild_only() -> Callable:
+def guild_only() -> Callable[[CommandOrCallbackT], CommandOrCallbackT]:
     """A decorator that limits the usage of an application command to guild contexts.
+
     The command won't be able to be used in private message channels.
 
     Example
@@ -91,25 +108,27 @@ def guild_only() -> Callable:
 
         from discord import guild_only
 
+
         @bot.slash_command()
         @guild_only()
         async def test(ctx):
             await ctx.respond("You're in a guild.")
     """
 
-    def inner(command: Callable):
-        if isinstance(command, ApplicationCommand):
-            command.contexts = {InteractionContextType.guild}
+    def inner(command: CommandOrCallbackT) -> CommandOrCallbackT:
+        if (app_command := _as_command(command)) is not None:
+            app_command.contexts = {InteractionContextType.guild}
         else:
-            command.__contexts__ = {InteractionContextType.guild}
+            _mark_callback(command, "__contexts__", {InteractionContextType.guild})
 
         return command
 
     return inner
 
 
-def is_nsfw() -> Callable:
+def is_nsfw() -> Callable[[CommandOrCallbackT], CommandOrCallbackT]:
     """A decorator that limits the usage of an application command to 18+ channels and users.
+
     In guilds, the command will only be able to be used in channels marked as NSFW.
     In DMs, users must have opted into age-restricted commands via privacy settings.
 
@@ -122,17 +141,18 @@ def is_nsfw() -> Callable:
 
         from discord import is_nsfw
 
+
         @bot.slash_command()
         @is_nsfw()
         async def test(ctx):
             await ctx.respond("This command is age restricted.")
     """
 
-    def inner(command: Callable):
-        if isinstance(command, ApplicationCommand):
-            command.nsfw = True
+    def inner(command: CommandOrCallbackT) -> CommandOrCallbackT:
+        if (app_command := _as_command(command)) is not None:
+            app_command.nsfw = True
         else:
-            command.__nsfw__ = True
+            _mark_callback(command, "__nsfw__", True)
 
         return command
 

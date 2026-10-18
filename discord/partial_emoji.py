@@ -26,7 +26,7 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from . import utils
 from .asset import Asset, AssetMixin
@@ -37,14 +37,17 @@ __all__ = ("PartialEmoji",)
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from typing_extensions import Self
+
     from .state import ConnectionState
+    from .types.channel import DefaultReaction
     from .types.message import PartialEmoji as PartialEmojiPayload
 
 
 class _EmojiTag:
     __slots__ = ()
 
-    id: int
+    id: int | None
 
     def _to_partial(self) -> PartialEmoji:
         raise NotImplementedError
@@ -91,7 +94,7 @@ class PartialEmoji(_EmojiTag, AssetMixin):
         The ID of the custom emoji, if applicable.
     """
 
-    __slots__ = ("animated", "name", "id", "_state")
+    __slots__ = ("_state", "animated", "id", "name")
 
     _CUSTOM_EMOJI_RE = re.compile(
         r"<?(?P<animated>a)?:?(?P<name>\w+):(?P<id>[0-9]{13,20})>?"
@@ -102,14 +105,26 @@ class PartialEmoji(_EmojiTag, AssetMixin):
 
     def __init__(
         self, *, name: str | None, animated: bool = False, id: int | None = None
-    ):
+    ) -> None:
         self.animated = animated
         self.name = name
         self.id = id
         self._state: ConnectionState | None = None
 
     @classmethod
-    def from_dict(cls: type[PE], data: PartialEmojiPayload | dict[str, Any]) -> PE:
+    def from_dict(cls, data: PartialEmojiPayload | dict[str, Any]) -> Self:
+        """Creates a :class:`PartialEmoji` from its payload.
+
+        Parameters
+        ----------
+        data
+            The emoji payload.
+
+        Returns
+        -------
+        :class:`PartialEmoji`
+            The partial emoji built from ``data``.
+        """
         return cls(
             animated=data.get("animated", False),
             id=utils._get_as_snowflake(data, "id"),
@@ -117,7 +132,7 @@ class PartialEmoji(_EmojiTag, AssetMixin):
         )
 
     @classmethod
-    def from_str(cls: type[PE], value: str) -> PE:
+    def from_str(cls, value: str) -> Self:
         """Converts a Discord string representation of an emoji to a :class:`PartialEmoji`.
 
         The formats accepted are:
@@ -157,6 +172,13 @@ class PartialEmoji(_EmojiTag, AssetMixin):
         return cls(name=value, id=None, animated=False)
 
     def to_dict(self) -> dict[str, Any]:
+        """Converts this emoji to its payload.
+
+        Returns
+        -------
+        :class:`dict`
+            The emoji payload.
+        """
         o: dict[str, Any] = {"name": self.name}
         if self.id:
             o["id"] = self.id
@@ -167,25 +189,38 @@ class PartialEmoji(_EmojiTag, AssetMixin):
     def _to_partial(self) -> PartialEmoji:
         return self
 
-    def _to_forum_reaction_payload(
-        self,
-    ) -> TypedDict(
-        "ReactionPayload", {"emoji_id": int, "emoji_name": None}
-    ) | TypedDict("ReactionPayload", {"emoji_id": None, "emoji_name": str}):
+    def _to_forum_reaction_payload(self) -> DefaultReaction:
         if self.id is None:
             return {"emoji_id": None, "emoji_name": self.name}
-        else:
-            return {"emoji_id": self.id, "emoji_name": None}
+        return {"emoji_id": self.id, "emoji_name": None}
 
     @classmethod
     def with_state(
-        cls: type[PE],
+        cls,
         state: ConnectionState,
         *,
-        name: str,
+        name: str | None,
         animated: bool = False,
         id: int | None = None,
-    ) -> PE:
+    ) -> Self:
+        """Creates a :class:`PartialEmoji` bound to a connection state.
+
+        Parameters
+        ----------
+        state
+            The connection state used to download the emoji.
+        name
+            The emoji name.
+        animated
+            Whether the emoji is animated.
+        id
+            The ID of the custom emoji, if applicable.
+
+        Returns
+        -------
+        :class:`PartialEmoji`
+            The partial emoji with ``state`` attached.
+        """
         self = cls(name=name, animated=animated, id=id)
         self._state = state
         return self
@@ -198,10 +233,10 @@ class PartialEmoji(_EmojiTag, AssetMixin):
         animated_tag = "a" if self.animated else ""
         return f"<{animated_tag}:{name}:{self.id}>"
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<{self.__class__.__name__} animated={self.animated} name={self.name!r} id={self.id}>"
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         if self.is_unicode_emoji():
             return isinstance(other, PartialEmoji) and self.name == other.name
 
@@ -222,7 +257,7 @@ class PartialEmoji(_EmojiTag, AssetMixin):
 
     def _as_reaction(self) -> str:
         if self.id is None:
-            return self.name
+            return self.name or ""
         return f"{self.name}:{self.id}"
 
     @property
@@ -259,6 +294,26 @@ class PartialEmoji(_EmojiTag, AssetMixin):
         return "webp" if self.animated else "png"
 
     async def read(self) -> bytes:
+        """|coro|
+
+        Retrieves the content of this emoji as a :class:`bytes` object.
+
+        Returns
+        -------
+        :class:`bytes`
+            The content of the emoji.
+
+        Raises
+        ------
+        InvalidArgument
+            The emoji is not a custom emoji.
+        DiscordException
+            There was no internal connection state.
+        HTTPException
+            Downloading the asset failed.
+        NotFound
+            The asset was deleted.
+        """
         if self.is_unicode_emoji():
             raise InvalidArgument("PartialEmoji is not a custom emoji")
 

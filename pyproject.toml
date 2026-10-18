@@ -44,6 +44,7 @@ Funding = "https://patreon.com/pycord"
 [tool.setuptools]
 packages = [
     "discord",
+    "discord._internal",
     "discord.types",
     "discord.sinks",
     "discord.ui",
@@ -55,6 +56,16 @@ packages = [
     "discord.ext.bridge",
     "discord.bin",
     "discord.voice",
+    "discord.voice.packets",
+    "discord.voice.receive",
+    "discord.voice.utils",
+    "discord.cache",
+    "discord.http",
+    "discord.http.routes",
+    "discord.gateway",
+    "discord.gateway.brokers",
+    "discord.state",
+    "discord.state.parsers",
 ]
 
 [tool.setuptools.dynamic]
@@ -65,64 +76,168 @@ readme = { content-type = "text/x-rst", file = "README.rst" }
 docs = { file = "requirements/docs.txt" }
 speed = { file = "requirements/speed.txt" }
 voice = { file = "requirements/voice.txt" }
+redis = { file = "requirements/redis.txt" }
+memcached = { file = "requirements/memcached.txt" }
+zstd = { file = "requirements/zstd.txt" }
 
 [dependency-groups]
 dev = [
-    "pylint~=4.0.5",
+    "ruff==0.17.1",
     "mypy~=2.3.0",
+    "pyright==1.1.414",
     "coverage~=7.10",
     "pre-commit==4.6.2",
     "codespell==2.4.3",
     "bandit==1.9.4",
-    "flake8==7.3.0",
     "tox>=4.27.0",
     "tox-gh>=1.5.0"
 ]
 test = [
     "pytest~=9.1.1",
     "pytest-asyncio~=1.4.0",
+    "pytest-cov",
+    "polyfactory~=3.3",
+    "fakeredis>=2.40.0",
+    "aioresponses>=0.7.9",
+    "requests>=2.32",
+    "responses>=0.25",
 ]
 [tool.setuptools_scm]
 
-[tool.black]
-target-version = ['py310', 'py311', 'py312', 'py313', 'py314']
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+extend-exclude = ["docs", ".venv", ".venv-docs", ".team"]
 
-[tool.isort]
-profile = "black"
+[tool.ruff.format]
+docstring-code-format = true
+exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",
+    "ISC001",
+    "D203",
+    "D213",
+    "D105",
+    "D107",
+    "E501",
+    "FBT001",
+    "FBT002",
+    "FBT003",
+    "A001",
+    "A002",
+    "A005",
+    "PLR0913",
+    "PLR0917",
+    "SLF001",
+    "TRY003",
+    "EM101",
+    "EM102",
+    "ANN401",
+    "TID252",
+    "PLR2004",
+    "C901",
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "D401",
+    "D400",
+    "PLC0415",
+    "ARG002",
+    "TD002",
+    "TD003",
+    "FIX002",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"discord/colour.py" = ["S311"]
+"tests/**" = ["S101", "PLR2004", "D", "ANN", "SLF001", "INP001", "ARG", "PT011", "PGH003", "CPY001", "S603"]
+"examples/**" = ["D", "INP001", "T201", "ANN", "S311", "CPY001", "I002", "ERA001", "RET503", "S101", "S104", "BLE001", "ARG001", "SIM105"]
+"scripts/**" = ["D", "ANN", "INP001", "T201", "S310", "BLE001", "DTZ011"]
+"setup.py" = ["D100", "CPY001"]
+"discord/types/**" = ["D"]
+"**/__init__.py" = ["F401", "F403", "F405", "D104"]
+"discord/gateway/**" = ["BLE001", "N818", "TRY301", "TC001"]
+"discord/ext/commands/errors.py" = ["N818"]
+"discord/ext/commands/converter.py" = ["N801"]
+"discord/ext/commands/core.py" = ["PERF203"]
+"discord/ext/pages/pagination.py" = ["SIM115"]
+"discord/ext/commands/bot.py" = ["ARG001"]
+"discord/lobby.py" = ["D400", "D415"]
+"discord/client.py" = ["BLE001", "PERF203"]
+"discord/cog.py" = ["BLE001"]
+"discord/__main__.py" = ["T201"]
+"tests/gateway/**" = ["S105"]
+"discord/voice/**" = ["BLE001", "PERF203", "S101"]
+"discord/player.py" = ["BLE001", "S603"]
+"discord/oggparse.py" = ["BLE001"]
+"discord/opus.py" = ["BLE001", "N803", "PLW0603", "S101"]
+"discord/backoff.py" = ["S311"]
+"discord/sinks/**" = ["S603"]
+"discord/file.py" = ["SIM115"]
+"discord/errors.py" = ["N818"]
+"discord/utils.py" = ["PLW0603", "S307"]
+"discord/message.py" = ["ASYNC230"]
+"discord/poll.py" = ["ARG003"]
+"discord/ui/item.py" = ["A003"]
+"discord/ui/modal.py" = ["BLE001"]
+"discord/ui/view.py" = ["BLE001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["discord"]
+combine-as-imports = true
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-base-classes = [
+    "typing.TypedDict",
+    "typing_extensions.TypedDict",
+    "msgspec.Struct",
+]
+exempt-modules = ["typing", "typing_extensions", "discord.ext.commands.context"]
 
 [tool.mypy]
+python_version = "3.10"
 namespace_packages = true
 install_types = true
 strict = true
 show_error_codes = true
-#allow_untyped_decorators = true
-#allow_untyped_calls = true
-ignore_errors = true
+warn_unreachable = true
+files = ["discord"]
+exclude = ["docs", "examples", "tests"]
 
-[tool.pylint.main]
-extension-pkg-whitelist = [
-    "pydantic",
-    "ujson"
-]
-py-version = 3.10
+[[tool.mypy.overrides]]
+module = ["nacl.*", "davey.*", "aiocache.*", "msgspec.*"]
+ignore_missing_imports = true
 
-[tool.pylint.messages_control]
-enable = [
-    "bad-indentation",
-    "line-too-long"
-]
-disable = [
-    "protected-access",
-    "fixme"
-]
-
-[tool.pylint.format]
-indent-string = '    '
-max-line-length = 120
+[tool.pyright]
+include = ["discord"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+reportPrivateUsage = false
+reportMissingTypeStubs = false
 
 [tool.pytest]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-rfEs"]
+
+[tool.coverage.run]
+source = ["discord"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "@overload", "raise NotImplementedError"]
 
 [tool.tox]
 requires = ["tox>=4"]
@@ -132,7 +247,7 @@ env_list = ["3.14", "3.13", "3.12", "3.11", "3.10", "3.14-novoice"]
 description = "run unit tests"
 commands = [["pytest", { replace = "posargs", default = ["tests"], extend = true }]]
 dependency_groups = ["test"]
-extras = ["voice"]
+extras = ["voice", "redis"]
 
 [tool.tox.env."3.14-novoice"]
 description = "run import and warning tests without the voice extra"

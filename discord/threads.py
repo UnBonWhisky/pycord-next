@@ -25,15 +25,20 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING
+import contextlib
+from typing import TYPE_CHECKING, cast
 
-from .abc import Messageable, _purge_messages_helper
+from ._internal.cache_peek import cached_channel
+from .abc import (
+    Messageable,
+    cached_message,
+    purge_messages_helper,
+)
 from .enums import (
     ChannelType,
+    ThreadArchiveDuration as ThreadArchiveDurationEnum,
+    try_enum,
 )
-from .enums import ThreadArchiveDuration as ThreadArchiveDurationEnum
-from .enums import try_enum
 from .errors import ClientException
 from .flags import ChannelFlags
 from .mixins import Hashable
@@ -45,19 +50,31 @@ __all__ = (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from .abc import Snowflake, SnowflakeTime
-    from .channel import CategoryChannel, ForumChannel, ForumTag, TextChannel
-    from .guild import Guild
+    from .channel import (
+        CategoryChannel,
+        ForumChannel,
+        ForumTag,
+        PartialGuildChannel,
+        PartialMessageable,
+        TextChannel,
+    )
+    from .guild import Guild, PartialGuild
     from .member import Member
     from .message import Message, PartialMessage
     from .permissions import Permissions
     from .role import Role
     from .state import ConnectionState
+    from .types.raw_models import ThreadMemberUpdateEvent
     from .types.snowflake import SnowflakeList
-    from .types.threads import Thread as ThreadPayload
-    from .types.threads import ThreadArchiveDuration
-    from .types.threads import ThreadMember as ThreadMemberPayload
-    from .types.threads import ThreadMetadata
+    from .types.threads import (
+        Thread as ThreadPayload,
+        ThreadArchiveDuration,
+        ThreadMember as ThreadMemberPayload,
+        ThreadMetadata,
+    )
 
 
 class Thread(Messageable, Hashable):
@@ -142,37 +159,41 @@ class Thread(Messageable, Hashable):
     """
 
     __slots__ = (
-        "name",
-        "id",
-        "guild",
-        "_type",
-        "_state",
-        "_members",
         "_applied_tags",
-        "owner_id",
-        "parent_id",
-        "last_message_id",
-        "message_count",
-        "member_count",
-        "slowmode_delay",
-        "me",
-        "locked",
-        "archived",
-        "invitable",
-        "auto_archive_duration",
+        "_state",
+        "_type",
         "archive_timestamp",
+        "archived",
+        "auto_archive_duration",
         "created_at",
         "flags",
+        "guild_id",
+        "id",
+        "invitable",
+        "last_message_id",
+        "locked",
+        "me",
+        "member_count",
+        "message_count",
+        "name",
+        "owner_id",
+        "parent_id",
+        "slowmode_delay",
         "total_message_sent",
     )
 
-    def __init__(self, *, guild: Guild, state: ConnectionState, data: ThreadPayload):
+    def __init__(
+        self,
+        *,
+        guild: Guild | PartialGuild,
+        state: ConnectionState,
+        data: ThreadPayload,
+    ) -> None:
         self._state: ConnectionState = state
-        self.guild = guild
-        self._members: dict[int, ThreadMember] = {}
+        self.guild_id: int = guild.id
         self._from_data(data)
 
-    async def _get_channel(self):
+    async def _get_channel(self) -> Thread:
         return self
 
     def __repr__(self) -> str:
@@ -184,7 +205,7 @@ class Thread(Messageable, Hashable):
     def __str__(self) -> str:
         return self.name
 
-    def _from_data(self, data: ThreadPayload):
+    def _from_data(self, data: ThreadPayload) -> None:
         # This data will always exist
         self.id = int(data["id"])
         self.parent_id = int(data["parent_id"])
@@ -192,11 +213,8 @@ class Thread(Messageable, Hashable):
         self._type = try_enum(ChannelType, data["type"])
 
         # This data may be missing depending on how this object is being created
-        self.owner_id = (
-            int(data.get("owner_id"))
-            if data.get("owner_id", None) is not None
-            else None
-        )
+        owner_id = data.get("owner_id")
+        self.owner_id = int(owner_id) if owner_id is not None else None
         self.last_message_id = _get_as_snowflake(data, "last_message_id")
         self.slowmode_delay = data.get("rate_limit_per_user", 0)
         self.message_count = data.get("message_count", None)
@@ -207,38 +225,17 @@ class Thread(Messageable, Hashable):
             int(tag_id) for tag_id in data.get("applied_tags", [])
         ]
 
-        # Here, we try to fill in potentially missing data
-        if thread := self.guild.get_thread(self.id) and data.pop("_invoke_flag", False):
-            self.owner_id = thread.owner_id if self.owner_id is None else self.owner_id
-            self.last_message_id = (
-                thread.last_message_id
-                if self.last_message_id is None
-                else self.last_message_id
-            )
-            self.message_count = (
-                thread.message_count
-                if self.message_count is None
-                else self.message_count
-            )
-            self.total_message_sent = (
-                thread.total_message_sent
-                if self.total_message_sent is None
-                else self.total_message_sent
-            )
-            self.member_count = (
-                thread.member_count if self.member_count is None else self.member_count
-            )
+        data.pop("_invoke_flag", False)
 
         self._unroll_metadata(data["thread_metadata"])
 
-        try:
-            member = data["member"]
-        except KeyError:
-            self.me = None
+        self.me: ThreadMember | None
+        if "member" in data:
+            self.me = ThreadMember(self, data["member"])
         else:
-            self.me = ThreadMember(self, member)
+            self.me = None
 
-    def _unroll_metadata(self, data: ThreadMetadata):
+    def _unroll_metadata(self, data: ThreadMetadata) -> None:
         self.archived = data["archived"]
         self.auto_archive_duration = data["auto_archive_duration"]
         self.archive_timestamp = parse_time(data["archive_timestamp"])
@@ -246,11 +243,9 @@ class Thread(Messageable, Hashable):
         self.invitable = data.get("invitable", True)
         self.created_at = parse_time(data.get("create_timestamp", None))
 
-    def _update(self, data):
-        try:
+    def _update(self, data: ThreadPayload) -> None:
+        with contextlib.suppress(KeyError):
             self.name = data["name"]
-        except KeyError:
-            pass
 
         self._applied_tags: list[int] = [
             int(tag_id) for tag_id in data.get("applied_tags", [])
@@ -258,10 +253,8 @@ class Thread(Messageable, Hashable):
         self.flags: ChannelFlags = ChannelFlags._from_value(data.get("flags", 0))
         self.slowmode_delay = data.get("rate_limit_per_user", 0)
 
-        try:
+        with contextlib.suppress(KeyError):
             self._unroll_metadata(data["thread_metadata"])
-        except KeyError:
-            pass
 
     @property
     def type(self) -> ChannelType:
@@ -269,14 +262,88 @@ class Thread(Messageable, Hashable):
         return self._type
 
     @property
-    def parent(self) -> TextChannel | ForumChannel | None:
-        """The parent channel this thread belongs to."""
-        return self.guild.get_channel(self.parent_id)  # type: ignore
+    def guild(self) -> Guild | PartialGuild:
+        """The guild this thread belongs to.
+
+        This is the cached :class:`Guild` with the in-process cache, or a
+        :class:`PartialGuild` handle if it is not cached or the cache backend is remote.
+        """
+        from .guild import PartialGuild
+
+        state = self._state
+        if state.cache.supports_sync:
+            guild = state._guilds.get_nowait(self.guild_id)
+            if guild is not None:
+                return guild
+        return PartialGuild(state=state, id=self.guild_id)
+
+    @property
+    def parent(self) -> TextChannel | ForumChannel | PartialGuildChannel:
+        """The parent channel this thread belongs to.
+
+        This is the cached channel with the in-process cache, or a
+        :class:`PartialGuildChannel` handle if it is not cached or the cache backend
+        is remote. Use :meth:`get_parent` to get the cached channel.
+        """
+        from .channel import PartialGuildChannel
+
+        state = self._state
+        if state.cache.supports_sync:
+            parent = state._guild_bucket("channels", self.guild_id).get_nowait(
+                self.parent_id
+            )
+            if parent is not None:
+                return parent  # type: ignore[no-any-return]
+        return PartialGuildChannel(
+            state=state, id=self.parent_id, guild_id=self.guild_id
+        )
+
+    def _cached_parent(self) -> TextChannel | ForumChannel | None:
+        return self._state._guild_bucket("channels", self.guild_id).get_nowait(
+            self.parent_id
+        )
+
+    async def get_parent(self) -> TextChannel | ForumChannel | None:
+        """|coro|
+
+        Returns the cached parent channel this thread belongs to.
+
+        Returns
+        -------
+        Optional[Union[:class:`TextChannel`, :class:`ForumChannel`]]
+            The parent channel, or ``None`` if it is not cached.
+        """
+        return await self._state._guild_bucket("channels", self.guild_id).get(
+            self.parent_id
+        )
 
     @property
     def owner(self) -> Member | None:
-        """The member this thread belongs to."""
-        return self.guild.get_member(self.owner_id)
+        """The member this thread belongs to.
+
+        This reads the cache synchronously and raises
+        :class:`SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_owner` there.
+        """
+        if self.owner_id is None:
+            return None
+        return self._state._guild_bucket("members", self.guild_id).get_nowait(
+            self.owner_id
+        )
+
+    async def get_owner(self) -> Member | None:
+        """|coro|
+
+        Returns the cached member this thread belongs to.
+
+        Returns
+        -------
+        Optional[:class:`Member`]
+            The owner, or ``None`` if it is not cached.
+        """
+        if self.owner_id is None:
+            return None
+        return await self._state._get_member(self.guild_id, self.owner_id)
 
     @property
     def mention(self) -> str:
@@ -298,28 +365,96 @@ class Thread(Messageable, Hashable):
         This requires :attr:`Intents.members` to be properly filled. Most of the time however,
         this data is not provided by the gateway and a call to :meth:`fetch_members` is
         needed.
+
+        This reads the cache synchronously and raises
+        :class:`SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_members` there.
         """
-        return list(self._members.values())
+        return self._state._store.bucket(
+            "thread_members", scope=self.id
+        ).values_nowait()
+
+    async def get_members(self) -> list[ThreadMember]:
+        """|coro|
+
+        Returns a list of the thread members in this thread, including the bot if it is a member of this thread.
+
+        This requires :attr:`Intents.members` to be properly filled. Most of the time however,
+        this data is not provided by the gateway and a call to :meth:`fetch_members` is
+        needed.
+
+        Returns
+        -------
+        List[:class:`ThreadMember`]
+            The cached thread members.
+        """
+        return await self._state._store.bucket("thread_members", scope=self.id).values()
 
     @property
     def applied_tags(self) -> list[ForumTag]:
         """List[:class:`ForumTag`]: A list of tags applied to this thread.
 
         This is only available for threads in forum or media channels.
+
+        This reads the cache synchronously and raises
+        :class:`SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_applied_tags` there.
         """
         from .channel import ForumChannel  # to prevent circular import
 
-        if isinstance(self.parent, ForumChannel):
+        parent = self._cached_parent()
+        if isinstance(parent, ForumChannel):
             return [
                 tag
                 for tag_id in self._applied_tags
-                if (tag := self.parent.get_tag(tag_id)) is not None
+                if (tag := parent.get_tag(tag_id)) is not None
+            ]
+        return []
+
+    async def get_applied_tags(self) -> list[ForumTag]:
+        """|coro|
+
+        Returns the tags applied to this thread.
+
+        This is only available for threads in forum or media channels.
+
+        Returns
+        -------
+        List[:class:`ForumTag`]
+            The tags applied to this thread, empty if the parent channel is not cached.
+        """
+        from .channel import ForumChannel  # to prevent circular import
+
+        parent = await self.get_parent()
+        if isinstance(parent, ForumChannel):
+            return [
+                tag
+                for tag_id in self._applied_tags
+                if (tag := parent.get_tag(tag_id)) is not None
             ]
         return []
 
     @property
     def last_message(self) -> Message | None:
         """Returns the last message from this thread in cache.
+
+        This reads the cache synchronously and raises
+        :class:`SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_last_message` there.
+
+        The message might not be valid or point to an existing message.
+
+        Returns
+        -------
+        Optional[:class:`Message`]
+            The last message in this channel or ``None`` if not found.
+        """
+        return cached_message(self._state, self.last_message_id)
+
+    async def get_last_message(self) -> Message | None:
+        """|coro|
+
+        Returns the last message from this thread in cache.
 
         The message might not be valid or point to an existing message.
 
@@ -337,14 +472,18 @@ class Thread(Messageable, Hashable):
             The last message in this channel or ``None`` if not found.
         """
         return (
-            self._state._get_message(self.last_message_id)
+            await self._state._get_message(self.last_message_id)
             if self.last_message_id
             else None
         )
 
     @property
-    def category(self) -> CategoryChannel | None:
+    def category(self) -> CategoryChannel | PartialGuildChannel | None:
         """The category channel the parent channel belongs to, if applicable.
+
+        This reads the cache synchronously and raises
+        :class:`SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_category` there.
 
         Returns
         -------
@@ -356,8 +495,7 @@ class Thread(Messageable, Hashable):
         ClientException
             The parent channel was not cached and returned ``None``.
         """
-
-        parent = self.parent
+        parent = self._cached_parent()
         if parent is None:
             raise ClientException("Parent channel not found")
         return parent.category
@@ -365,6 +503,10 @@ class Thread(Messageable, Hashable):
     @property
     def category_id(self) -> int | None:
         """The category channel ID the parent channel belongs to, if applicable.
+
+        This reads the cache synchronously and raises
+        :class:`SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_category_id` there.
 
         Returns
         -------
@@ -376,8 +518,47 @@ class Thread(Messageable, Hashable):
         ClientException
             The parent channel was not cached and returned ``None``.
         """
+        parent = self._cached_parent()
+        if parent is None:
+            raise ClientException("Parent channel not found")
+        return parent.category_id
 
-        parent = self.parent
+    async def get_category(self) -> CategoryChannel | None:
+        """|coro|
+
+        Returns the category channel the parent channel belongs to, if applicable.
+
+        Returns
+        -------
+        Optional[:class:`CategoryChannel`]
+            The parent channel's category.
+
+        Raises
+        ------
+        ClientException
+            The parent channel was not cached and returned ``None``.
+        """
+        parent = await self.get_parent()
+        if parent is None:
+            raise ClientException("Parent channel not found")
+        return await parent.get_category()
+
+    async def get_category_id(self) -> int | None:
+        """|coro|
+
+        Returns the category channel ID the parent channel belongs to, if applicable.
+
+        Returns
+        -------
+        Optional[:class:`int`]
+            The parent channel's category ID.
+
+        Raises
+        ------
+        ClientException
+            The parent channel was not cached and returned ``None``.
+        """
+        parent = await self.get_parent()
         if parent is None:
             raise ClientException("Parent channel not found")
         return parent.category_id
@@ -385,6 +566,25 @@ class Thread(Messageable, Hashable):
     @property
     def starting_message(self) -> Message | None:
         """Returns the message that started this thread.
+
+        This reads the cache synchronously and raises
+        :class:`SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_starting_message` there.
+
+        .. note::
+            The ID for this message is the same as the thread ID.
+
+        Returns
+        -------
+        Optional[:class:`Message`]
+            The message that started this thread or ``None`` if not found in the cache.
+        """
+        return cached_message(self._state, self.id)
+
+    async def get_starting_message(self) -> Message | None:
+        """|coro|
+
+        Returns the message that started this thread.
 
         The message might not be valid or point to an existing message.
 
@@ -396,7 +596,7 @@ class Thread(Messageable, Hashable):
         Optional[:class:`Message`]
             The message that started this thread or ``None`` if not found in the cache.
         """
-        return self._state._get_message(self.id)
+        return await self._state._get_message(self.id)
 
     def is_pinned(self) -> bool:
         """Whether the thread is pinned to the top of its parent forum or media channel.
@@ -424,15 +624,35 @@ class Thread(Messageable, Hashable):
     def is_nsfw(self) -> bool:
         """Whether the thread is NSFW or not.
 
+        This reads the cache synchronously and raises
+        :class:`SyncCacheAccessError` with a remote cache backend,
+        use :meth:`check_nsfw` there.
+
         An NSFW thread is a thread that has a parent that is an NSFW channel,
         i.e. :meth:`.TextChannel.is_nsfw` is ``True``.
         """
-        parent = self.parent
+        parent = self._cached_parent()
+        return parent is not None and parent.is_nsfw()
+
+    async def check_nsfw(self) -> bool:
+        """|coro|
+
+        Whether the thread is NSFW or not.
+
+        .. versionadded:: 3.0
+
+        An NSFW thread is a thread that has a parent that is an NSFW channel,
+        i.e. :meth:`.TextChannel.is_nsfw` is ``True``.
+        """
+        parent = await self.get_parent()
         return parent is not None and parent.is_nsfw()
 
     def permissions_for(self, obj: Member | Role, /) -> Permissions:
-        """Handles permission resolution for the :class:`~discord.Member`
-        or :class:`~discord.Role`.
+        """Handles permission resolution for a :class:`~discord.Member` or :class:`~discord.Role`.
+
+        This reads the cache synchronously and raises
+        :class:`SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_permissions_for` there.
 
         Since threads do not have their own permissions, they inherit them
         from the parent channel. This is a convenience method for
@@ -456,11 +676,39 @@ class Thread(Messageable, Hashable):
         ClientException
             The parent channel was not cached and returned ``None``
         """
-
-        parent = self.parent
+        parent = self._cached_parent()
         if parent is None:
             raise ClientException("Parent channel not found")
         return parent.permissions_for(obj)
+
+    async def get_permissions_for(self, obj: Member | Role, /) -> Permissions:
+        """|coro|
+
+        Handles permission resolution for the :class:`~discord.Member`
+        or :class:`~discord.Role` on the parent channel, reading the cache
+        through its asynchronous API.
+
+        .. versionadded:: 3.0
+
+        Parameters
+        ----------
+        obj: Union[:class:`~discord.Member`, :class:`~discord.Role`]
+            The object to resolve permissions for.
+
+        Returns
+        -------
+        :class:`~discord.Permissions`
+            The resolved permissions for the member or role.
+
+        Raises
+        ------
+        ClientException
+            The parent channel was not cached and returned ``None``
+        """
+        parent = await self.get_parent()
+        if parent is None:
+            raise ClientException("Parent channel not found")
+        return await parent.get_permissions_for(obj)
 
     async def delete_messages(
         self, messages: Iterable[Snowflake], *, reason: str | None = None
@@ -578,16 +826,16 @@ class Thread(Messageable, Hashable):
 
         Examples
         --------
-
         Deleting bot's messages ::
 
             def is_me(m):
                 return m.author == client.user
 
+
             deleted = await thread.purge(limit=100, check=is_me)
-            await thread.send(f'Deleted {len(deleted)} message(s)')
+            await thread.send(f"Deleted {len(deleted)} message(s)")
         """
-        return await _purge_messages_helper(
+        return await purge_messages_helper(
             self,
             limit=limit,
             check=check,
@@ -687,7 +935,9 @@ class Thread(Messageable, Hashable):
 
         data = await self._state.http.edit_channel(self.id, **payload, reason=reason)
         # The data payload will always be a Thread payload
-        return Thread(data=data, state=self._state, guild=self.guild)  # type: ignore
+        return Thread(
+            data=cast("ThreadPayload", data), state=self._state, guild=self.guild
+        )
 
     async def archive(self, locked: bool = MISSING) -> Thread:
         """|coro|
@@ -718,7 +968,7 @@ class Thread(Messageable, Hashable):
         """
         return await self.edit(archived=False)
 
-    async def join(self):
+    async def join(self) -> None:
         """|coro|
 
         Joins this thread.
@@ -735,7 +985,7 @@ class Thread(Messageable, Hashable):
         """
         await self._state.http.join_thread(self.id)
 
-    async def leave(self):
+    async def leave(self) -> None:
         """|coro|
 
         Leaves this thread.
@@ -747,7 +997,7 @@ class Thread(Messageable, Hashable):
         """
         await self._state.http.leave_thread(self.id)
 
-    async def add_user(self, user: Snowflake):
+    async def add_user(self, user: Snowflake) -> None:
         """|coro|
 
         Adds a user to this thread.
@@ -771,7 +1021,7 @@ class Thread(Messageable, Hashable):
         """
         await self._state.http.add_user_to_thread(self.id, user.id)
 
-    async def remove_user(self, user: Snowflake):
+    async def remove_user(self, user: Snowflake) -> None:
         """|coro|
 
         Removes a user from this thread.
@@ -810,17 +1060,16 @@ class Thread(Messageable, Hashable):
         HTTPException
             Retrieving the members failed.
         """
-
         members = await self._state.http.get_thread_members(self.id)
 
         thread_members = [ThreadMember(parent=self, data=data) for data in members]
 
         for member in thread_members:
-            self._add_member(member)
+            await self._add_member(member)
 
         return thread_members
 
-    async def delete(self):
+    async def delete(self) -> None:
         """|coro|
 
         Deletes this thread.
@@ -854,16 +1103,19 @@ class Thread(Messageable, Hashable):
         :class:`PartialMessage`
             The partial message.
         """
-
         from .message import PartialMessage
 
         return PartialMessage(channel=self, id=message_id)
 
-    def _add_member(self, member: ThreadMember) -> None:
-        self._members[member.id] = member
+    async def _add_member(self, member: ThreadMember) -> None:
+        await self._state._store.bucket("thread_members", scope=self.id).set(
+            member.id, member
+        )
 
-    def _pop_member(self, member_id: int) -> ThreadMember | None:
-        return self._members.pop(member_id, None)
+    async def _pop_member(self, member_id: int) -> ThreadMember | None:
+        return await self._state._store.bucket("thread_members", scope=self.id).pop(
+            member_id
+        )
 
 
 class ThreadMember(Hashable):
@@ -900,18 +1152,18 @@ class ThreadMember(Hashable):
     """
 
     __slots__ = (
-        "id",
-        "thread_id",
-        "joined_at",
-        "flags",
         "_state",
-        "parent",
+        "flags",
+        "id",
+        "joined_at",
+        "thread_id",
     )
 
-    def __init__(self, parent: Thread, data: ThreadMemberPayload):
-        self.parent = parent
+    def __init__(
+        self, parent: Thread, data: ThreadMemberPayload | ThreadMemberUpdateEvent
+    ) -> None:
         self._state = parent._state
-        self._from_data(data)
+        self._from_data(data, parent.id)
 
     def __repr__(self) -> str:
         return (
@@ -919,22 +1171,44 @@ class ThreadMember(Hashable):
             f" id={self.id} thread_id={self.thread_id} joined_at={self.joined_at!r}>"
         )
 
-    def _from_data(self, data: ThreadMemberPayload):
-        try:
+    def _from_data(
+        self, data: ThreadMemberPayload | ThreadMemberUpdateEvent, parent_id: int
+    ) -> None:
+        if "user_id" in data:
             self.id = int(data["user_id"])
-        except KeyError:
-            assert self._state.self_id is not None
-            self.id = self._state.self_id
+        else:
+            self_id = self._state.self_id
+            if self_id is None:
+                raise ClientException("The current user ID is not known yet.")
+            self.id = self_id
 
-        try:
+        if "id" in data:
             self.thread_id = int(data["id"])
-        except KeyError:
-            self.thread_id = self.parent.id
+        else:
+            self.thread_id = parent_id
 
         self.joined_at = parse_time(data["join_timestamp"])
         self.flags = data["flags"]
 
     @property
-    def thread(self) -> Thread:
-        """The thread this member belongs to."""
-        return self.parent
+    def thread(self) -> Thread | PartialMessageable:
+        """The thread this member belongs to.
+
+        This is the cached :class:`Thread` with the in-process cache, and a
+        :class:`PartialMessageable` handle when it is not cached or the cache
+        backend is not the in-process one. ``await client.get_channel(member.thread_id)``
+        returns the cached thread with any backend.
+        """
+        cached = cached_channel(self._state, self.thread_id)
+        if cached is not None:
+            return cast("Thread | PartialMessageable", cached)
+        from .channel import PartialMessageable
+
+        return PartialMessageable(
+            state=self._state, id=self.thread_id, type=ChannelType.public_thread
+        )
+
+    @property
+    def parent(self) -> Thread | PartialMessageable:
+        """The thread this member belongs to. An alias of :attr:`thread`."""
+        return self.thread

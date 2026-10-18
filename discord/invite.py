@@ -25,13 +25,15 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import datetime
+import asyncio
 import io
 import os
-from typing import TYPE_CHECKING, TypeVar, Union
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
-from typing_extensions import deprecated, override
+from typing_extensions import Self, deprecated, override
 
+from ._internal.cache_peek import cached_guild
 from .appinfo import PartialAppInfo
 from .asset import Asset
 from .enums import (
@@ -41,40 +43,43 @@ from .enums import (
     VerificationLevel,
     try_enum,
 )
-from .file import File
 from .mixins import Hashable
 from .object import Object
 from .role import Role
 from .utils import _get_as_snowflake, parse_time, snowflake_time
 
 __all__ = (
-    "PartialInviteChannel",
-    "PartialInviteGuild",
     "Invite",
     "InviteTargetUsers",
     "InviteTargetUsersJobStatus",
+    "PartialInviteChannel",
+    "PartialInviteGuild",
 )
 
 if TYPE_CHECKING:
-    from .abc import GuildChannel
-    from .guild import Guild
+    import datetime as dt
+    from collections.abc import Sequence
+
+    from .abc import GuildChannel, Snowflake as SnowflakeObject
+    from .channel import PartialGuildChannel
+    from .file import File
+    from .guild import Guild, PartialGuild
     from .scheduled_events import ScheduledEvent
     from .state import ConnectionState
+    from .threads import Thread
     from .types.channel import PartialChannel as InviteChannelPayload
-    from .types.invite import GatewayInvite as GatewayInvitePayload
-    from .types.invite import IncompleteInvite as IncompleteInvitePayload
-    from .types.invite import Invite as InvitePayload
-    from .types.invite import InviteGuild as InviteGuildPayload
     from .types.invite import (
+        GatewayInvite as GatewayInvitePayload,
+        IncompleteInvite as IncompleteInvitePayload,
+        Invite as InvitePayload,
+        InviteGuild as InviteGuildPayload,
         InviteTargetUsersJobStatus as InviteTargetUsersJobStatusPayload,
     )
     from .types.role import Role as RolePayload
     from .types.scheduled_events import ScheduledEvent as ScheduledEventPayload
     from .types.snowflake import Snowflake
+    from .types.user import User as UserPayload
     from .user import User
-
-    InviteGuildType = Union[Guild, "PartialInviteGuild", Object]
-    InviteChannelType = Union[GuildChannel, "PartialInviteChannel", Object]
 
 
 class PartialInviteChannel:
@@ -113,7 +118,7 @@ class PartialInviteChannel:
 
     __slots__ = ("id", "name", "type")
 
-    def __init__(self, data: InviteChannelPayload):
+    def __init__(self, data: InviteChannelPayload) -> None:
         self.id: int = int(data["id"])
         self.name: str = data["name"]
         self.type: ChannelType = try_enum(ChannelType, data["type"])
@@ -132,7 +137,7 @@ class PartialInviteChannel:
         return f"<#{self.id}>"
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """Returns the channel's creation time in UTC."""
         return snowflake_time(self.id)
 
@@ -176,22 +181,24 @@ class PartialInviteGuild:
     """
 
     __slots__ = (
-        "_state",
-        "features",
-        "_icon",
         "_banner",
+        "_icon",
+        "_splash",
+        "_state",
+        "description",
+        "features",
         "id",
         "name",
-        "_splash",
         "verification_level",
-        "description",
     )
 
-    def __init__(self, state: ConnectionState, data: InviteGuildPayload, id: int):
+    def __init__(
+        self, state: ConnectionState, data: InviteGuildPayload, id: int
+    ) -> None:
         self._state: ConnectionState = state
         self.id: int = id
         self.name: str = data["name"]
-        self.features: list[str] = data.get("features", [])
+        self.features: list[str] = cast("list[str]", data.get("features", []))
         self._icon: str | None = data.get("icon")
         self._banner: str | None = data.get("banner")
         self._splash: str | None = data.get("splash")
@@ -210,7 +217,7 @@ class PartialInviteGuild:
         )
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """Returns the guild's creation time in UTC."""
         return snowflake_time(self.id)
 
@@ -261,13 +268,11 @@ class InviteTargetUsersJobStatus:
         The current status of the job.
     """
 
-    def __init__(self, *, data: InviteTargetUsersJobStatusPayload):
+    def __init__(self, *, data: InviteTargetUsersJobStatusPayload) -> None:
         self.total_users: int = data["total_users"]
         self.processed_users: int = data["processed_users"]
-        self.created_at: datetime.datetime | None = parse_time(data.get("created_at"))
-        self.completed_at: datetime.datetime | None = parse_time(
-            data.get("completed_at")
-        )
+        self.created_at: dt.datetime | None = parse_time(data.get("created_at"))
+        self.completed_at: dt.datetime | None = parse_time(data.get("completed_at"))
         self.error_message: str | None = data.get("error_message")
         self.status: InviteTargetUsersJobStatusCode = try_enum(
             InviteTargetUsersJobStatusCode, data["status"]
@@ -299,7 +304,7 @@ class InviteTargetUsers:
         *,
         state: ConnectionState,
         invite_code: str,
-    ):
+    ) -> None:
         self._state: ConnectionState = state
         self.invite_code: str = invite_code
 
@@ -374,9 +379,7 @@ class InviteTargetUsers:
             if seek_begin:
                 fp.seek(0)
             return written
-        else:
-            with open(fp, "wb") as f:
-                return f.write(data)
+        return await asyncio.to_thread(Path(os.fsdecode(fp)).write_bytes, data)
 
     async def as_user_ids(self) -> list[int]:
         """|coro|
@@ -399,8 +402,118 @@ class InviteTargetUsers:
             .splitlines()[1:]  # first line is standardized "user_ids" header
         ]
 
+    async def add(self, user: SnowflakeObject) -> None:
+        """|coro|
 
-I = TypeVar("I", bound="Invite")
+        Adds a user to this invite's target users.
+
+        You must have created this invite or have the :attr:`~Permissions.manage_guild` permission to do this.
+
+        Parameters
+        ----------
+        user: :class:`abc.Snowflake`
+            The user to add.
+
+        Raises
+        ------
+        HTTPException
+            Adding the target user failed.
+        Forbidden
+            You do not have permissions to edit this invite.
+        NotFound
+            The invite is invalid or expired.
+        """
+        await self._state.http.add_invite_target_user(self.invite_code, user.id)
+
+    async def remove(self, user: SnowflakeObject) -> None:
+        """|coro|
+
+        Removes a user from this invite's target users.
+
+        You must have created this invite or have the :attr:`~Permissions.manage_guild` permission to do this.
+
+        Parameters
+        ----------
+        user: :class:`abc.Snowflake`
+            The user to remove.
+
+        Raises
+        ------
+        HTTPException
+            Removing the target user failed.
+        Forbidden
+            You do not have permissions to edit this invite.
+        NotFound
+            The invite is invalid or expired.
+        """
+        await self._state.http.remove_invite_target_user(self.invite_code, user.id)
+
+    async def bulk_add(self, users: Sequence[SnowflakeObject]) -> None:
+        """|coro|
+
+        Adds up to 1000 users to this invite's target users.
+
+        You must have created this invite or have the :attr:`~Permissions.manage_guild` permission to do this.
+
+        Parameters
+        ----------
+        users: Sequence[:class:`abc.Snowflake`]
+            The users to add, at most 1000.
+
+        Raises
+        ------
+        ValueError
+            More than 1000 users were passed.
+        HTTPException
+            Adding the target users failed.
+        Forbidden
+            You do not have permissions to edit this invite.
+        NotFound
+            The invite is invalid or expired.
+        """
+        await self._state.http.bulk_add_invite_target_users(
+            self.invite_code, user_ids=self._bulk_ids(users)
+        )
+
+    async def bulk_remove(self, users: Sequence[SnowflakeObject]) -> None:
+        """|coro|
+
+        Removes up to 1000 users from this invite's target users.
+
+        You must have created this invite or have the :attr:`~Permissions.manage_guild` permission to do this.
+
+        Parameters
+        ----------
+        users: Sequence[:class:`abc.Snowflake`]
+            The users to remove, at most 1000.
+
+        Raises
+        ------
+        ValueError
+            More than 1000 users were passed.
+        HTTPException
+            Removing the target users failed.
+        Forbidden
+            You do not have permissions to edit this invite.
+        NotFound
+            The invite is invalid or expired.
+        """
+        await self._state.http.bulk_remove_invite_target_users(
+            self.invite_code, user_ids=self._bulk_ids(users)
+        )
+
+    @staticmethod
+    def _bulk_ids(users: Sequence[SnowflakeObject]) -> list[int]:
+        if len(users) > 1000:
+            raise ValueError("at most 1000 users can be changed at once")
+        return [u.id for u in users]
+
+
+if TYPE_CHECKING:
+    InviteGuildType = Guild | PartialGuild | PartialInviteGuild | Object
+    InviteChannelType = (
+        GuildChannel | PartialGuildChannel | PartialInviteChannel | Object
+    )
 
 
 class Invite(Hashable):
@@ -452,7 +565,7 @@ class Invite(Hashable):
     If it's not in the table above then it is available by all methods.
 
     Attributes
-    -----------
+    ----------
     max_age: :class:`int`
         How long before the invite expires in seconds.
         A value of ``0`` indicates that it doesn't expire.
@@ -539,10 +652,14 @@ class Invite(Hashable):
         self,
         *,
         state: ConnectionState,
-        data: InvitePayload | IncompleteInvitePayload,
-        guild: PartialInviteGuild | Guild | None = None,
-        channel: PartialInviteChannel | GuildChannel | None = None,
-    ):
+        data: InvitePayload | IncompleteInvitePayload | GatewayInvitePayload,
+        guild: PartialInviteGuild | Guild | PartialGuild | Object | None = None,
+        channel: PartialInviteChannel
+        | GuildChannel
+        | PartialGuildChannel
+        | Object
+        | None = None,
+    ) -> None:
         self._state: ConnectionState = state
         self.max_age: int | None = data.get("max_age")
         self.code: str = data["code"]
@@ -550,7 +667,7 @@ class Invite(Hashable):
             data.get("guild"), guild
         )
         self.revoked: bool | None = data.get("revoked")
-        self.created_at: datetime.datetime | None = parse_time(data.get("created_at"))
+        self.created_at: dt.datetime | None = parse_time(data.get("created_at"))
         self.temporary: bool | None = data.get("temporary")
         self.uses: int | None = data.get("uses")
         self.max_uses: int | None = data.get("max_uses")
@@ -560,13 +677,15 @@ class Invite(Hashable):
         self.approximate_member_count: int | None = data.get("approximate_member_count")
 
         expires_at = data.get("expires_at", None)
-        self.expires_at: datetime.datetime | None = (
+        self.expires_at: dt.datetime | None = (
             parse_time(expires_at) if expires_at else None
         )
 
         inviter_data = data.get("inviter")
         self.inviter: User | None = (
-            None if inviter_data is None else self._state.create_user(inviter_data)
+            None
+            if inviter_data is None
+            else self._state.create_user(cast("UserPayload", inviter_data))
         )
 
         self.channel: InviteChannelType | None = self._resolve_channel(
@@ -577,18 +696,25 @@ class Invite(Hashable):
         self.target_user: User | None = (
             None
             if target_user_data is None
-            else self._state.create_user(target_user_data)
+            else self._state.create_user(cast("UserPayload", target_user_data))
         )
 
         self.target_type: InviteTarget = try_enum(
             InviteTarget, data.get("target_type", 0)
         )
 
+        from .guild import PartialGuild
         from .scheduled_events import ScheduledEvent
 
-        scheduled_event: ScheduledEventPayload = data.get("guild_scheduled_event")
+        scheduled_event: ScheduledEventPayload | None = data.get(
+            "guild_scheduled_event"
+        )
         self.scheduled_event: ScheduledEvent | None = (
-            ScheduledEvent(state=state, data=scheduled_event)
+            ScheduledEvent(
+                state=state,
+                guild=PartialGuild(state=state, id=int(scheduled_event["guild_id"])),
+                data=scheduled_event,
+            )
             if scheduled_event
             else None
         )
@@ -603,18 +729,29 @@ class Invite(Hashable):
         )
 
     @classmethod
-    def from_incomplete(
-        cls: type[I], *, state: ConnectionState, data: InvitePayload
-    ) -> I:
+    def from_incomplete(cls, *, state: ConnectionState, data: InvitePayload) -> Self:
+        """Create an invite from a payload whose guild and channel may be partial, using the cache when possible.
+
+        Parameters
+        ----------
+        state: :class:`ConnectionState`
+            The connection state.
+        data: :class:`dict`
+            The invite payload.
+
+        Returns
+        -------
+        :class:`Invite`
+            The new invite.
+        """
         guild: Guild | PartialInviteGuild | None
-        try:
-            guild_data = data["guild"]
-        except KeyError:
+        if "guild" not in data:
             # If we're here, then this is a group DM
             guild = None
         else:
+            guild_data = data["guild"]
             guild_id = int(guild_data["id"])
-            guild = state._get_guild(guild_id)
+            guild = cached_guild(state, guild_id)
             if guild is None:
                 # If it's not cached, then it has to be a partial guild
                 guild = PartialInviteGuild(state, guild_data, guild_id)
@@ -626,29 +763,58 @@ class Invite(Hashable):
         )
         if guild is not None and not isinstance(guild, PartialInviteGuild):
             # Upgrade the partial data if applicable
-            channel = guild.get_channel(channel.id) or channel
+            channel = (
+                state._guild_bucket("channels", guild.id).get_nowait(channel.id)
+                or channel
+            )
 
         return cls(state=state, data=data, guild=guild, channel=channel)
 
     @classmethod
     def from_gateway(
-        cls: type[I], *, state: ConnectionState, data: GatewayInvitePayload
-    ) -> I:
+        cls, *, state: ConnectionState, data: GatewayInvitePayload
+    ) -> Self:
+        """Create an invite from the payload of an invite gateway event.
+
+        Parameters
+        ----------
+        state: :class:`ConnectionState`
+            The connection state.
+        data: :class:`dict`
+            The gateway invite payload.
+
+        Returns
+        -------
+        :class:`Invite`
+            The new invite.
+        """
         guild_id: int | None = _get_as_snowflake(data, "guild_id")
-        guild: Guild | Object | None = state._get_guild(guild_id)
         channel_id = int(data["channel_id"])
+        guild: Guild | PartialGuild | Object | None
+        channel: GuildChannel | PartialGuildChannel | Object
+        if not state.cache.supports_sync and guild_id is not None:
+            from .channel import PartialGuildChannel
+            from .guild import PartialGuild
+
+            guild = PartialGuild(state=state, id=guild_id)
+            channel = PartialGuildChannel(state=state, id=channel_id, guild_id=guild_id)
+            return cls(state=state, data=data, guild=guild, channel=channel)
+
+        guild = cached_guild(state, guild_id)
         if guild is not None:
-            channel = guild.get_channel(channel_id) or Object(id=channel_id)  # type: ignore
+            channel = state._guild_bucket("channels", guild.id).get_nowait(
+                channel_id
+            ) or Object(id=channel_id)
         else:
             guild = Object(id=guild_id) if guild_id is not None else None
             channel = Object(id=channel_id)
 
-        return cls(state=state, data=data, guild=guild, channel=channel)  # type: ignore
+        return cls(state=state, data=data, guild=guild, channel=channel)
 
     def _resolve_guild(
         self,
         data: InviteGuildPayload | None,
-        guild: Guild | PartialInviteGuild | None = None,
+        guild: Guild | PartialGuild | PartialInviteGuild | Object | None = None,
     ) -> InviteGuildType | None:
         if guild is not None:
             return guild
@@ -662,7 +828,11 @@ class Invite(Hashable):
     def _resolve_channel(
         self,
         data: InviteChannelPayload | None,
-        channel: PartialInviteChannel | GuildChannel | None = None,
+        channel: PartialInviteChannel
+        | GuildChannel
+        | PartialGuildChannel
+        | Object
+        | None = None,
     ) -> InviteChannelType | None:
         if channel is not None:
             return channel
@@ -677,16 +847,11 @@ class Invite(Hashable):
     ) -> list[Object | Role]:
         if roles and self.guild is not None:
             result: list[Object | Role] = [
-                Role(guild=self.guild, data=role, state=self._state) for role in roles
+                Role(guild=cast("Guild", self.guild), data=role, state=self._state)
+                for role in roles
             ]
             return result
-        if self.guild is not None and not isinstance(self.guild, PartialInviteGuild):
-            return [
-                self.guild.get_role(int(role_id)) or Object(role_id)
-                for role_id in role_ids
-            ]
-        else:
-            return [Object(role_id) for role_id in role_ids]
+        return [Object(role_id) for role_id in role_ids]
 
     def __str__(self) -> str:
         return self.url
@@ -701,6 +866,9 @@ class Invite(Hashable):
             f">"
         )
 
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, self.__class__) and other.code == self.code
+
     def __hash__(self) -> int:
         return hash(self.code)
 
@@ -711,6 +879,38 @@ class Invite(Hashable):
     def id(self) -> str:  # type: ignore[override]
         """Returns the proper code portion of the invite."""
         return self.code
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the cached guild the invite is for.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Optional[:class:`Guild`]
+            The guild, or ``None`` if the invite has no guild or it is not cached.
+        """
+        if self.guild is None:
+            return None
+        return await self._state._get_guild(self.guild.id)
+
+    async def get_channel(self) -> GuildChannel | Thread | None:
+        """|coro|
+
+        Returns the cached channel the invite is for.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Optional[Union[:class:`abc.GuildChannel`, :class:`Thread`]]
+            The channel, or ``None`` if the invite has no channel or it is not cached.
+        """
+        if self.channel is None or self.guild is None:
+            return None
+        return await self._state._resolve_guild_channel(self.guild.id, self.channel.id)
 
     @property
     def url(self) -> str:
@@ -777,7 +977,7 @@ class Invite(Hashable):
         r = await self._state.http.get_invite_target_users_job_status(self.code)
         return InviteTargetUsersJobStatus(data=r)
 
-    async def delete(self, *, reason: str | None = None):
+    async def delete(self, *, reason: str | None = None) -> None:
         """|coro|
 
         Revokes the instant invite.

@@ -1,12 +1,12 @@
-"""
-Discord API Wrapper
-~~~~~~~~~~~~~~~~~~~
+"""Discord API Wrapper.
 
 A basic wrapper for the Discord API.
 
 :copyright: (c) 2015-2021 Rapptz & (c) 2021-present Pycord Development
 :license: MIT, see LICENSE for more details.
 """
+
+from __future__ import annotations
 
 __title__ = "pycord"
 __author__ = "Pycord Development"
@@ -25,7 +25,7 @@ from ._version import *
 # isort: on
 
 
-from . import abc, opus, sinks, ui, utils
+from . import abc as abc, opus as opus, sinks as sinks, ui as ui, utils as utils
 from .activity import *
 from .appinfo import *
 from .application_role_connection import *
@@ -52,9 +52,12 @@ from .incidents import *
 from .integrations import *
 from .interactions import *
 from .invite import *
+from .limits import *
+from .lobby import *
 from .member import *
 from .mentions import *
 from .message import *
+from .message_search import *
 from .monetization import *
 from .object import *
 from .onboarding import *
@@ -68,6 +71,7 @@ from .reaction import *
 from .role import *
 from .scheduled_events import *
 from .shard import *
+from .shared_client_theme import *
 from .soundboard import *
 from .stage_instance import *
 from .sticker import *
@@ -84,20 +88,25 @@ if TYPE_CHECKING:
 
     from typing_extensions import deprecated
 
-    from discord.voice import VoiceClient as VoiceClientC
-    from discord.voice import VoiceProtocol as VoiceProtocolC
+    from discord.voice import (
+        VoiceClient as VoiceClientC,
+        VoiceProtocol as VoiceProtocolC,
+    )
 
     C = TypeVar("C", bound=Client)
 
     @deprecated(
         "discord.VoiceClient is deprecated in favour of discord.voice.VoiceClient since 2.7 and will be removed in 3.0",
     )
-    class VoiceClient(VoiceClientC): ...
+    class VoiceClient(VoiceClientC):
+        """Deprecated alias of :class:`discord.voice.VoiceClient`."""
 
     @deprecated(
         "discord.VoiceProtocol is deprecated in favour of discord.voice.VoiceProtocol since 2.7 and will be removed in 3.0",
     )
-    class VoiceProtocol(VoiceProtocolC[C], Generic[C]): ...
+    class VoiceProtocol(VoiceProtocolC[C], Generic[C]):
+        """Deprecated alias of :class:`discord.voice.VoiceProtocol`."""
+
 
 else:
     from .utils import warn_deprecated

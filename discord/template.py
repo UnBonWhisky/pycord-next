@@ -25,65 +25,88 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
+from .cache import CacheStore
 from .guild import Guild
-from .utils import MISSING, _bytes_to_base64_data, parse_time
+from .utils import MISSING, parse_time
 
 __all__ = ("Template",)
 
 if TYPE_CHECKING:
-    import datetime
+    import datetime as dt
 
+    from .cache.store import CacheBucket
+    from .flags import MemberCacheFlags
+    from .member import Member
     from .state import ConnectionState
+    from .types.emoji import Emoji as EmojiPayload
     from .types.template import Template as TemplatePayload
-    from .user import User
+    from .types.user import User as UserPayload
+    from .user import ClientUser, User
 
 
 class _FriendlyHttpAttributeErrorHelper:
     __slots__ = ()
 
-    def __getattr__(self, attr):
+    def __getattr__(self, attr: str) -> NoReturn:
         raise AttributeError("PartialTemplateState does not support http methods.")
 
 
 class _PartialTemplateState:
-    def __init__(self, *, state):
+    def __init__(self, *, state: ConnectionState) -> None:
         self.__state = state
+        self.__cache = CacheStore(None, state=state)
         self.http = _FriendlyHttpAttributeErrorHelper()
 
     @property
-    def shard_count(self):
+    def shard_count(self) -> int | None:
         return self.__state.shard_count
 
     @property
-    def user(self):
+    def user(self) -> ClientUser | None:
         return self.__state.user
 
     @property
-    def self_id(self):
-        return self.__state.user.id
+    def self_id(self) -> int:
+        return cast("ClientUser", self.__state.user).id
 
     @property
-    def member_cache_flags(self):
+    def member_cache_flags(self) -> MemberCacheFlags:
         return self.__state.member_cache_flags
 
-    def store_emoji(self, guild, packet):
+    async def store_user(self, data: UserPayload) -> User:
+        return await self.__state.store_user(data)
+
+    def create_user(self, data: UserPayload) -> User:
+        return self.__state.create_user(data)
+
+    async def get_channel(self, id: int) -> None:
         return None
 
-    def _get_voice_client(self, id):
+    async def store_emoji(self, guild: Guild, packet: EmojiPayload) -> None:
         return None
 
-    def _get_message(self, id):
+    def _get_voice_client(self, id: int) -> None:
         return None
 
-    def _get_guild(self, id):
-        return self.__state._get_guild(id)
+    async def _get_message(self, id: int) -> None:
+        return None
 
-    async def query_members(self, **kwargs: Any):
+    async def _get_guild(self, id: int | None) -> Guild | None:
+        return await self.__state._get_guild(id)
+
+    @property
+    def cache(self) -> CacheStore:
+        return self.__cache
+
+    def _guild_bucket(self, kind: str, guild_id: int | None) -> CacheBucket[int, Any]:
+        return self.__cache.bucket(kind, scope=guild_id)
+
+    async def query_members(self, **kwargs: Any) -> list[Member]:
         return []
 
-    def __getattr__(self, attr):
+    def __getattr__(self, attr: str) -> NoReturn:
         raise AttributeError(f"PartialTemplateState does not support {attr!r}.")
 
 
@@ -109,8 +132,8 @@ class Template:
     updated_at: :class:`datetime.datetime`
         An aware datetime in UTC representing when the template was last updated.
         This is referred to as "last synced" in the official Discord client.
-    source_guild: :class:`Guild`
-        The source guild.
+    source_guild_id: :class:`int`
+        The ID of the source guild.
     is_dirty: Optional[:class:`bool`]
         Whether the template has unsynced changes.
 
@@ -118,16 +141,17 @@ class Template:
     """
 
     __slots__ = (
-        "code",
-        "uses",
-        "name",
-        "description",
-        "creator",
-        "created_at",
-        "updated_at",
-        "source_guild",
-        "is_dirty",
+        "_source_guild",
         "_state",
+        "code",
+        "created_at",
+        "creator",
+        "description",
+        "is_dirty",
+        "name",
+        "source_guild_id",
+        "updated_at",
+        "uses",
     )
 
     def __init__(self, *, state: ConnectionState, data: TemplatePayload) -> None:
@@ -139,34 +163,56 @@ class Template:
         self.uses: int = data["usage_count"]
         self.name: str = data["name"]
         self.description: str | None = data["description"]
-        creator_data = data.get("creator")
+        creator_data = cast("UserPayload | None", data.get("creator"))
         self.creator: User | None = (
             None if creator_data is None else self._state.create_user(creator_data)
         )
 
-        self.created_at: datetime.datetime | None = parse_time(data.get("created_at"))
-        self.updated_at: datetime.datetime | None = parse_time(data.get("updated_at"))
+        self.created_at: dt.datetime | None = parse_time(data.get("created_at"))
+        self.updated_at: dt.datetime | None = parse_time(data.get("updated_at"))
 
-        guild_id = int(data["source_guild_id"])
-        guild: Guild | None = self._state._get_guild(guild_id)
-
-        self.source_guild: Guild
-        if guild is None:
-            source_serialised = data["serialized_source_guild"]
-            source_serialised["id"] = guild_id
-            state = _PartialTemplateState(state=self._state)
-            # Guild expects a ConnectionState, we're passing a _PartialTemplateState
-            self.source_guild = Guild(data=source_serialised, state=state)  # type: ignore
-        else:
-            self.source_guild = guild
+        self.source_guild_id: int = int(data["source_guild_id"])
+        source_serialised = data["serialized_source_guild"]
+        source_serialised["id"] = self.source_guild_id
+        # Guild expects a ConnectionState, we're passing a _PartialTemplateState
+        state = cast("ConnectionState", _PartialTemplateState(state=self._state))
+        self._source_guild: Guild = Guild(data=source_serialised, state=state)
 
         self.is_dirty: bool | None = data.get("is_dirty", None)
 
     def __repr__(self) -> str:
         return (
             f"<Template code={self.code!r} uses={self.uses} name={self.name!r}"
-            f" creator={self.creator!r} source_guild={self.source_guild!r} is_dirty={self.is_dirty}>"
+            f" creator={self.creator!r} source_guild_id={self.source_guild_id} is_dirty={self.is_dirty}>"
         )
+
+    @property
+    def source_guild(self) -> Guild:
+        """The source guild.
+
+        This is the cached guild when there is one, else the guild as serialised in
+        the template, which only holds the guild's own fields, not its channels,
+        roles or members. It reads the in-memory cache, use :meth:`get_source_guild`
+        with any cache backend.
+        """
+        return (
+            self._state._guilds.get_nowait(self.source_guild_id) or self._source_guild
+        )
+
+    async def get_source_guild(self) -> Guild:
+        """|coro|
+
+        Returns the source guild.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        :class:`Guild`
+            The cached guild when there is one, else the guild as serialised in
+            the template.
+        """
+        return await self._state._get_guild(self.source_guild_id) or self._source_guild
 
     async def sync(self) -> Template:
         """|coro|
@@ -195,8 +241,7 @@ class Template:
         NotFound
             This template does not exist.
         """
-
-        data = await self._state.http.sync_template(self.source_guild.id, self.code)
+        data = await self._state.http.sync_template(self.source_guild_id, self.code)
         return Template(state=self._state, data=data)
 
     async def edit(
@@ -238,7 +283,7 @@ class Template:
         NotFound
             This template does not exist.
         """
-        payload = {}
+        payload: dict[str, Any] = {}
 
         if name is not MISSING:
             payload["name"] = name
@@ -246,7 +291,7 @@ class Template:
             payload["description"] = description
 
         data = await self._state.http.edit_template(
-            self.source_guild.id, self.code, payload
+            self.source_guild_id, self.code, payload
         )
         return Template(state=self._state, data=data)
 
@@ -269,7 +314,7 @@ class Template:
         NotFound
             This template does not exist.
         """
-        await self._state.http.delete_template(self.source_guild.id, self.code)
+        await self._state.http.delete_template(self.source_guild_id, self.code)
 
     @property
     def url(self) -> str:

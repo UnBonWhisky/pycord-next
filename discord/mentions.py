@@ -25,23 +25,28 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 __all__ = ("AllowedMentions",)
 
 if TYPE_CHECKING:
+    from typing_extensions import Self
+
     from .abc import Snowflake
     from .types.message import AllowedMentions as AllowedMentionsPayload
 
 
 class _FakeBool:
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "True"
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return other is True
 
-    def __bool__(self):
+    def __hash__(self) -> int:
+        return hash(True)
+
+    def __bool__(self) -> bool:
         return True
 
 
@@ -80,7 +85,7 @@ class AllowedMentions:
         .. versionadded:: 1.6
     """
 
-    __slots__ = ("everyone", "users", "roles", "replied_user")
+    __slots__ = ("everyone", "replied_user", "roles", "users")
 
     def __init__(
         self,
@@ -89,14 +94,14 @@ class AllowedMentions:
         users: bool | list[Snowflake] = default,
         roles: bool | list[Snowflake] = default,
         replied_user: bool = default,
-    ):
+    ) -> None:
         self.everyone = everyone
         self.users = users
         self.roles = roles
         self.replied_user = replied_user
 
     @classmethod
-    def all(cls: type[A]) -> A:
+    def all(cls) -> Self:
         """A factory method that returns a :class:`AllowedMentions` with all fields explicitly set to ``True``
 
         .. versionadded:: 1.5
@@ -104,7 +109,7 @@ class AllowedMentions:
         return cls(everyone=True, users=True, roles=True, replied_user=True)
 
     @classmethod
-    def none(cls: type[A]) -> A:
+    def none(cls) -> Self:
         """A factory method that returns a :class:`AllowedMentions` with all fields set to ``False``
 
         .. versionadded:: 1.5
@@ -112,32 +117,54 @@ class AllowedMentions:
         return cls(everyone=False, users=False, roles=False, replied_user=False)
 
     def to_dict(self) -> AllowedMentionsPayload:
-        parse = []
-        data = {}
+        """Convert these allowed mentions to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The ``allowed_mentions`` payload.
+        """
+        parse: list[str] = []
+        data: dict[str, Any] = {}
 
         if self.everyone:
             parse.append("everyone")
 
-        # In the following operations, the comparison operator
-        # must be used instead of the "is" operator as the program
-        # has to invoke _Fakebool.__eq__ to prevent false results.
-        if self.users == True:
-            parse.append("users")
-        elif self.users != False:
+        # ``default`` is a ``_FakeBool``: it counts as ``True`` here
+        # but is told apart from an explicit ``True`` by ``merge``.
+        if isinstance(self.users, bool | _FakeBool):
+            if self.users:
+                parse.append("users")
+        else:
             data["users"] = [x.id for x in self.users]
 
-        if self.roles == True:
-            parse.append("roles")
-        elif self.roles != False:
+        if isinstance(self.roles, bool | _FakeBool):
+            if self.roles:
+                parse.append("roles")
+        else:
             data["roles"] = [x.id for x in self.roles]
 
         if self.replied_user:
             data["replied_user"] = True
 
         data["parse"] = parse
-        return data  # type: ignore
+        return cast("AllowedMentionsPayload", data)
 
     def merge(self, other: AllowedMentions) -> AllowedMentions:
+        """Merge ``other`` into these allowed mentions.
+
+        The values of ``self`` are used unless ``other`` explicitly sets them.
+
+        Parameters
+        ----------
+        other
+            The allowed mentions whose explicit values take precedence.
+
+        Returns
+        -------
+        :class:`AllowedMentions`
+            A new instance holding the merged values.
+        """
         # Creates a new AllowedMentions by merging from another one.
         # Merge is done by using the 'self' values unless explicitly
         # overridden by the 'other' values.

@@ -26,10 +26,12 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import struct
-from collections.abc import Generator
 from typing import IO, TYPE_CHECKING, ClassVar
 
 from .errors import DiscordException
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 __all__ = (
     "OggError",
@@ -47,6 +49,20 @@ class OggError(DiscordException):
 
 
 class OggPage:
+    """A single page of an Ogg bitstream.
+
+    Parameters
+    ----------
+    stream: IO[:class:`bytes`]
+        The stream to read the page from, positioned right after the
+        ``OggS`` capture pattern.
+
+    Raises
+    ------
+    OggError
+        The page could not be parsed from the stream.
+    """
+
     _header: ClassVar[struct.Struct] = struct.Struct("<xBQIIIB")
     if TYPE_CHECKING:
         flag: int
@@ -76,6 +92,14 @@ class OggPage:
             raise OggError("bad data stream") from None
 
     def iter_packets(self) -> Generator[tuple[bytes, bool]]:
+        """Iterate over the packet segments contained in this page.
+
+        Yields
+        ------
+        tuple[:class:`bytes`, :class:`bool`]
+            The packet data and whether it is complete (``False`` when it
+            continues on the next page).
+        """
         packetlen = offset = 0
         partial = True
 
@@ -95,6 +119,14 @@ class OggPage:
 
 
 class OggStream:
+    """A stream of Ogg pages that can be iterated as whole packets.
+
+    Parameters
+    ----------
+    stream: IO[:class:`bytes`]
+        The binary stream containing the Ogg data.
+    """
+
     def __init__(self, stream: IO[bytes]) -> None:
         self.stream: IO[bytes] = stream
 
@@ -102,10 +134,9 @@ class OggStream:
         head = self.stream.read(4)
         if head == b"OggS":
             return OggPage(self.stream)
-        elif not head:
+        if not head:
             return None
-        else:
-            raise OggError("invalid header magic")
+        raise OggError("invalid header magic")
 
     def _iter_pages(self) -> Generator[OggPage]:
         page = self._next_page()
@@ -114,6 +145,18 @@ class OggStream:
             page = self._next_page()
 
     def iter_packets(self) -> Generator[bytes]:
+        """Iterate over every complete packet in the stream.
+
+        Yields
+        ------
+        :class:`bytes`
+            The data of one packet, reassembled across pages if needed.
+
+        Raises
+        ------
+        OggError
+            The stream contains invalid data.
+        """
         partial = b""
         for page in self._iter_pages():
             for data, complete in page.iter_packets():

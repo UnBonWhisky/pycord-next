@@ -25,7 +25,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import Literal, Union
+from typing import Literal
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -44,7 +44,7 @@ class StickerItem(TypedDict):
 class BaseSticker(TypedDict):
     id: Snowflake
     name: str
-    description: str
+    description: str | None
     tags: str
     format_type: StickerFormatType
 
@@ -62,7 +62,7 @@ class GuildSticker(BaseSticker):
     guild_id: Snowflake
 
 
-Sticker = Union[BaseSticker, StandardSticker, GuildSticker]
+Sticker = BaseSticker | StandardSticker | GuildSticker
 
 
 class StickerPack(TypedDict):
@@ -70,9 +70,9 @@ class StickerPack(TypedDict):
     stickers: list[StandardSticker]
     name: str
     sku_id: Snowflake
-    cover_sticker_id: Snowflake
+    cover_sticker_id: NotRequired[Snowflake]
     description: str
-    banner_asset_id: Snowflake
+    banner_asset_id: NotRequired[Snowflake]
 
 
 class CreateGuildSticker(TypedDict):
@@ -84,7 +84,7 @@ class CreateGuildSticker(TypedDict):
 class EditGuildSticker(TypedDict, total=False):
     name: str
     tags: str
-    description: str
+    description: str | None
 
 
 class ListPremiumStickerPacks(TypedDict):

@@ -26,25 +26,93 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from operator import attrgetter
+from typing import TYPE_CHECKING, Any, Generic, cast
 
-from ..utils import find, get
-from .item import Item, ItemCallbackType
+from typing_extensions import TypeVar
 
 __all__ = ("ItemInterface",)
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from typing_extensions import Self
 
-    from .view import View
+    from ..types.components import Component as ComponentPayload
+    from .item import Item
 
 
-class ItemInterface:
+def _item_getter(iterable: Iterable[Item], /, **attrs: Any) -> Item | None:
+    if not attrs:
+        return None
+    predicates = [
+        (attrgetter(attr.replace("__", ".")), value) for attr, value in attrs.items()
+    ]
+    for item in iterable:
+        try:
+            if all(pred(item) == value for pred, value in predicates):
+                return item
+        except AttributeError:
+            pass
+        getter = cast(
+            "Callable[..., Item | None] | None", getattr(item, "get_item", None)
+        )
+        if getter is not None and (child := getter(**attrs)):
+            return child
+    return None
+
+
+def _validate_position(
+    index: int | None, before: object | None, after: object | None
+) -> None:
+    if sum(x is not None for x in (index, before, after)) > 1:
+        raise ValueError("Can only specify one of before, after, and index.")
+
+
+def _resolve_item(owner: Any, ref: Any, where: str) -> Any:
+    found = owner.get_item(ref) if isinstance(ref, (str, int)) else ref
+    if found is None:
+        raise ValueError(f"Could not find {ref!r} in {where}.")
+    return found
+
+
+def _insertion_index(  # pyright: ignore[reportUnusedFunction]
+    owner: Any,
+    items: list[Any],
+    index: int | None,
+    before: Any,
+    after: Any,
+    where: str,
+) -> int | None:
+    _validate_position(index, before, after)
+    if index is not None:
+        return index
+    ref = before if before is not None else after
+    if ref is None:
+        return None
+    found = _resolve_item(owner, ref, where)
+    try:
+        position = items.index(found)
+    except ValueError:
+        raise ValueError(f"Could not find {ref!r} in {where}.") from None
+    return position if before is not None else position + 1
+
+
+ItemT = TypeVar("ItemT", bound="Item", default=Any)
+
+
+class ItemInterface(Generic[ItemT]):
     """The base structure for classes that contain :class:`~discord.ui.Item`.
 
     .. versionadded:: 2.7
+
+    .. container:: operations
+
+        .. describe:: len(x)
+
+            Returns the total count of all items in this interface.
+            This includes items that contain other items, which count towards Discord's component limits.
 
     Parameters
     ----------
@@ -53,6 +121,8 @@ class ItemInterface:
     timeout: Optional[:class:`float`]
         Timeout in seconds from last interaction with the UI before no longer accepting input. Defaults to 180.0.
         If ``None`` then there is no timeout.
+    store: Optional[:class:`bool`]
+        Whether this interface should be stored for callback listening. Setting it to ``False`` will ignore callbacks and prevent item values from being refreshed. Defaults to ``True``.
 
     Attributes
     ----------
@@ -61,23 +131,31 @@ class ItemInterface:
         If ``None`` then there is no timeout.
     children: List[:class:`Item`]
         The list of children attached to this structure.
-    store: Optional[:class:`bool`]
-        Whether this interface should be stored for callback listening. Setting it to ``False`` will ignore callbacks and prevent item values from being refreshed. Defaults to ``True``.
     """
+
+    if TYPE_CHECKING:
+
+        @property
+        def children(self) -> list[ItemT]:
+            """The list of children attached to this structure."""
+            ...
+
+        @children.setter
+        def children(self, value: list[ItemT]) -> None: ...
 
     def __init__(
         self,
-        *items: Item,
+        *items: ItemT,
         timeout: float | None = 180.0,
         store: bool = True,
-    ):
+    ) -> None:
         self.timeout: float | None = timeout
-        self.children: list[Item] = []
+        self.children = []
         for item in items:
             self.add_item(item)
 
         loop = asyncio.get_running_loop()
-        self._cancel_callback: Callable[[View], None] | None = None
+        self._cancel_callback: Callable[..., None] | None = None
         self._timeout_expiry: float | None = None
         self._timeout_task: asyncio.Task[None] | None = None
         self._stopped: asyncio.Future[bool] = loop.create_future()
@@ -90,7 +168,7 @@ class ItemInterface:
         while True:
             # Guard just in case someone changes the value of the timeout at runtime
             if self.timeout is None:
-                return
+                return None
 
             if self._timeout_expiry is None:
                 return self._dispatch_timeout()
@@ -109,45 +187,94 @@ class ItemInterface:
             return time.monotonic() + self.timeout
         return None
 
-    def _dispatch_timeout(self):
+    def _dispatch_timeout(self) -> None:
         raise NotImplementedError
 
-    def to_components(self) -> list[dict[str, Any]]:
+    def __len__(self) -> int:
+        return sum(len(i) for i in self.children)
+
+    def __bool__(self) -> bool:
+        return True
+
+    def to_components(self) -> list[ComponentPayload]:
+        """Converts the children of this structure to component payloads."""
         return [item.to_component_dict() for item in self.children]
 
-    def get_item(self, custom_id: str | int) -> Item | None:
-        """Gets an item from this structure. Roughly equal to `utils.get(self.children, ...)`.
+    def get_item(
+        self, custom_id: str | int | None = None, **attrs: Any
+    ) -> ItemT | None:
+        r"""Gets an item from this structure. Roughly equal to `utils.get(self.children, **attrs)`.
+
         If an :class:`int` is provided, the item will be retrieved by ``id``, otherwise by  ``custom_id``.
         This method will also search nested items.
+        If ``attrs`` are provided, they are all checked (logical AND) as done in :func:`~discord.utils.get`.
+        To have a nested attribute search (i.e. search by ``x.y``) then pass in ``x__y`` as the keyword argument.
+
+        Examples
+        --------
+        Basic usage:
+
+        .. code-block:: python3
+
+            container = my_view.get_item(1234)
+
+        Attribute matching:
+
+        .. code-block:: python3
+
+            button = my_view.get_item(
+                label="Click me!", style=discord.ButtonStyle.danger
+            )
 
         Parameters
         ----------
-        custom_id: Union[:class:`str`, :class:`int`]
+        custom_id: Optional[Union[:class:`str`, :class:`int`]]
             The id of the item to get
+        \*\*attrs
+            Keyword arguments that denote attributes to search with.
 
         Returns
         -------
         Optional[:class:`Item`]
-            The item with the matching ``custom_id`` or ``id`` if it exists.
+            The item with the matching ``custom_id``, ``id`` or ``attrs`` if it exists.
         """
-        if not custom_id:
-            return None
-        attr = "id" if isinstance(custom_id, int) else "custom_id"
-        child = find(lambda i: getattr(i, attr, None) == custom_id, self.children)
-        if not child:
-            for i in self.children:
-                if hasattr(i, "get_item"):
-                    if child := i.get_item(custom_id):
-                        return child
-        return child
+        if custom_id:
+            attr = "id" if isinstance(custom_id, int) else "custom_id"
+            attrs[attr] = custom_id
+        return cast("ItemT | None", _item_getter(self.children, **attrs))
 
-    def add_item(self, item: Item) -> Self:
+    def add_item(self, item: ItemT) -> Self:
+        """Adds an item to this structure.
+
+        Parameters
+        ----------
+        item
+            The item to add.
+
+        Returns
+        -------
+        :class:`ItemInterface`
+            This structure, to allow chaining.
+        """
         raise NotImplementedError
 
-    def remove_item(self, item: Item) -> Self:
+    def remove_item(self, item: ItemT) -> Self:
+        """Removes an item from this structure.
+
+        Parameters
+        ----------
+        item
+            The item to remove.
+
+        Returns
+        -------
+        :class:`ItemInterface`
+            This structure, to allow chaining.
+        """
         raise NotImplementedError
 
-    def clear_items(self) -> None:
+    def clear_items(self) -> Self:
+        """Removes every item from this structure."""
         raise NotImplementedError
 
     async def on_timeout(self) -> None:

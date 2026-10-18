@@ -19,8 +19,9 @@ async def ping(ctx: bridge.BridgeContext):
 
 
 @bot.bridge_command()
-@discord.option("value", choices=[1, 2, 3])
-async def choose(ctx: bridge.BridgeContext, value: int):
+async def choose(
+    ctx: bridge.BridgeContext, value: bridge.BridgeOption(int, choices=[1, 2, 3])
+):
     await ctx.respond(f"You chose: {value}!")
 
 
@@ -30,8 +31,10 @@ async def welcome(ctx: bridge.BridgeContext, member: discord.Member):
 
 
 @bot.bridge_command()
-@discord.option("seconds", choices=range(1, 11))
-async def wait(ctx: bridge.BridgeContext, seconds: int = 5):
+async def wait(
+    ctx: bridge.BridgeContext,
+    seconds: bridge.BridgeOption(int, choices=range(1, 11)) = 5,
+):
     await ctx.defer()
     await asyncio.sleep(seconds)
     await ctx.respond(f"Waited for {seconds} seconds!")

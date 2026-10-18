@@ -36,7 +36,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.message_id != role_message_id:
         return
 
-    guild = bot.get_guild(payload.guild_id)
+    guild = await bot.get_guild(payload.guild_id)
     if guild is None:
         # Make sure we're still in the guild, and it's cached.
         return
@@ -47,7 +47,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         # If the emoji isn't the one we care about then exit as well.
         return
 
-    role = guild.get_role(role_id)
+    role = await guild.get_role(role_id)
     if role is None:
         # Make sure the role still exists and is valid.
         return
@@ -67,7 +67,7 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
     if payload.message_id != role_message_id:
         return
 
-    guild = bot.get_guild(payload.guild_id)
+    guild = await bot.get_guild(payload.guild_id)
     if guild is None:
         # Make sure we're still in the guild, and it's cached.
         return
@@ -78,14 +78,14 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
         # If the emoji isn't the one we care about then exit as well.
         return
 
-    role = guild.get_role(role_id)
+    role = await guild.get_role(role_id)
     if role is None:
         # Make sure the role still exists and is valid.
         return
 
     # The payload for `on_raw_reaction_remove` does not provide `.member`
     # so we must get the member ourselves from the payload's `.user_id`.
-    member = guild.get_member(payload.user_id)
+    member = await guild.get_member(payload.user_id)
     if member is None:
         # Make sure the member still exists and is valid.
         return

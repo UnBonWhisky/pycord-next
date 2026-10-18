@@ -42,8 +42,9 @@ async def start(ctx: discord.ApplicationContext, sink: Sinks):
 
     vc.start_recording(
         sink.value,
-        finished_callback,
+        None,
         ctx.channel,
+        on_finish=finished_callback,
     )
 
     await ctx.respond("The recording has started!")

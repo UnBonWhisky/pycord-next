@@ -34,9 +34,9 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    Optional,
     TypeVar,
     Union,
+    cast,
     get_args,
 )
 
@@ -57,9 +57,7 @@ from ..channel import (
     VoiceChannel,
 )
 from ..commands import ApplicationContext, AutocompleteContext
-from ..enums import ChannelType
-from ..enums import Enum as DiscordEnum
-from ..enums import SlashCommandOptionType
+from ..enums import ChannelType, Enum as DiscordEnum, SlashCommandOptionType
 from ..utils import MISSING, basic_autocomplete
 
 if TYPE_CHECKING:
@@ -70,48 +68,52 @@ if TYPE_CHECKING:
     from ..role import Role
     from ..user import User
 
-    InputType = Union[
-        type[str],
-        type[bool],
-        type[int],
-        type[float],
-        type[GuildChannel],
-        type[Thread],
-        type[Member],
-        type[User],
-        type[Attachment],
-        type[Role],
-        type[Mentionable],
-        SlashCommandOptionType,
-        Converter,
-        type[Converter],
-        type[Enum],
-        type[DiscordEnum],
-    ]
+    InputType = (
+        type[
+            str
+            | bool
+            | int
+            | float
+            | GuildChannel
+            | Thread
+            | Member
+            | User
+            | Attachment
+            | Role
+            | Mentionable
+            | Converter[Any]
+            | Enum
+            | DiscordEnum
+        ]
+        | SlashCommandOptionType
+        | Converter[Any]
+    )
 
-    AutocompleteReturnType = Union[
-        Iterable["OptionChoice"], Iterable[str], Iterable[int], Iterable[float]
-    ]
+    AutocompleteReturnType = (
+        Iterable["OptionChoice"] | Iterable[str] | Iterable[int] | Iterable[float]
+    )
     T = TypeVar("T", bound=AutocompleteReturnType)
-    MaybeAwaitable = Union[T, Awaitable[T]]
-    AutocompleteFunction = Union[
-        Callable[[AutocompleteContext], MaybeAwaitable[AutocompleteReturnType]],
-        Callable[[Cog, AutocompleteContext], MaybeAwaitable[AutocompleteReturnType]],
-        Callable[
-            [AutocompleteContext, Any],  # pyright: ignore [reportExplicitAny]
+    MaybeAwaitable = T | Awaitable[T]
+    AutocompleteFunction = (
+        Callable[[AutocompleteContext], MaybeAwaitable[AutocompleteReturnType]]
+        | Callable[[Cog, AutocompleteContext], MaybeAwaitable[AutocompleteReturnType]]
+        | Callable[
+            [AutocompleteContext, Any],
             MaybeAwaitable[AutocompleteReturnType],
-        ],
-        Callable[
-            [Cog, AutocompleteContext, Any],  # pyright: ignore [reportExplicitAny]
+        ]
+        | Callable[
+            [Cog, AutocompleteContext, Any],
             MaybeAwaitable[AutocompleteReturnType],
-        ],
-    ]
+        ]
+    )
 
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 __all__ = (
-    "ThreadOption",
     "Option",
     "OptionChoice",
+    "ThreadOption",
     "option",
 )
 
@@ -129,6 +131,43 @@ CHANNEL_TYPE_MAP = {
 _log = logging.getLogger(__name__)
 
 
+def _input_type_of(datatype: Any) -> SlashCommandOptionType:
+    # Only the type of a command context resolves to ``None``, it is not an option.
+    return cast(
+        "SlashCommandOptionType", SlashCommandOptionType.from_datatype(datatype)
+    )
+
+
+def _tuple_members(value: object) -> tuple[Any, ...] | None:
+    if isinstance(value, tuple):
+        return cast("tuple[Any, ...]", value)
+    return None
+
+
+def _is_enum_type(value: object) -> bool:
+    return isinstance(value, type) and issubclass(value, (Enum, DiscordEnum))
+
+
+def _is_converter(value: object) -> bool:
+    from ..ext.commands import Converter
+
+    return isinstance(value, Converter) or (
+        isinstance(value, type) and issubclass(value, Converter)
+    )
+
+
+def _channel_raw_types(raw_type: object, datatype: Any) -> tuple[Any, ...]:
+    members = _tuple_members(raw_type)
+    if members is not None:
+        return members
+    args = getattr(datatype, "__args__", MISSING)
+    return (datatype,) if args is MISSING else args
+
+
+def _is_instance(value: object, types_: tuple[type, ...]) -> bool:
+    return isinstance(value, types_)
+
+
 class ThreadOption:
     """Represents a class that can be passed as the ``input_type`` for an :class:`Option` class.
 
@@ -140,7 +179,7 @@ class ThreadOption:
         The thread type to expect for this options input.
     """
 
-    def __init__(self, thread_type: Literal["public", "private", "news"]):
+    def __init__(self, thread_type: Literal["public", "private", "news"]) -> None:
         type_map = {
             "public": ChannelType.public_thread,
             "private": ChannelType.private_thread,
@@ -203,107 +242,102 @@ class Option:
         async def hello(
             ctx: discord.ApplicationContext,
             name: Option(str, "Enter your name"),
-            age: Option(int, "Enter your age", min_value=1, max_value=99, default=18)
+            age: Option(int, "Enter your age", min_value=1, max_value=99, default=18),
             # passing the default value makes an argument optional
             # you also can create optional argument using:
             # age: Option(int, "Enter your age") = 18
         ):
-            await ctx.respond(f"Hello! Your name is {name} and you are {age} years old.")
+            await ctx.respond(
+                f"Hello! Your name is {name} and you are {age} years old."
+            )
 
     .. versionadded:: 2.0
     """
 
     input_type: SlashCommandOptionType
-    converter: Converter | type[Converter] | None = None
+    converter: Converter[Any] | type[Converter[Any]] | None = None
 
     def __init__(
-        self, input_type: InputType = str, /, description: str | None = None, **kwargs
+        self,
+        input_type: InputType = str,
+        /,
+        description: str | None = None,
+        **kwargs: Any,
     ) -> None:
         self.name: str | None = kwargs.pop("name", None)
         if self.name is not None:
             self.name = str(self.name)
         self._parameter_name = self.name  # default
-        input_type = self._parse_type_alias(input_type)
-        input_type = self._strip_none_type(input_type)
-        self._raw_type: InputType | tuple = input_type
+        resolved_type: Any = self._strip_none_type(self._parse_type_alias(input_type))
+        self._raw_type: Any = resolved_type
 
-        enum_choices = []
-        input_type_is_class = isinstance(input_type, type)
-        if input_type_is_class and issubclass(input_type, (Enum, DiscordEnum)):
-            if description is None and input_type.__doc__ is not None:
-                description = inspect.cleandoc(input_type.__doc__)
+        enum_choices: list[OptionChoice] = []
+        if _is_enum_type(resolved_type):
+            if description is None and resolved_type.__doc__ is not None:
+                description = inspect.cleandoc(resolved_type.__doc__)
                 if description and len(description) > 100:
                     description = description[:97] + "..."
                     _log.warning(
                         "Option %s's description was truncated due to Enum %s's docstring exceeding 100 characters.",
                         self.name,
-                        input_type,
+                        resolved_type,
                     )
-            enum_choices = [OptionChoice(e.name, e.value) for e in input_type]
+            enum_choices = [OptionChoice(e.name, e.value) for e in resolved_type]
             value_class = enum_choices[0].value.__class__
             if value_class in SlashCommandOptionType.__members__ and all(
                 isinstance(elem.value, value_class) for elem in enum_choices
             ):
-                input_type = SlashCommandOptionType.from_datatype(
-                    enum_choices[0].value.__class__
-                )
+                resolved_type = _input_type_of(enum_choices[0].value.__class__)
             else:
-                enum_choices = [OptionChoice(e.name, str(e.value)) for e in input_type]
-                input_type = SlashCommandOptionType.string
+                enum_choices = [
+                    OptionChoice(e.name, str(e.value)) for e in resolved_type
+                ]
+                resolved_type = SlashCommandOptionType.string
 
         self.description = description or "No description provided"
         self.channel_types: list[ChannelType] = kwargs.pop("channel_types", [])
 
         if self.channel_types:
             self.input_type = SlashCommandOptionType.channel
-        elif isinstance(input_type, SlashCommandOptionType):
-            self.input_type = input_type
+        elif isinstance(resolved_type, SlashCommandOptionType):
+            self.input_type = resolved_type
         else:
-            from ..ext.commands import Converter
-
-            if isinstance(input_type, tuple) and any(
-                issubclass(op, ApplicationContext) for op in input_type
-            ):
-                input_type = next(
-                    op for op in input_type if issubclass(op, ApplicationContext)
+            if (members := _tuple_members(resolved_type)) is not None:
+                context_type = next(
+                    (op for op in members if issubclass(op, ApplicationContext)), None
                 )
+                if context_type is not None:
+                    resolved_type = context_type
 
-            if (
-                isinstance(input_type, Converter)
-                or input_type_is_class
-                and issubclass(input_type, Converter)
-            ):
-                self.converter = input_type
+            if _is_converter(resolved_type):
+                self.converter = resolved_type
                 self._raw_type = str
                 self.input_type = SlashCommandOptionType.string
             else:
                 try:
-                    self.input_type = SlashCommandOptionType.from_datatype(input_type)
-                except TypeError as exc:
+                    self.input_type = _input_type_of(resolved_type)
+                except TypeError:
                     from ..ext.commands.converter import CONVERTER_MAPPING
 
-                    if input_type not in CONVERTER_MAPPING:
-                        raise exc
-                    self.converter = CONVERTER_MAPPING[input_type]
+                    if resolved_type not in CONVERTER_MAPPING:
+                        raise
+                    self.converter = CONVERTER_MAPPING[resolved_type]
                     self._raw_type = str
                     self.input_type = SlashCommandOptionType.string
                 else:
                     if self.input_type == SlashCommandOptionType.channel:
-                        if not isinstance(self._raw_type, tuple):
-                            if hasattr(input_type, "__args__"):
-                                self._raw_type = input_type.__args__  # type: ignore # Union.__args__
-                            else:
-                                self._raw_type = (input_type,)
+                        raw_types = _channel_raw_types(self._raw_type, resolved_type)
+                        self._raw_type = raw_types
                         if not self.channel_types:
                             self.channel_types = [
                                 CHANNEL_TYPE_MAP[t]
-                                for t in self._raw_type
+                                for t in raw_types
                                 if t is not GuildChannel
                             ]
         self.required: bool = (
             kwargs.pop("required", True) if "default" not in kwargs else False
         )
-        self.default = kwargs.pop("default", None)
+        self.default: Any = kwargs.pop("default", None)
 
         self._autocomplete: AutocompleteFunction | None = None
         self._autocomplete_is_instance_method: bool = False
@@ -320,33 +354,38 @@ class Option:
                 for o in kwargs.pop("choices", [])
             ]
 
+        minmax_types: tuple[type, ...]
+        minmax_length_types: tuple[type, ...]
         if self.input_type == SlashCommandOptionType.integer:
             minmax_types = (int, type(None))
-            minmax_typehint = Optional[int]
+            minmax_typehint = "int | None"
         elif self.input_type == SlashCommandOptionType.number:
             minmax_types = (int, float, type(None))
-            minmax_typehint = Optional[Union[int, float]]
+            minmax_typehint = "int | float | None"
         else:
             minmax_types = (type(None),)
-            minmax_typehint = type(None)
+            minmax_typehint = "None"
 
         if self.input_type == SlashCommandOptionType.string:
             minmax_length_types = (int, type(None))
-            minmax_length_typehint = Optional[int]
+            minmax_length_typehint = "int | None"
         else:
             minmax_length_types = (type(None),)
-            minmax_length_typehint = type(None)
+            minmax_length_typehint = "None"
 
-        self.min_value: int | float | None = kwargs.pop("min_value", None)
-        self.max_value: int | float | None = kwargs.pop("max_value", None)
-        self.min_length: int | None = kwargs.pop("min_length", None)
-        self.max_length: int | None = kwargs.pop("max_length", None)
+        min_value: Any = kwargs.pop("min_value", None)
+        max_value: Any = kwargs.pop("max_value", None)
+        min_length: Any = kwargs.pop("min_length", None)
+        max_length: Any = kwargs.pop("max_length", None)
+        self.min_value: int | float | None = min_value
+        self.max_value: int | float | None = max_value
+        self.min_length: int | None = min_length
+        self.max_length: int | None = max_length
 
-        if (
-            self.input_type != SlashCommandOptionType.integer
-            and self.input_type != SlashCommandOptionType.number
-            and (self.min_value or self.max_value)
-        ):
+        if self.input_type not in (
+            SlashCommandOptionType.integer,
+            SlashCommandOptionType.number,
+        ) and (self.min_value or self.max_value):
             raise AttributeError(
                 "Option does not take min_value or max_value if not of type "
                 "SlashCommandOptionType.integer or SlashCommandOptionType.number"
@@ -358,34 +397,34 @@ class Option:
                 "Option does not take min_length or max_length if not of type str"
             )
 
-        if self.min_value is not None and not isinstance(self.min_value, minmax_types):
+        if min_value is not None and not _is_instance(min_value, minmax_types):
             raise TypeError(
                 f"Expected {minmax_typehint} for min_value, got"
-                f' "{type(self.min_value).__name__}"'
+                f' "{type(min_value).__name__}"'
             )
-        if self.max_value is not None and not isinstance(self.max_value, minmax_types):
+        if max_value is not None and not _is_instance(max_value, minmax_types):
             raise TypeError(
                 f"Expected {minmax_typehint} for max_value, got"
-                f' "{type(self.max_value).__name__}"'
+                f' "{type(max_value).__name__}"'
             )
 
-        if self.min_length is not None:
-            if not isinstance(self.min_length, minmax_length_types):
+        if min_length is not None:
+            if not _is_instance(min_length, minmax_length_types):
                 raise TypeError(
                     f"Expected {minmax_length_typehint} for min_length,"
-                    f' got "{type(self.min_length).__name__}"'
+                    f' got "{type(min_length).__name__}"'
                 )
-            if self.min_length < 0 or self.min_length > 6000:
+            if min_length < 0 or min_length > 6000:
                 raise AttributeError(
                     "min_length must be between 0 and 6000 (inclusive)"
                 )
-        if self.max_length is not None:
-            if not isinstance(self.max_length, minmax_length_types):
+        if max_length is not None:
+            if not _is_instance(max_length, minmax_length_types):
                 raise TypeError(
                     f"Expected {minmax_length_typehint} for max_length,"
-                    f' got "{type(self.max_length).__name__}"'
+                    f' got "{type(max_length).__name__}"'
                 )
-            if self.max_length < 1 or self.max_length > 6000:
+            if max_length < 1 or max_length > 6000:
                 raise AttributeError("max_length must between 1 and 6000 (inclusive)")
 
         self.name_localizations = kwargs.pop("name_localizations", MISSING)
@@ -393,30 +432,31 @@ class Option:
             "description_localizations", MISSING
         )
 
-        if input_type is None:
+        if resolved_type is None:
             raise TypeError("input_type cannot be NoneType.")
 
     @staticmethod
-    def _parse_type_alias(input_type: InputType) -> InputType:
+    def _parse_type_alias(input_type: Any) -> Any:
         if isinstance(input_type, TypeAliasType):
             return input_type.__value__
         return input_type
 
     @staticmethod
-    def _strip_none_type(input_type):
+    def _strip_none_type(input_type: Any) -> Any:
         if isinstance(input_type, SlashCommandOptionType):
             return input_type
 
         if input_type is type(None):
             raise TypeError("Option type cannot be only NoneType")
 
-        args = ()
-        if isinstance(input_type, types.UnionType):
+        args: tuple[Any, ...] = ()
+        if (
+            isinstance(input_type, types.UnionType)
+            or getattr(input_type, "__origin__", None) is Union
+        ):
             args = get_args(input_type)
-        elif getattr(input_type, "__origin__", None) is Union:
-            args = get_args(input_type)
-        elif isinstance(input_type, tuple):
-            args = input_type
+        elif (members := _tuple_members(input_type)) is not None:
+            args = members
 
         if args:
             filtered = tuple(t for t in args if t is not type(None))
@@ -429,8 +469,9 @@ class Option:
 
         return input_type
 
-    def to_dict(self) -> dict:
-        as_dict = {
+    def to_dict(self) -> dict[str, Any]:
+        """Converts this option into the payload sent to Discord."""
+        as_dict: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
             "type": self.input_type.value,
@@ -455,14 +496,14 @@ class Option:
 
         return as_dict
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<discord.commands.{self.__class__.__name__} name={self.name}>"
 
     @property
     def autocomplete(self) -> AutocompleteFunction | None:
-        """
-        The autocomplete handler for the option. Accepts a callable (sync or async)
-        that takes a single required argument of :class:`AutocompleteContext` or two arguments
+        """The autocomplete handler for the option.
+
+        Accepts a callable (sync or async) that takes a single required argument of :class:`AutocompleteContext` or two arguments
         of :class:`discord.Cog` (being the command's cog) and :class:`AutocompleteContext`.
         The callable must return an iterable of :class:`str` or :class:`OptionChoice`.
         Alternatively, :func:`discord.utils.basic_autocomplete` may be used in place of the callable.
@@ -516,22 +557,25 @@ class OptionChoice:
     def __init__(
         self,
         name: str,
-        value: str | int | float | None = None,
+        value: str | float | None = None,
         name_localizations: dict[str, str] = MISSING,
-    ):
+    ) -> None:
         self.name = str(name)
         self.value = value if value is not None else name
         self.name_localizations = name_localizations
 
-    def to_dict(self) -> dict[str, str | int | float]:
-        as_dict = {"name": self.name, "value": self.value}
+    def to_dict(self) -> dict[str, Any]:
+        """Converts this choice into the payload sent to Discord."""
+        as_dict: dict[str, Any] = {"name": self.name, "value": self.value}
         if self.name_localizations is not MISSING:
             as_dict["name_localizations"] = self.name_localizations
 
         return as_dict
 
 
-def option(name, input_type=None, **kwargs):
+def option(
+    name: str, input_type: InputType | None = None, **kwargs: Any
+) -> Callable[[F], F]:
     """A decorator that can be used instead of typehinting :class:`.Option`.
 
     .. versionadded:: 2.0
@@ -543,14 +587,15 @@ def option(name, input_type=None, **kwargs):
         This allows you to have a separate UI ``name`` and parameter name.
     """
 
-    def decorator(func):
-        resolved_name = kwargs.pop("parameter_name", None) or name
+    def decorator(func: F) -> F:
+        annotations: dict[str, Any] = func.__annotations__
+        resolved_name: str = kwargs.pop("parameter_name", None) or name
         itype = (
             kwargs.pop("type", None)
             or input_type
-            or func.__annotations__.get(resolved_name, str)
+            or annotations.get(resolved_name, str)
         )
-        func.__annotations__[resolved_name] = Option(itype, name=name, **kwargs)
+        annotations[resolved_name] = Option(itype, name=name, **kwargs)
         return func
 
     return decorator

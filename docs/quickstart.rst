@@ -122,3 +122,23 @@ Let's look at the differences compared to the previous example, step-by-step:
 
 
 Congratulations! Now you have created your first slash command!
+
+Next steps
+----------
+
+- Organise commands in :doc:`cogs`, and read :ref:`the examples <quickstart_examples>` for the common patterns.
+- Run the bot with another cache or gateway: :doc:`caching` (Redis, sync and async accessors) and :doc:`gateway`
+  (sharding, Redis Streams workers).
+- Coming from pycord? See :doc:`migrating_to_next`.
+
+.. _quickstart_examples:
+
+The :resource:`examples <examples>` folder has runnable bots for most features, for instance
+``examples/app_commands/slash_basic.py`` (slash commands), ``examples/views/`` (buttons, selects, modals),
+``examples/caching/`` (:doc:`caching`) and ``examples/redis_gateway/`` (:doc:`gateway`).
+
+.. note::
+
+    Looking up an entity by ID reads the cache and is awaited: write ``guild = await bot.get_guild(guild_id)``
+    and ``member = await guild.get_member(user_id)``. Properties such as ``bot.guilds`` or ``guild.members``
+    stay synchronous with the default in-process cache.

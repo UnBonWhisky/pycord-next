@@ -42,7 +42,7 @@ async def finished_callback(sink: MP3Sink, channel: discord.TextChannel):
         longest.export(f, format="mp3")
         await channel.send(
             f"Finished! Recorded audio for {', '.join(mention_strs)}.",
-            files=files + [discord.File(f, filename="recording.mp3")],
+            files=[*files, discord.File(f, filename="recording.mp3")],
         )
 
 
@@ -76,8 +76,9 @@ async def start(ctx: discord.ApplicationContext):
 
     vc.start_recording(
         MP3Sink(),
-        finished_callback,
+        None,
         ctx.channel,
+        on_finish=finished_callback,
         sync_start=True,  # WARNING: This feature is very unstable and may break at any time.
     )
 

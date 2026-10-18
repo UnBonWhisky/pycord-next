@@ -215,6 +215,15 @@ jobs:
         run: |
           python3 -m build --sdist
           python3 -m build --wheel
+      - name: "Smoke test built wheel"
+        id: wheel-smoke-test
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install "$(ls dist/*.whl)[redis,memcached,zstd,voice,speed]"
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/smoke/bin/python" -c "import discord; print(discord.__version__)"
+          "$RUNNER_TEMP/smoke/bin/python" -m discord --help
       - name: "Create GitHub Release"
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         id: gh-release

@@ -1,9 +1,8 @@
-"""
-discord.voice.packets
-~~~~~~~~~~~~~~~~~~~~~
+"""Sink packet handlers.
 
-Sink packet handlers.
-:copyright: (c) 2015-2021 Rapptz & 2021-present Pycord Development
+Copyright (c) 2015-2021 Rapptz
+Copyright (c) 2021-present Pycord Development
+
 :license: MIT, see LICENSE for more details.
 """
 
@@ -22,13 +21,13 @@ from .rtp import (
 )
 
 if TYPE_CHECKING:
-    from discord import Member, User
+    from discord import Member, Object, User
 
 __all__ = (
-    "Packet",
-    "RTPPacket",
-    "RTCPPacket",
     "FakePacket",
+    "Packet",
+    "RTCPPacket",
+    "RTPPacket",
     "ReceiverReportPacket",
     "SenderReportPacket",
     "SilencePacket",
@@ -45,19 +44,30 @@ class VoiceData:
     ----------
     packet: :class:`~discord.sinks.Packet`
         The packet this source data contains.
-    source: :class:`~discord.User` | :class:`~discord.Member` | None
+    source: :class:`~discord.User` | :class:`~discord.Member` | :class:`~discord.Object` | None
         The user that emitted this audio source.
     pcm: :class:`bytes`
         The PCM bytes of this source.
     """
 
     def __init__(
-        self, packet: Packet, source: User | Member | None, *, pcm: bytes | None = None
+        self,
+        packet: Packet,
+        source: User | Member | Object | None,
+        *,
+        pcm: bytes | None = None,
     ) -> None:
         self.packet: Packet = packet
-        self.source: User | Member | None = source
-        self.pcm: bytes = pcm if pcm else b""
+        self.source: User | Member | Object | None = source
+        self.pcm: bytes = pcm or b""
 
     @property
     def opus(self) -> bytes | None:
+        """The opus encoded data of this source, if any.
+
+        Returns
+        -------
+        :class:`bytes` | None
+            The decrypted opus data, or ``None`` if the packet was not decrypted.
+        """
         return self.packet.decrypted_data

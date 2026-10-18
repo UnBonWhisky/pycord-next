@@ -24,25 +24,27 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, cast
+
+from typing_extensions import TypeVar, override
 
 from ..components import Separator as SeparatorComponent
-from ..components import _component_factory
 from ..enums import ComponentType, SeparatorSpacingSize
+from ._fields import Field
 from .item import ViewItem
 
 __all__ = ("Separator",)
 
 if TYPE_CHECKING:
+    from ..components import Component
     from ..types.components import SeparatorComponent as SeparatorComponentPayload
     from .view import DesignerView
 
 
-S = TypeVar("S", bound="Separator")
-V = TypeVar("V", bound="DesignerView", covariant=True)
+V_co = TypeVar("V_co", bound="DesignerView", covariant=True, default="DesignerView")
 
 
-class Separator(ViewItem[V]):
+class Separator(ViewItem[V_co]):
     """Represents a UI Separator.
 
     .. versionadded:: 2.7
@@ -63,60 +65,39 @@ class Separator(ViewItem[V]):
         "id",
     )
 
+    __component__ = SeparatorComponent
+    __component_type__ = ComponentType.separator
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> SeparatorComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    divider: Field[bool] = Field(
+        "Whether the separator is a divider. Defaults to ``True``."
+    )
+    spacing: Field[SeparatorSpacingSize] = Field(
+        "The spacing size of the separator. Defaults to :attr:`~discord.SeparatorSpacingSize.small`."
+    )
+
     def __init__(
         self,
         *,
         divider: bool = True,
         spacing: SeparatorSpacingSize = SeparatorSpacingSize.small,
         id: int | None = None,
-    ):
+    ) -> None:
         super().__init__()
 
-        self._underlying = self._generate_underlying(
-            id=id,
-            divider=divider,
-            spacing=spacing,
-        )
+        self._build_underlying(id=id, divider=divider, spacing=spacing)
 
-    def _generate_underlying(
-        self,
-        divider: bool | None = None,
-        spacing: SeparatorSpacingSize | None = None,
-        id: int | None = None,
-    ) -> SeparatorComponent:
-        super()._generate_underlying(SeparatorComponent)
-        return SeparatorComponent._raw_construct(
-            type=ComponentType.separator,
-            id=id or self.id,
-            divider=divider if divider is not None else self.divider,
-            spacing=spacing or self.spacing,
-        )
-
-    @property
-    def divider(self) -> bool:
-        """Whether the separator is a divider. Defaults to ``True``."""
-        return self.underlying.divider
-
-    @divider.setter
-    def divider(self, value: bool) -> None:
-        self.underlying.divider = value
-
-    @property
-    def spacing(self) -> SeparatorSpacingSize:
-        """The spacing size of the separator. Defaults to :attr:`~discord.SeparatorSpacingSize.small`."""
-        return self.underlying.spacing
-
-    @spacing.setter
-    def spacing(self, value: SeparatorSpacingSize) -> None:
-        self.underlying.spacing = value
-
+    @override
     def to_component_dict(self) -> SeparatorComponentPayload:
-        return super().to_component_dict()
+        return cast("SeparatorComponentPayload", super().to_component_dict())
 
-    @classmethod
-    def from_component(cls: type[S], component: SeparatorComponent) -> S:
-        return cls(
-            divider=component.divider, spacing=component.spacing, id=component.id
-        )
-
-    callback = None
+    callback = None  # pyright: ignore[reportAssignmentType]

@@ -25,7 +25,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import Literal, Union
+from typing import Literal
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -101,7 +101,7 @@ AuditLogEvent = Literal[
 ]
 
 
-class _AuditLogChange_Str(TypedDict):
+class _AuditLogChangeStr(TypedDict):
     key: Literal[
         "name",
         "description",
@@ -119,7 +119,7 @@ class _AuditLogChange_Str(TypedDict):
     old_value: str
 
 
-class _AuditLogChange_AssetHash(TypedDict):
+class _AuditLogChangeAssetHash(TypedDict):
     key: Literal[
         "icon_hash",
         "splash_hash",
@@ -132,7 +132,7 @@ class _AuditLogChange_AssetHash(TypedDict):
     old_value: str
 
 
-class _AuditLogChange_Snowflake(TypedDict):
+class _AuditLogChangeSnowflake(TypedDict):
     key: Literal[
         "id",
         "owner_id",
@@ -150,7 +150,7 @@ class _AuditLogChange_Snowflake(TypedDict):
     old_value: Snowflake
 
 
-class _AuditLogChange_Bool(TypedDict):
+class _AuditLogChangeBool(TypedDict):
     key: Literal[
         "widget_enabled",
         "nsfw",
@@ -170,7 +170,7 @@ class _AuditLogChange_Bool(TypedDict):
     old_value: bool
 
 
-class _AuditLogChange_Int(TypedDict):
+class _AuditLogChangeInt(TypedDict):
     key: Literal[
         "afk_timeout",
         "prune_delete_days",
@@ -188,76 +188,76 @@ class _AuditLogChange_Int(TypedDict):
     old_value: int
 
 
-class _AuditLogChange_ListRole(TypedDict):
+class _AuditLogChangeListRole(TypedDict):
     key: Literal["$add", "$remove"]
     new_value: list[Role]
     old_value: list[Role]
 
 
-class _AuditLogChange_MFALevel(TypedDict):
+class _AuditLogChangeMFALevel(TypedDict):
     key: Literal["mfa_level"]
     new_value: MFALevel
     old_value: MFALevel
 
 
-class _AuditLogChange_VerificationLevel(TypedDict):
+class _AuditLogChangeVerificationLevel(TypedDict):
     key: Literal["verification_level"]
     new_value: VerificationLevel
     old_value: VerificationLevel
 
 
-class _AuditLogChange_ExplicitContentFilter(TypedDict):
+class _AuditLogChangeExplicitContentFilter(TypedDict):
     key: Literal["explicit_content_filter"]
     new_value: ExplicitContentFilterLevel
     old_value: ExplicitContentFilterLevel
 
 
-class _AuditLogChange_DefaultMessageNotificationLevel(TypedDict):
+class _AuditLogChangeDefaultMessageNotificationLevel(TypedDict):
     key: Literal["default_message_notifications"]
     new_value: DefaultMessageNotificationLevel
     old_value: DefaultMessageNotificationLevel
 
 
-class _AuditLogChange_ChannelType(TypedDict):
+class _AuditLogChangeChannelType(TypedDict):
     key: Literal["type"]
     new_value: ChannelType
     old_value: ChannelType
 
 
-class _AuditLogChange_IntegrationExpireBehaviour(TypedDict):
+class _AuditLogChangeIntegrationExpireBehaviour(TypedDict):
     key: Literal["expire_behavior"]
     new_value: IntegrationExpireBehavior
     old_value: IntegrationExpireBehavior
 
 
-class _AuditLogChange_VideoQualityMode(TypedDict):
+class _AuditLogChangeVideoQualityMode(TypedDict):
     key: Literal["video_quality_mode"]
     new_value: VideoQualityMode
     old_value: VideoQualityMode
 
 
-class _AuditLogChange_Overwrites(TypedDict):
+class _AuditLogChangeOverwrites(TypedDict):
     key: Literal["permission_overwrites"]
     new_value: list[PermissionOverwrite]
     old_value: list[PermissionOverwrite]
 
 
-AuditLogChange = Union[
-    _AuditLogChange_Str,
-    _AuditLogChange_AssetHash,
-    _AuditLogChange_Snowflake,
-    _AuditLogChange_Int,
-    _AuditLogChange_Bool,
-    _AuditLogChange_ListRole,
-    _AuditLogChange_MFALevel,
-    _AuditLogChange_VerificationLevel,
-    _AuditLogChange_ExplicitContentFilter,
-    _AuditLogChange_DefaultMessageNotificationLevel,
-    _AuditLogChange_ChannelType,
-    _AuditLogChange_IntegrationExpireBehaviour,
-    _AuditLogChange_VideoQualityMode,
-    _AuditLogChange_Overwrites,
-]
+AuditLogChange = (
+    _AuditLogChangeStr
+    | _AuditLogChangeAssetHash
+    | _AuditLogChangeSnowflake
+    | _AuditLogChangeInt
+    | _AuditLogChangeBool
+    | _AuditLogChangeListRole
+    | _AuditLogChangeMFALevel
+    | _AuditLogChangeVerificationLevel
+    | _AuditLogChangeExplicitContentFilter
+    | _AuditLogChangeDefaultMessageNotificationLevel
+    | _AuditLogChangeChannelType
+    | _AuditLogChangeIntegrationExpireBehaviour
+    | _AuditLogChangeVideoQualityMode
+    | _AuditLogChangeOverwrites
+)
 
 
 class AuditEntryInfo(TypedDict):

@@ -25,62 +25,13 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, TypeVar
-
-import discord
-
-from ...cog import Cog
-from ...commands import ApplicationCommand, SlashCommandGroup
-
-if TYPE_CHECKING:
-    from .core import Command
+from ...cog import Cog as _BaseCog
 
 __all__ = ("Cog",)
 
-CogT = TypeVar("CogT", bound="Cog")
-FuncT = TypeVar("FuncT", bound=Callable[..., Any])
 
-MISSING: Any = discord.utils.MISSING
+class Cog(_BaseCog):
+    """The base class that all cogs must inherit from.
 
-
-class Cog(Cog):
-    def __new__(cls: type[CogT], *args: Any, **kwargs: Any) -> CogT:
-        # For issue 426, we need to store a copy of the command objects
-        # since we modify them to inject `self` to them.
-        # To do this, we need to interfere with the Cog creation process.
-        return super().__new__(cls)
-
-    def walk_commands(self) -> Generator[Command]:
-        """An iterator that recursively walks through this cog's commands and subcommands.
-
-        Yields
-        ------
-        Union[:class:`.Command`, :class:`.Group`]
-            A command or group from the cog.
-        """
-        from .core import GroupMixin
-
-        for command in self.__cog_commands__:
-            if not isinstance(command, ApplicationCommand):
-                if command.parent is None:
-                    yield command
-                    if isinstance(command, GroupMixin):
-                        yield from command.walk_commands()
-            elif isinstance(command, SlashCommandGroup):
-                yield from command.walk_commands()
-            else:
-                yield command
-
-    def get_commands(self) -> list[ApplicationCommand | Command]:
-        r"""
-        Returns
-        --------
-        List[Union[:class:`~discord.ApplicationCommand`, :class:`.Command`]]
-            A :class:`list` of commands that are defined inside this cog.
-
-            .. note::
-
-                This does not include subcommands.
-        """
-        return [c for c in self.__cog_commands__ if c.parent is None]
+    This is the cog class of :mod:`discord.ext.commands`, see :class:`discord.Cog`.
+    """

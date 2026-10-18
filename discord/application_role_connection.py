@@ -24,7 +24,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from .enums import ApplicationRoleConnectionMetadataType, try_enum
 from .utils import MISSING
@@ -62,12 +62,12 @@ class ApplicationRoleConnectionMetadata:
     """
 
     __slots__ = (
-        "type",
+        "description",
+        "description_localizations",
         "key",
         "name",
-        "description",
         "name_localizations",
-        "description_localizations",
+        "type",
     )
 
     def __init__(
@@ -77,17 +77,19 @@ class ApplicationRoleConnectionMetadata:
         key: str,
         name: str,
         description: str,
-        name_localizations: dict[str, str] = MISSING,
-        description_localizations: dict[str, str] = MISSING,
-    ):
+        name_localizations: dict[str, str] | None = MISSING,
+        description_localizations: dict[str, str] | None = MISSING,
+    ) -> None:
         self.type: ApplicationRoleConnectionMetadataType = type
         self.key: str = key
         self.name: str = name
-        self.name_localizations: dict[str, str] = name_localizations
+        self.name_localizations: dict[str, str] | None = name_localizations
         self.description: str = description
-        self.description_localizations: dict[str, str] = description_localizations
+        self.description_localizations: dict[str, str] | None = (
+            description_localizations
+        )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             "<ApplicationRoleConnectionMetadata "
             f"type={self.type!r} "
@@ -98,13 +100,25 @@ class ApplicationRoleConnectionMetadata:
             f"description_localizations={self.description_localizations!r}>"
         )
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
     @classmethod
     def from_dict(
         cls, data: ApplicationRoleConnectionMetadataPayload
     ) -> ApplicationRoleConnectionMetadata:
+        """Create the object from a payload sent by Discord.
+
+        Parameters
+        ----------
+        data: :class:`dict`
+            The payload.
+
+        Returns
+        -------
+        :class:`ApplicationRoleConnectionMetadata`
+            The new object.
+        """
         return cls(
             type=try_enum(ApplicationRoleConnectionMetadataType, data["type"]),
             key=data["key"],
@@ -115,7 +129,14 @@ class ApplicationRoleConnectionMetadata:
         )
 
     def to_dict(self) -> ApplicationRoleConnectionMetadataPayload:
-        data = {
+        """Convert this object to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The payload.
+        """
+        data: dict[str, Any] = {
             "type": self.type.value,
             "key": self.key,
             "name": self.name,
@@ -125,4 +146,4 @@ class ApplicationRoleConnectionMetadata:
             data["name_localizations"] = self.name_localizations
         if self.description_localizations is not MISSING:
             data["description_localizations"] = self.description_localizations
-        return data
+        return cast("ApplicationRoleConnectionMetadataPayload", data)

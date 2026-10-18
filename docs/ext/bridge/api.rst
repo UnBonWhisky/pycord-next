@@ -137,7 +137,10 @@ BridgeContext
 
 .. autoclass:: discord.ext.bridge.BridgeContext
     :members:
-    :exclude-members: _respond, _defer, _edit, _get_super
+    :exclude-members: _respond, _defer, _typing, _edit, _get_super, typing
+
+    .. automethod:: typing
+        :async-with:
 
 BridgeContext Subclasses
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -157,6 +160,14 @@ BridgeContext Subclasses
 .. autoclass:: discord.ext.bridge.Context
 
     Alias of :data:`typing.Union` [ :class:`.BridgeExtContext`, :class:`.BridgeApplicationContext` ] for typing convenience.
+
+DeferTyping
+~~~~~~~~~~~
+
+.. attributetable:: discord.ext.bridge.DeferTyping
+
+.. autoclass:: discord.ext.bridge.DeferTyping
+    :members:
 
 Options
 -------

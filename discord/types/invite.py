@@ -25,7 +25,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import Literal, Union
+from typing import Literal
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -59,7 +59,7 @@ class IncompleteInvite(TypedDict):
 class Invite(IncompleteInvite):
     guild: NotRequired[InviteGuild]
     inviter: NotRequired[PartialUser]
-    scheduled_event: NotRequired[ScheduledEvent]
+    guild_scheduled_event: NotRequired[ScheduledEvent]
     target_user: NotRequired[PartialUser]
     target_type: NotRequired[InviteTargetType]
     target_application: NotRequired[PartialAppInfo]
@@ -92,7 +92,7 @@ class GatewayInviteDelete(TypedDict):
     code: str
 
 
-GatewayInvite = Union[GatewayInviteCreate, GatewayInviteDelete]
+GatewayInvite = GatewayInviteCreate | GatewayInviteDelete
 
 
 class InviteTargetUsersJobStatus(TypedDict):

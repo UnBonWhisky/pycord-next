@@ -24,28 +24,29 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, cast
+
+from typing_extensions import TypeVar, override
 
 from ..components import TextDisplay as TextDisplayComponent
-from ..components import _component_factory
 from ..enums import ComponentType
+from ._fields import Field
 from .item import ModalItem, ViewItem
 
 __all__ = ("TextDisplay",)
 
 if TYPE_CHECKING:
+    from ..components import Component
     from ..types.components import TextDisplayComponent as TextDisplayComponentPayload
-    from .core import ItemInterface
     from .modal import DesignerModal
     from .view import DesignerView
 
 
-T = TypeVar("T", bound="TextDisplay")
-V = TypeVar("V", bound="DesignerView", covariant=True)
-M = TypeVar("M", bound="DesignerModal", covariant=True)
+V_co = TypeVar("V_co", bound="DesignerView", covariant=True, default="DesignerView")
+M_co = TypeVar("M_co", bound="DesignerModal", covariant=True, default="DesignerModal")
 
 
-class TextDisplay(ViewItem[V], ModalItem[M]):
+class TextDisplay(ViewItem[V_co], ModalItem[M_co]):
     """Represents a UI text display. A message can have up to 4000 characters across all :class:`TextDisplay` objects combined.
 
     .. versionadded:: 2.7
@@ -63,48 +64,36 @@ class TextDisplay(ViewItem[V], ModalItem[M]):
         "id",
     )
 
+    __component__ = TextDisplayComponent
+    __component_type__ = ComponentType.text_display
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> TextDisplayComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    content: Field[str] = Field("The text display's content.")
+
     def __init__(
         self,
         content: str,
         id: int | None = None,
-    ):
+    ) -> None:
         super().__init__()
 
-        self._underlying = self._generate_underlying(
-            id=id,
-            content=content,
-        )
+        self._build_underlying(id=id, content=content)
 
-    def _generate_underlying(
-        self,
-        content: str | None = None,
-        id: int | None = None,
-    ) -> TextDisplayComponent:
-        super()._generate_underlying(TextDisplayComponent)
-        return TextDisplayComponent._raw_construct(
-            type=ComponentType.text_display,
-            id=id or self.id,
-            content=content or self.content,
-        )
-
-    @property
-    def content(self) -> str:
-        """The text display's content."""
-        return self.underlying.content
-
-    @content.setter
-    def content(self, value: str) -> None:
-        self.underlying.content = value
-
+    @override
     def to_component_dict(self) -> TextDisplayComponentPayload:
-        return super().to_component_dict()
+        return cast("TextDisplayComponentPayload", super().to_component_dict())
 
     def copy_text(self) -> str:
         """Returns the content of this text display. Equivalent to the `Copy Text` option on Discord clients."""
         return self.content
 
-    @classmethod
-    def from_component(cls: type[T], component: TextDisplayComponent) -> T:
-        return cls(component.content, id=component.id)
-
-    callback = None
+    callback = None  # pyright: ignore[reportAssignmentType]

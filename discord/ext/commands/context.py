@@ -25,23 +25,26 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import inspect
 import re
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 import discord.abc
 import discord.utils
-from discord.message import Message
+from discord.commands.context import BaseContext
+
+from .errors import CheckFailure
 
 if TYPE_CHECKING:
+    import inspect
     from typing import ParamSpec
 
     from discord.abc import MessageableChannel
-    from discord.guild import Guild
+    from discord.channel import PartialMessageable
+    from discord.guild import Guild, PartialGuild
     from discord.member import Member
+    from discord.message import Message
     from discord.state import ConnectionState
-    from discord.user import ClientUser, User
-    from discord.voice import VoiceProtocol
+    from discord.user import User
 
     from .bot import AutoShardedBot, Bot
     from .cog import Cog
@@ -54,7 +57,7 @@ MISSING: Any = discord.utils.MISSING
 
 
 T = TypeVar("T")
-BotT = TypeVar("BotT", bound="Union[Bot, AutoShardedBot]")
+BotT = TypeVar("BotT", bound="Bot | AutoShardedBot")
 CogT = TypeVar("CogT", bound="Cog")
 
 if TYPE_CHECKING:
@@ -63,7 +66,7 @@ else:
     P = TypeVar("P")
 
 
-class Context(discord.abc.Messageable, Generic[BotT]):
+class Context(BaseContext, Generic[BotT]):
     r"""Represents the context in which a command is being invoked under.
 
     This class contains a lot of metadata to help you understand more about
@@ -73,7 +76,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
     This class implements the :class:`~discord.abc.Messageable` ABC.
 
     Attributes
-    -----------
+    ----------
     message: :class:`.Message`
         The message that triggered the command being executed.
     bot: :class:`.Bot`
@@ -128,24 +131,24 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         args: list[Any] = MISSING,
         kwargs: dict[str, Any] = MISSING,
         prefix: str | None = None,
-        command: Command | None = None,
+        command: Command[Any, ..., Any] | None = None,
         invoked_with: str | None = None,
         invoked_parents: list[str] = MISSING,
-        invoked_subcommand: Command | None = None,
+        invoked_subcommand: Command[Any, ..., Any] | None = None,
         subcommand_passed: str | None = None,
         command_failed: bool = False,
         current_parameter: inspect.Parameter | None = None,
-    ):
+    ) -> None:
         self.message: Message = message
         self.bot: BotT = bot
         self.args: list[Any] = args or []
         self.kwargs: dict[str, Any] = kwargs or {}
         self.prefix: str | None = prefix
-        self.command: Command | None = command
+        self.command: Command[Any, ..., Any] | None = command
         self.view: StringView = view
         self.invoked_with: str | None = invoked_with
         self.invoked_parents: list[str] = invoked_parents or []
-        self.invoked_subcommand: Command | None = invoked_subcommand
+        self.invoked_subcommand: Command[Any, ..., Any] | None = invoked_subcommand
         self.subcommand_passed: str | None = subcommand_passed
         self.command_failed: bool = command_failed
         self.current_parameter: inspect.Parameter | None = current_parameter
@@ -171,7 +174,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
             using this function.
 
         Parameters
-        -----------
+        ----------
         command: :class:`.Command`
             The command that is going to be called.
         \*args
@@ -180,7 +183,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
             The keyword arguments to use.
 
         Raises
-        -------
+        ------
         TypeError
             The command argument to invoke is missing.
         """
@@ -253,7 +256,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         """Checks if the invocation context is valid to be invoked with."""
         return self.prefix is not None and self.command is not None
 
-    async def _get_channel(self) -> discord.abc.Messageable:
+    async def _get_channel(self) -> MessageableChannel:
         return self.channel
 
     @property
@@ -270,58 +273,58 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         # consider this to be an *incredibly* strange use case. I'd rather go
         # for this common use case rather than waste performance for the
         # odd one.
-        pattern = re.compile(r"<@!?%s>" % user.id)
-        return pattern.sub("@%s" % user.display_name.replace("\\", r"\\"), self.prefix)
+        pattern = re.compile(rf"<@!?{user.id}>")
+        name = user.display_name.replace("\\", r"\\")
+        return pattern.sub(f"@{name}", self.prefix)
 
     @property
-    def cog(self) -> Cog | None:
-        """Returns the cog associated with this context's command.
-        None if it does not exist.
-        """
-
-        if self.command is None:
-            return None
-        return self.command.cog
-
-    @property
-    def guild(self) -> Guild | None:
+    def guild(self) -> Guild | PartialGuild | None:
         """Returns the guild associated with this context's command.
-        None if not available.
+
+        Shorthand for :attr:`.Message.guild`.
+
+        This is the cached :class:`.Guild` when it is available in an in-process
+        cache, otherwise a :class:`.PartialGuild`. ``None`` if the command was
+        not invoked in a guild. Use :meth:`get_guild` to look the cached guild up
+        with any cache backend.
         """
         return self.message.guild
 
     @property
-    def channel(self) -> MessageableChannel:
+    def channel(self) -> MessageableChannel | PartialMessageable:
         """Returns the channel associated with this context's command.
+
         Shorthand for :attr:`.Message.channel`.
+
+        This is the cached channel when it is available in an in-process cache,
+        otherwise a :class:`.PartialMessageable`. Use :meth:`get_channel` to look
+        the cached channel up with any cache backend.
         """
         return self.message.channel
 
     @property
     def author(self) -> User | Member:
-        """Union[:class:`~discord.User`, :class:`.Member`]:
-        Returns the author associated with this context's command. Shorthand for :attr:`.Message.author`
+        """Union[:class:`~discord.User`, :class:`.Member`]: Returns the author associated with this context's command.
+
+        Shorthand for :attr:`.Message.author`
+
         """
         return self.message.author
 
-    @property
-    def me(self) -> Member | ClientUser:
-        """Union[:class:`.Member`, :class:`.ClientUser`]:
-        Similar to :attr:`.Guild.me` except it may return the :class:`.ClientUser` in private message
-        message contexts, or when :meth:`Intents.guilds` is absent.
-        """
-        # bot.user will never be None at this point.
-        return (
-            self.guild.me
-            if self.guild is not None and self.guild.me is not None
-            else self.bot.user
-        )  # type: ignore
+    def _check_failure(self, message: str) -> CheckFailure:
+        return CheckFailure(message)
 
-    @property
-    def voice_client(self) -> VoiceProtocol | None:
-        r"""A shortcut to :attr:`.Guild.voice_client`\, if applicable."""
-        g = self.guild
-        return g.voice_client if g else None
+    async def get_channel(self) -> MessageableChannel | None:
+        """|coro|
+
+        Returns the cached channel associated with this context's command.
+
+        Returns
+        -------
+        Optional[:class:`.abc.Messageable`]
+            The channel, or ``None`` if it is not cached.
+        """
+        return await self.message.get_channel()
 
     async def send_help(self, *args: Any) -> Any:
         """send_help(entity=<bot>)
@@ -381,9 +384,7 @@ class Context(discord.abc.Messageable, Generic[BotT]):
         if entity is None:
             return None
 
-        try:
-            entity.qualified_name
-        except AttributeError:
+        if not hasattr(entity, "qualified_name"):
             # if we're here then it's not a cog, group, or command.
             return None
 
@@ -393,23 +394,71 @@ class Context(discord.abc.Messageable, Generic[BotT]):
             if hasattr(entity, "__cog_commands__"):
                 injected = wrap_callback(cmd.send_cog_help)
                 return await injected(entity)
-            elif isinstance(entity, Group):
+            if isinstance(entity, Group):
                 injected = wrap_callback(cmd.send_group_help)
                 return await injected(entity)
-            elif isinstance(entity, Command):
+            if isinstance(entity, Command):
                 injected = wrap_callback(cmd.send_command_help)
                 return await injected(entity)
-            else:
-                return None
         except CommandError as e:
             await cmd.on_help_command_error(self, e)
+        return None
 
-    @discord.utils.copy_doc(Message.reply)
     async def reply(self, content: str | None = None, **kwargs: Any) -> Message:
+        """|coro|
+
+        A shortcut method to :meth:`.abc.Messageable.send` to reply to the
+        :class:`.Message`.
+
+        .. versionadded:: 1.6
+
+        Returns
+        -------
+        :class:`.Message`
+            The message that was sent.
+
+        Raises
+        ------
+        ~discord.HTTPException
+            Sending the message failed.
+        ~discord.Forbidden
+            You do not have the proper permissions to send the message.
+        ~discord.InvalidArgument
+            The ``files`` list is not of the appropriate size, or
+            you specified both ``file`` and ``files``.
+        """
         return await self.message.reply(content, **kwargs)
 
-    @discord.utils.copy_doc(Message.forward_to)
     async def forward_to(
         self, channel: discord.abc.Messageable, **kwargs: Any
     ) -> Message:
-        return await self.message.forward_to(channel, **kwargs)
+        """|coro|
+
+        A shortcut method to :meth:`.abc.Messageable.send` to forward the
+        :class:`.Message` to a channel.
+
+        .. versionadded:: 2.7
+
+        Parameters
+        ----------
+        channel: Union[:class:`TextChannel`, :class:`Thread`, :class:`DMChannel`, :class:`GroupChannel`, :class:`PartialMessageable`]
+            The channel to forward this to.
+
+        Returns
+        -------
+        :class:`.Message`
+            The message that was sent.
+
+        Raises
+        ------
+        ~discord.HTTPException
+            Sending the message failed.
+        ~discord.Forbidden
+            You do not have the proper permissions to send the message.
+        ~discord.InvalidArgument
+            The ``files`` list is not of the appropriate size, or
+            you specified both ``file`` and ``files``.
+        """
+        return await self.message.forward_to(
+            cast("MessageableChannel", channel), **kwargs
+        )

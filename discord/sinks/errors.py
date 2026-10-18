@@ -22,6 +22,8 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 from discord.errors import DiscordException
 
 
@@ -33,8 +35,9 @@ class SinkException(DiscordException):
 
 
 class RecordingException(SinkException):
-    """Exception that's thrown when there is an error while trying to record
-    audio from a voice channel.
+    """Exception that's thrown when there is an error while trying to record audio.
+
+    The error happens while recording audio from a voice channel.
 
     .. versionadded:: 2.0
     """

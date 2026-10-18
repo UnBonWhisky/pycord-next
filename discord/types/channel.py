@@ -25,12 +25,10 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import Literal, Union
+from typing import Literal
 
 from typing_extensions import NotRequired, TypedDict
 
-from ..enums import SortOrder
-from ..flags import ChannelFlags
 from .emoji import PartialEmoji
 from .snowflake import Snowflake
 from .threads import ThreadArchiveDuration, ThreadMember, ThreadMetadata
@@ -96,8 +94,8 @@ class ForumChannel(_BaseGuildChannel, _TextChannelOptional):
     type: Literal[15]
     available_tags: NotRequired[list[ForumTag] | None]
     default_reaction_emoji: NotRequired[DefaultReaction | None]
-    default_sort_order: NotRequired[SortOrder | None]
-    flags: ChannelFlags
+    default_sort_order: NotRequired[int | None]
+    flags: int
 
 
 class NewsChannel(_BaseGuildChannel, _TextChannelOptional):
@@ -142,19 +140,19 @@ class ThreadChannel(_BaseChannel):
     member_count: int
     thread_metadata: ThreadMetadata
     applied_tags: NotRequired[list[Snowflake] | None]
-    flags: ChannelFlags
+    flags: int
     total_message_sent: int
 
 
-GuildChannel = Union[
-    TextChannel,
-    NewsChannel,
-    VoiceChannel,
-    CategoryChannel,
-    StageChannel,
-    ThreadChannel,
-    ForumChannel,
-]
+GuildChannel = (
+    TextChannel
+    | NewsChannel
+    | VoiceChannel
+    | CategoryChannel
+    | StageChannel
+    | ThreadChannel
+    | ForumChannel
+)
 
 
 class DMChannel(TypedDict):
@@ -170,7 +168,7 @@ class GroupDMChannel(_BaseChannel):
     owner_id: Snowflake
 
 
-Channel = Union[GuildChannel, DMChannel, GroupDMChannel]
+Channel = GuildChannel | DMChannel | GroupDMChannel
 
 PrivacyLevel = Literal[1, 2]
 
@@ -194,3 +192,6 @@ class VoiceChannelEffectSendEvent(TypedDict):
     animation_id: NotRequired[int]
     sound_id: NotRequired[Snowflake | int]
     sound_volume: NotRequired[float]
+
+
+RequestChannelInfoField = Literal["status", "voice_start_time"]

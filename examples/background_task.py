@@ -22,7 +22,7 @@ class MyClient(discord.Client):
 
     @tasks.loop(seconds=60)  # Task that runs every 60 seconds
     async def my_background_task(self):
-        channel = self.get_channel(1234567)  # Your Channel ID goes here
+        channel = await self.get_channel(1234567)  # Your Channel ID goes here
         self.counter += 1
         await channel.send(str(self.counter))
 
@@ -30,7 +30,7 @@ class MyClient(discord.Client):
         time=time(3, 0, tzinfo=timezone.utc)
     )  # Task that runs every day at 3 AM UTC
     async def time_task(self):
-        channel = self.get_channel(1234567)  # Your Channel ID goes here
+        channel = await self.get_channel(1234567)  # Your Channel ID goes here
         await channel.send("It's 3 AM!")
 
     @my_background_task.before_loop
@@ -55,7 +55,7 @@ class MyClient(discord.Client):
         # Simulate slow I/O (e.g., HTTP requests, DB queries, file I/O)
         await asyncio.sleep(random.randint(5, 20))
 
-        channel = self.get_channel(1234567)  # Replace with your channel ID
+        channel = await self.get_channel(1234567)  # Replace with your channel ID
         msg = f"[status] run #{self.fetch_status_task.current_loop} complete"
         if channel:
             await channel.send(msg)

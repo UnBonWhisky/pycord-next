@@ -1,5 +1,5 @@
 name: "Setup Python dev environment"
-description: "Set up Python and install development dependencies."
+description: "Set up Python and install development dependencies with uv."
 
 inputs:
   python-version:
@@ -9,6 +9,14 @@ inputs:
     description: "Install the voice extra."
     required: false
     default: "false"
+  extras:
+    description: "Comma separated extras to install (e.g. voice,redis)."
+    required: false
+    default: ""
+  groups:
+    description: "Space separated dependency groups to install."
+    required: false
+    default: "dev"
 
 runs:
   using: "composite"
@@ -22,16 +30,26 @@ runs:
           pyproject.toml
           requirements/*.txt
 
-    - name: "Install dependencies"
-      if: ${{ inputs.install-voice != 'true' }}
+    - name: "Install uv"
       shell: bash
-      run: |
-        python -m pip install --upgrade pip
-        pip install . --group dev
+      run: python -m pip install --upgrade pip uv
 
-    - name: "Install dependencies with voice extra"
-      if: ${{ inputs.install-voice == 'true' }}
+    - name: "Install dependencies"
       shell: bash
+      env:
+        EXTRAS: ${{ inputs.extras }}
+        INSTALL_VOICE: ${{ inputs.install-voice }}
+        GROUPS_TO_INSTALL: ${{ inputs.groups }}
       run: |
-        python -m pip install --upgrade pip
-        pip install ".[voice]" --group dev
+        if [[ "$INSTALL_VOICE" == "true" && ",$EXTRAS," != *",voice,"* ]]; then
+          EXTRAS="${EXTRAS:+$EXTRAS,}voice"
+        fi
+        TARGET="."
+        if [[ -n "$EXTRAS" ]]; then
+          TARGET=".[$EXTRAS]"
+        fi
+        ARGS=()
+        for group in $GROUPS_TO_INSTALL; do
+          ARGS+=(--group "$group")
+        done
+        uv pip install --system "$TARGET" "${ARGS[@]}"

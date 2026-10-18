@@ -118,22 +118,21 @@ async def get_animals(ctx: discord.AutocompleteContext):
     picked_color = ctx.options["color"]
     if picked_color == "red":
         return ["cardinal", "ladybug"]
-    elif picked_color == "orange":
+    if picked_color == "orange":
         return ["clownfish", "tiger"]
-    elif picked_color == "yellow":
+    if picked_color == "yellow":
         return ["goldfinch", "banana slug"]
-    elif picked_color == "green":
+    if picked_color == "green":
         return ["tree frog", "python"]
-    elif picked_color == "blue":
+    if picked_color == "blue":
         return ["blue jay", "blue whale"]
-    elif picked_color == "indigo":
+    if picked_color == "indigo":
         return [
             "eastern indigo snake"
         ]  # Needs to return an iterable even if only one item
-    elif picked_color == "violet":
+    if picked_color == "violet":
         return ["purple emperor butterfly", "orchid dottyback"]
-    else:
-        return ["rainbowfish"]
+    return ["rainbowfish"]
 
 
 @bot.slash_command(name="ac_example")

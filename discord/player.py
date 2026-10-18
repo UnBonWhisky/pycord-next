@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
 import io
 import json
 import logging
@@ -37,18 +38,18 @@ import sys
 import threading
 import time
 import warnings
-from collections.abc import Callable
 from math import floor
-from typing import IO, TYPE_CHECKING, Any, Generic, TypeVar
+from typing import IO, TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from .enums import SpeakingState
 from .errors import ClientException
 from .oggparse import OggStream
-from .opus import OPUS_SILENCE
-from .opus import Encoder as OpusEncoder
+from .opus import OPUS_SILENCE, Encoder as OpusEncoder
 from .utils import MISSING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
     from typing_extensions import Self
 
     from .voice import VoiceClient
@@ -61,19 +62,46 @@ _log = logging.getLogger(__name__)
 
 __all__ = (
     "AudioSource",
-    "PCMAudio",
     "FFmpegAudio",
-    "FFmpegPCMAudio",
     "FFmpegOpusAudio",
+    "FFmpegPCMAudio",
+    "PCMAudio",
     "PCMVolumeTransformer",
 )
 
-CREATE_NO_WINDOW: int
+RECOMMENDED_PROTOCOL_WHITELIST: tuple[str, ...] = (
+    "file",
+    "http",
+    "https",
+    "tcp",
+    "tls",
+    "crypto",
+    "pipe",
+    "fd",
+    "cache",
+)
 
-if sys.platform != "win32":
-    CREATE_NO_WINDOW = 0
-else:
-    CREATE_NO_WINDOW = 0x08000000
+CREATE_NO_WINDOW: int = 0 if sys.platform != "win32" else 0x08000000
+
+
+def _protocol_whitelist_args(
+    protocol_whitelist: Sequence[str] | None, user_args: list[str]
+) -> list[str]:
+    if protocol_whitelist is None:
+        return []
+    if isinstance(protocol_whitelist, str):
+        raise TypeError(
+            "protocol_whitelist must be a sequence of protocol names, not a str"
+        )
+    if "-protocol_whitelist" in user_args:
+        warnings.warn(
+            "the protocol_whitelist argument is being ignored because "
+            "-protocol_whitelist was found in before_options.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return []
+    return ["-protocol_whitelist", ",".join(protocol_whitelist)]
 
 
 class AudioSource:
@@ -135,6 +163,13 @@ class PCMAudio(AudioSource):
         self.stream: io.BufferedIOBase = stream
 
     def read(self) -> bytes:
+        """Read 20ms worth of PCM audio.
+
+        Returns
+        -------
+        :class:`bytes`
+            The audio frame, or an empty :class:`bytes` if the stream is exhausted.
+        """
         ret = self.stream.read(OpusEncoder.FRAME_SIZE)
         if len(ret) != OpusEncoder.FRAME_SIZE:
             return b""
@@ -159,14 +194,14 @@ class FFmpegAudio(AudioSource):
         executable: str = "ffmpeg",
         args: Any,
         **subprocess_kwargs: Any,
-    ):
+    ) -> None:
         piping_stdin = subprocess_kwargs.get("stdin") == subprocess.PIPE
         if piping_stdin and isinstance(source, str):
             raise TypeError(
                 "parameter conflict: 'source' parameter cannot be a string when piping to stdin"
             )
 
-        stderr: IO[bytes] | None = subprocess_kwargs.pop("stderr", None)
+        stderr: Any = subprocess_kwargs.pop("stderr", None)
 
         if stderr == subprocess.PIPE:
             warnings.warn(
@@ -189,9 +224,9 @@ class FFmpegAudio(AudioSource):
         kwargs.update(subprocess_kwargs)
 
         # Ensure attribute is assigned even in the case of errors
-        self._process: subprocess.Popen = MISSING
+        self._process: subprocess.Popen[bytes] = MISSING
         self._process = self._spawn_process(args, **kwargs)
-        self._stdout: IO[bytes] = self._process.stdout  # type: ignore # process stdout is explicitly set
+        self._stdout: IO[bytes] = cast("IO[bytes]", self._process.stdout)
         self._stdin: IO[bytes] | None = None
         self._stderr: IO[bytes] | None = None
         self._pipe_writer_thread: threading.Thread | None = None
@@ -213,7 +248,9 @@ class FFmpegAudio(AudioSource):
             )
             self._pipe_reader_thread.start()
 
-    def _spawn_process(self, args: Any, **subprocess_kwargs: Any) -> subprocess.Popen:
+    def _spawn_process(
+        self, args: Any, **subprocess_kwargs: Any
+    ) -> subprocess.Popen[bytes]:
         _log.debug("Spawning ffmpeg process with command: %s", args)
         process = None
         try:
@@ -228,7 +265,7 @@ class FFmpegAudio(AudioSource):
                 f"Popen failed: {exc.__class__.__name__}: {exc}"
             ) from exc
         else:
-            return process
+            return cast("subprocess.Popen[bytes]", process)
 
     def _kill_process(self) -> None:
         # this function gets called in __del__ so instance attributes might not even exist
@@ -288,7 +325,7 @@ class FFmpegAudio(AudioSource):
             if self._stderr is None:
                 return
             try:
-                data: bytes = self._stderr.read(self.BLOCKSIZE)
+                data = cast("bytes | None", self._stderr.read(self.BLOCKSIZE))
             except Exception:
                 _log.debug(
                     "Read error for %s, this is probably not a problem",
@@ -296,7 +333,7 @@ class FFmpegAudio(AudioSource):
                     exc_info=True,
                 )
                 return
-            if data is None:
+            if not data:
                 return
             try:
                 dest.write(data)
@@ -306,6 +343,7 @@ class FFmpegAudio(AudioSource):
                 return
 
     def cleanup(self) -> None:
+        """Terminate the FFmpeg process and release its streams."""
         self._kill_process()
         self._process = self._stdout = self._stdin = self._stderr = MISSING
 
@@ -326,6 +364,16 @@ class FFmpegPCMAudio(FFmpegAudio):
         The input that ffmpeg will take and convert to PCM bytes.
         If ``pipe`` is ``True`` then this is a file-like object that is
         passed to the stdin of ffmpeg.
+
+        .. warning::
+
+            ``source`` is passed directly to the ``-i`` flag of ffmpeg and interpreted
+            through its full protocol machinery. This means it can accept ``file://``
+            paths (local file read), ``http(s)://`` URLs to internal services (SSRF),
+            ``concat:`` (multi-file read) and other dangerous schemes. Never pass
+            attacker-controlled values (e.g. raw user input from a chat command) to
+            ``source`` without validation, and consider using ``protocol_whitelist``.
+
     executable: :class:`str`
         The executable name (and path) to use. Defaults to ``ffmpeg``.
 
@@ -343,6 +391,16 @@ class FFmpegPCMAudio(FFmpegAudio):
         Extra command line arguments to pass to ffmpeg before the ``-i`` flag.
     options: Optional[:class:`str`]
         Extra command line arguments to pass to ffmpeg after the ``-i`` flag.
+    protocol_whitelist: Optional[Sequence[:class:`str`]]
+        A sequence of protocols that ffmpeg is allowed to use for ``source``, passed
+        as ``-protocol_whitelist``. Defaults to ``None``, which does not restrict
+        ffmpeg. When the source can be influenced by untrusted input, passing
+        :data:`discord.player.RECOMMENDED_PROTOCOL_WHITELIST`
+        (``file,http,https,tcp,tls,crypto,pipe,fd,cache``) blocks dangerous schemes
+        such as ``concat:``, ``subfile:``, ``data:`` and ``gopher:``. Ignored, with a
+        warning, if ``-protocol_whitelist`` is already present in ``before_options``.
+
+        .. versionadded:: 3.0
 
     Raises
     ------
@@ -359,18 +417,22 @@ class FFmpegPCMAudio(FFmpegAudio):
         stderr: IO[bytes] | None = None,
         before_options: str | None = None,
         options: str | None = None,
+        protocol_whitelist: Sequence[str] | None = None,
     ) -> None:
-        args = []
-        subprocess_kwargs = {
+        args: list[str] = []
+        subprocess_kwargs: dict[str, Any] = {
             "stdin": subprocess.PIPE if pipe else subprocess.DEVNULL,
             "stderr": stderr,
         }
 
-        if isinstance(before_options, str):
-            args.extend(shlex.split(before_options))
+        user_args = (
+            shlex.split(before_options) if isinstance(before_options, str) else []
+        )
+        args.extend(user_args)
+        args.extend(_protocol_whitelist_args(protocol_whitelist, user_args))
 
         args.append("-i")
-        args.append("-" if pipe else source)
+        args.append("-" if pipe else cast("str", source))
 
         args.extend(
             (
@@ -395,12 +457,26 @@ class FFmpegPCMAudio(FFmpegAudio):
         super().__init__(source, executable=executable, args=args, **subprocess_kwargs)
 
     def read(self) -> bytes:
+        """Read 20ms worth of PCM audio from FFmpeg.
+
+        Returns
+        -------
+        :class:`bytes`
+            The audio frame, or an empty :class:`bytes` if the stream is exhausted.
+        """
         ret = self._stdout.read(OpusEncoder.FRAME_SIZE)
         if len(ret) != OpusEncoder.FRAME_SIZE:
             return b""
         return ret
 
     def is_opus(self) -> bool:
+        """Check whether this source produces Opus encoded audio.
+
+        Returns
+        -------
+        :class:`bool`
+            Always ``False``.
+        """
         return False
 
 
@@ -431,6 +507,16 @@ class FFmpegOpusAudio(FFmpegAudio):
         The input that ffmpeg will take and convert to Opus bytes.
         If ``pipe`` is ``True`` then this is a file-like object that is
         passed to the stdin of ffmpeg.
+
+        .. warning::
+
+            ``source`` is passed directly to the ``-i`` flag of ffmpeg and interpreted
+            through its full protocol machinery. This means it can accept ``file://``
+            paths (local file read), ``http(s)://`` URLs to internal services (SSRF),
+            ``concat:`` (multi-file read) and other dangerous schemes. Never pass
+            attacker-controlled values (e.g. raw user input from a chat command) to
+            ``source`` without validation, and consider using ``protocol_whitelist``.
+
     bitrate: :class:`int`
         The bitrate in kbps to encode the output to.  Defaults to ``128``.
     codec: Optional[:class:`str`]
@@ -457,6 +543,16 @@ class FFmpegOpusAudio(FFmpegAudio):
         Extra command line arguments to pass to ffmpeg before the ``-i`` flag.
     options: Optional[:class:`str`]
         Extra command line arguments to pass to ffmpeg after the ``-i`` flag.
+    protocol_whitelist: Optional[Sequence[:class:`str`]]
+        A sequence of protocols that ffmpeg is allowed to use for ``source``, passed
+        as ``-protocol_whitelist``. Defaults to ``None``, which does not restrict
+        ffmpeg. When the source can be influenced by untrusted input, passing
+        :data:`discord.player.RECOMMENDED_PROTOCOL_WHITELIST`
+        (``file,http,https,tcp,tls,crypto,pipe,fd,cache``) blocks dangerous schemes
+        such as ``concat:``, ``subfile:``, ``data:`` and ``gopher:``. Ignored, with a
+        warning, if ``-protocol_whitelist`` is already present in ``before_options``.
+
+        .. versionadded:: 3.0
 
     Raises
     ------
@@ -475,18 +571,22 @@ class FFmpegOpusAudio(FFmpegAudio):
         stderr: IO[bytes] | None = None,
         before_options: str | None = None,
         options: str | None = None,
+        protocol_whitelist: Sequence[str] | None = None,
     ) -> None:
-        args = []
-        subprocess_kwargs = {
+        args: list[str] = []
+        subprocess_kwargs: dict[str, Any] = {
             "stdin": subprocess.PIPE if pipe else subprocess.DEVNULL,
             "stderr": stderr,
         }
 
-        if isinstance(before_options, str):
-            args.extend(shlex.split(before_options))
+        user_args = (
+            shlex.split(before_options) if isinstance(before_options, str) else []
+        )
+        args.extend(user_args)
+        args.extend(_protocol_whitelist_args(protocol_whitelist, user_args))
 
         args.append("-i")
-        args.append("-" if pipe else source)
+        args.append("-" if pipe else cast("str", source))
 
         codec = "copy" if codec in ("opus", "libopus", "copy") else "libopus"
         bitrate = bitrate if bitrate is not None else 128
@@ -538,8 +638,7 @@ class FFmpegOpusAudio(FFmpegAudio):
         the input source for audio codec and bitrate information.
 
         Examples
-        ----------
-
+        --------
         Use this function to create an :class:`FFmpegOpusAudio` instance instead of the constructor: ::
 
             source = await discord.FFmpegOpusAudio.from_probe("song.webm")
@@ -548,7 +647,9 @@ class FFmpegOpusAudio(FFmpegAudio):
         If you are on Windows and don't have ffprobe installed, use the ``fallback`` method
         to probe using ffmpeg instead: ::
 
-            source = await discord.FFmpegOpusAudio.from_probe("song.webm", method='fallback')
+            source = await discord.FFmpegOpusAudio.from_probe(
+                "song.webm", method="fallback"
+            )
             voice_client.play(source)
 
         Using a custom method of determining codec and bitrate: ::
@@ -557,11 +658,14 @@ class FFmpegOpusAudio(FFmpegAudio):
                 # some analysis code here
                 return codec, bitrate
 
-            source = await discord.FFmpegOpusAudio.from_probe("song.webm", method=custom_probe)
+
+            source = await discord.FFmpegOpusAudio.from_probe(
+                "song.webm", method=custom_probe
+            )
             voice_client.play(source)
 
         Parameters
-        ------------
+        ----------
         source
             Identical to the ``source`` parameter for the constructor.
         method: Optional[Union[:class:`str`, Callable[:class:`str`, :class:`str`]]]
@@ -575,20 +679,25 @@ class FFmpegOpusAudio(FFmpegAudio):
             excluding ``bitrate`` and ``codec``.
 
         Raises
-        --------
+        ------
         AttributeError
             Invalid probe method, must be ``'native'`` or ``'fallback'``.
         TypeError
             Invalid value for ``probe`` parameter, must be :class:`str` or a callable.
 
         Returns
-        --------
+        -------
         :class:`FFmpegOpusAudio`
             An instance of this class.
         """
-
         executable = kwargs.get("executable")
-        codec, bitrate = await cls.probe(source, method=method, executable=executable)
+        protocol_whitelist = kwargs.get("protocol_whitelist")
+        codec, bitrate = await cls.probe(
+            source,
+            method=method,
+            executable=executable,
+            protocol_whitelist=protocol_whitelist,
+        )
         return cls(source, bitrate=bitrate, codec=codec, **kwargs)
 
     @classmethod
@@ -598,6 +707,7 @@ class FFmpegOpusAudio(FFmpegAudio):
         *,
         method: str | Callable[[str, str], tuple[str | None, int | None]] | None = None,
         executable: str | None = None,
+        protocol_whitelist: Sequence[str] | None = None,
     ) -> tuple[str | None, int | None]:
         """|coro|
 
@@ -611,6 +721,11 @@ class FFmpegOpusAudio(FFmpegAudio):
             Identical to the ``method`` parameter for :meth:`FFmpegOpusAudio.from_probe`.
         executable: :class:`str`
             Identical to the ``executable`` parameter for :class:`FFmpegOpusAudio`.
+        protocol_whitelist: Optional[Sequence[:class:`str`]]
+            Identical to the ``protocol_whitelist`` parameter for :class:`FFmpegOpusAudio`.
+            Only applied to the built-in ``native`` and ``fallback`` probe methods.
+
+            .. versionadded:: 3.0
 
         Returns
         -------
@@ -624,7 +739,6 @@ class FFmpegOpusAudio(FFmpegAudio):
         TypeError
             Invalid value for ``probe`` parameter, must be :class:`str` or a callable.
         """
-
         method = method or "native"
         executable = executable or "ffmpeg"
         probefunc = fallback = None
@@ -648,10 +762,17 @@ class FFmpegOpusAudio(FFmpegAudio):
 
         codec = bitrate = None
         loop = asyncio.get_running_loop()
+        builtin = (cls._probe_codec_native, cls._probe_codec_fallback)
+
+        def run(
+            func: Callable[..., tuple[str | None, int | None]],
+        ) -> tuple[str | None, int | None]:
+            if func in builtin:
+                return func(source, executable, protocol_whitelist=protocol_whitelist)
+            return func(source, executable)
+
         try:
-            codec, bitrate = await loop.run_in_executor(
-                None, lambda: probefunc(source, executable)
-            )
+            codec, bitrate = await loop.run_in_executor(None, lambda: run(probefunc))
         except (KeyboardInterrupt, SystemExit):
             raise
         except BaseException:
@@ -663,9 +784,7 @@ class FFmpegOpusAudio(FFmpegAudio):
                 "Probe '%s' using '%s' failed, trying fallback", method, executable
             )
             try:
-                codec, bitrate = await loop.run_in_executor(
-                    None, lambda: fallback(source, executable)
-                )
+                codec, bitrate = await loop.run_in_executor(None, lambda: run(fallback))
             except (KeyboardInterrupt, SystemExit):
                 raise
             except BaseException:
@@ -679,7 +798,10 @@ class FFmpegOpusAudio(FFmpegAudio):
 
     @staticmethod
     def _probe_codec_native(
-        source, executable: str = "ffmpeg"
+        source: str,
+        executable: str = "ffmpeg",
+        *,
+        protocol_whitelist: Sequence[str] | None = None,
     ) -> tuple[str | None, int | None]:
         exe = (
             executable[:2] + "probe"
@@ -695,6 +817,7 @@ class FFmpegOpusAudio(FFmpegAudio):
             "-show_streams",
             "-select_streams",
             "a:0",
+            *_protocol_whitelist_args(protocol_whitelist, []),
             source,
         ]
         output = subprocess.check_output(args, timeout=20)
@@ -712,9 +835,18 @@ class FFmpegOpusAudio(FFmpegAudio):
 
     @staticmethod
     def _probe_codec_fallback(
-        source, executable: str = "ffmpeg"
+        source: str,
+        executable: str = "ffmpeg",
+        *,
+        protocol_whitelist: Sequence[str] | None = None,
     ) -> tuple[str | None, int | None]:
-        args = [executable, "-hide_banner", "-i", source]
+        args = [
+            executable,
+            "-hide_banner",
+            *_protocol_whitelist_args(protocol_whitelist, []),
+            "-i",
+            source,
+        ]
         proc = subprocess.Popen(
             args,
             creationflags=CREATE_NO_WINDOW,
@@ -736,9 +868,23 @@ class FFmpegOpusAudio(FFmpegAudio):
         return codec, bitrate
 
     def read(self) -> bytes:
+        """Read the next Opus packet from FFmpeg.
+
+        Returns
+        -------
+        :class:`bytes`
+            The packet, or an empty :class:`bytes` if the stream is exhausted.
+        """
         return next(self._packet_iter, b"")
 
     def is_opus(self) -> bool:
+        """Check whether this source produces Opus encoded audio.
+
+        Returns
+        -------
+        :class:`bool`
+            Always ``True``.
+        """
         return True
 
 
@@ -764,8 +910,8 @@ class PCMVolumeTransformer(AudioSource, Generic[AT]):
         The audio source is opus encoded.
     """
 
-    def __init__(self, original: AT, volume: float = 1.0):
-        if not isinstance(original, AudioSource):
+    def __init__(self, original: AT, volume: float = 1.0) -> None:
+        if not isinstance(cast("object", original), AudioSource):
             raise TypeError(f"expected AudioSource not {original.__class__.__name__}.")
 
         if original.is_opus():
@@ -784,9 +930,19 @@ class PCMVolumeTransformer(AudioSource, Generic[AT]):
         self._volume = max(value, 0.0)
 
     def cleanup(self) -> None:
-        self.original.cleanup()
+        """Clean up the original audio source."""
+        original = getattr(self, "original", None)
+        if original is not None:
+            original.cleanup()
 
     def read(self) -> bytes:
+        """Read 20ms worth of audio with the volume applied.
+
+        Returns
+        -------
+        :class:`bytes`
+            The transformed audio frame.
+        """
         maxval = 0x7FFF
         minval = -0x8000
 
@@ -795,7 +951,7 @@ class PCMVolumeTransformer(AudioSource, Generic[AT]):
         samples = array.array("h")
         samples.frombytes(ret)
         for i in range(len(samples)):
-            samples[i] = int(floor(min(maxval, max(samples[i] * volume, minval))))
+            samples[i] = floor(min(maxval, max(samples[i] * volume, minval)))
 
         return samples.tobytes()
 
@@ -935,11 +1091,9 @@ class AudioPlayer(threading.Thread):
             _log.exception("Speaking call in player failed", exc_info=exc)
 
     def send_silence(self, count: int = 5) -> None:
-        try:
-            for n in range(count):
+        with contextlib.suppress(Exception):
+            for _ in range(count):
                 self.client.send_audio_packet(OPUS_SILENCE, encode=False)
-        except Exception:
-            pass
 
     def played_frames(self) -> int:
         return self._played_frames_offset + self.loops

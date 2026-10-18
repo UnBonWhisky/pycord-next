@@ -25,9 +25,13 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
+import posixpath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlparse
 
 import yarl
 
@@ -50,8 +54,12 @@ MISSING = utils.MISSING
 
 
 class AssetMixin:
-    url: str
     _state: Any | None
+
+    if TYPE_CHECKING:
+
+        @property
+        def url(self) -> str: ...
 
     async def read(self) -> bytes:
         """|coro|
@@ -79,7 +87,7 @@ class AssetMixin:
 
     async def save(
         self,
-        fp: str | bytes | os.PathLike | io.BufferedIOBase,
+        fp: str | bytes | os.PathLike[Any] | io.BufferedIOBase,
         *,
         seek_begin: bool = True,
     ) -> int:
@@ -111,16 +119,22 @@ class AssetMixin:
         NotFound
             The asset was deleted.
         """
-
         data = await self.read()
         if isinstance(fp, io.BufferedIOBase):
             written = fp.write(data)
             if seek_begin:
                 fp.seek(0)
             return written
-        else:
-            with open(fp, "wb") as f:
-                return f.write(data)
+        return await asyncio.to_thread(Path(os.fsdecode(fp)).write_bytes, data)
+
+    @property
+    def cdn_name(self) -> str | None:
+        """Attempts to return the filename within this asset's URL, if present.
+
+        .. versionadded:: 3.0
+        """
+        name = PurePosixPath(urlparse(self.url).path).name
+        return name or None
 
 
 class Asset(AssetMixin):
@@ -152,22 +166,29 @@ class Asset(AssetMixin):
     """
 
     __slots__: tuple[str, ...] = (
-        "_state",
-        "_url",
         "_animated",
         "_key",
+        "_state",
+        "_url",
     )
 
     BASE = "https://cdn.discordapp.com"
 
-    def __init__(self, state, *, url: str, key: str, animated: bool = False):
+    def __init__(
+        self,
+        state: ConnectionState | None,
+        *,
+        url: str,
+        key: str,
+        animated: bool = False,
+    ) -> None:
         self._state = state
         self._url = url
         self._animated = animated
         self._key = key
 
     @classmethod
-    def _from_default_avatar(cls, state, index: int) -> Asset:
+    def _from_default_avatar(cls, state: ConnectionState | None, index: int) -> Asset:
         return cls(
             state,
             url=f"{cls.BASE}/embed/avatars/{index}.png",
@@ -176,7 +197,9 @@ class Asset(AssetMixin):
         )
 
     @classmethod
-    def _from_avatar(cls, state, user_id: int, avatar: str) -> Asset:
+    def _from_avatar(
+        cls, state: ConnectionState | None, user_id: int, avatar: str
+    ) -> Asset:
         animated = avatar.startswith("a_")
         format = "gif" if animated else "png"
         return cls(
@@ -188,7 +211,7 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_avatar_decoration(
-        cls, state, user_id: int, avatar_decoration: str
+        cls, state: ConnectionState | None, _user_id: int, avatar_decoration: str
     ) -> Asset:
         animated = avatar_decoration.startswith("a_")
         endpoint = (
@@ -232,7 +255,7 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_guild_avatar(
-        cls, state, guild_id: int, member_id: int, avatar: str
+        cls, state: ConnectionState | None, guild_id: int, member_id: int, avatar: str
     ) -> Asset:
         animated = avatar.startswith("a_")
         format = "gif" if animated else "png"
@@ -245,7 +268,7 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_guild_banner(
-        cls, state, guild_id: int, member_id: int, banner: str
+        cls, state: ConnectionState | None, guild_id: int, member_id: int, banner: str
     ) -> Asset:
         animated = banner.startswith("a_")
         format = "gif" if animated else "png"
@@ -257,7 +280,9 @@ class Asset(AssetMixin):
         )
 
     @classmethod
-    def _from_icon(cls, state, object_id: int, icon_hash: str, path: str) -> Asset:
+    def _from_icon(
+        cls, state: ConnectionState | None, object_id: int, icon_hash: str, path: str
+    ) -> Asset:
         return cls(
             state,
             url=f"{cls.BASE}/{path}-icons/{object_id}/{icon_hash}.png?size=1024",
@@ -266,7 +291,9 @@ class Asset(AssetMixin):
         )
 
     @classmethod
-    def _from_cover_image(cls, state, object_id: int, cover_image_hash: str) -> Asset:
+    def _from_cover_image(
+        cls, state: ConnectionState | None, object_id: int, cover_image_hash: str
+    ) -> Asset:
         return cls(
             state,
             url=f"{cls.BASE}/app-assets/{object_id}/store/{cover_image_hash}.png?size=1024",
@@ -287,7 +314,9 @@ class Asset(AssetMixin):
         )
 
     @classmethod
-    def _from_guild_image(cls, state, guild_id: int, image: str, path: str) -> Asset:
+    def _from_guild_image(
+        cls, state: ConnectionState | None, guild_id: int, image: str, path: str
+    ) -> Asset:
         animated = False
         format = "png"
         if path == "banners":
@@ -302,7 +331,9 @@ class Asset(AssetMixin):
         )
 
     @classmethod
-    def _from_guild_icon(cls, state, guild_id: int, icon_hash: str) -> Asset:
+    def _from_guild_icon(
+        cls, state: ConnectionState | None, guild_id: int, icon_hash: str
+    ) -> Asset:
         animated = icon_hash.startswith("a_")
         format = "gif" if animated else "png"
         return cls(
@@ -313,7 +344,7 @@ class Asset(AssetMixin):
         )
 
     @classmethod
-    def _from_sticker_banner(cls, state, banner: int) -> Asset:
+    def _from_sticker_banner(cls, state: ConnectionState | None, banner: int) -> Asset:
         return cls(
             state,
             url=f"{cls.BASE}/app-assets/710982414301790216/store/{banner}.png",
@@ -322,7 +353,9 @@ class Asset(AssetMixin):
         )
 
     @classmethod
-    def _from_user_banner(cls, state, user_id: int, banner_hash: str) -> Asset:
+    def _from_user_banner(
+        cls, state: ConnectionState | None, user_id: int, banner_hash: str
+    ) -> Asset:
         animated = banner_hash.startswith("a_")
         format = "gif" if animated else "png"
         return cls(
@@ -334,7 +367,7 @@ class Asset(AssetMixin):
 
     @classmethod
     def _from_scheduled_event_image(
-        cls, state, event_id: int, cover_hash: str
+        cls, state: ConnectionState | None, event_id: int, cover_hash: str
     ) -> Asset:
         return cls(
             state,
@@ -344,7 +377,9 @@ class Asset(AssetMixin):
         )
 
     @classmethod
-    def _from_soundboard_sound(cls, state, sound_id: int) -> Asset:
+    def _from_soundboard_sound(
+        cls, state: ConnectionState | None, sound_id: int
+    ) -> Asset:
         return cls(
             state,
             url=f"{cls.BASE}/soundboard-sounds/{sound_id}",
@@ -357,14 +392,14 @@ class Asset(AssetMixin):
     def __len__(self) -> int:
         return len(self._url)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         shorten = self._url.replace(self.BASE, "")
         return f"<Asset url={shorten!r}>"
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, Asset) and self._url == other._url
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return hash(self._url)
 
     @property
@@ -377,9 +412,34 @@ class Asset(AssetMixin):
         """Returns the identifying key of the asset."""
         return self._key
 
+    @property
+    def extension(self) -> str | None:
+        """Returns the file extension of the asset's URL, without the dot, if present.
+
+        .. versionadded:: 3.0
+        """
+        suffix = PurePosixPath(urlparse(self._url).path).suffix
+        return suffix[1:] or None
+
+    @property
+    def size(self) -> int | None:
+        """Returns the size requested through the asset's URL, if present.
+
+        .. versionadded:: 3.0
+        """
+        size = yarl.URL(self._url).query.get("size")
+        return int(size) if size is not None and size.isdecimal() else None
+
     def is_animated(self) -> bool:
         """Returns whether the asset is animated."""
         return self._animated
+
+    def _with_extension(self, url: yarl.URL, format: str) -> yarl.URL:
+        path, _ = posixpath.splitext(url.path)
+        query = {k: v for k, v in url.query.items() if k != "animated"}
+        if self._animated and format == "webp":
+            query["animated"] = "true"
+        return url.with_path(f"{path}.{format}").with_query(query)
 
     def replace(
         self,
@@ -389,6 +449,10 @@ class Asset(AssetMixin):
         static_format: ValidStaticFormatTypes = MISSING,
     ) -> Asset:
         """Returns a new asset with the passed components replaced.
+
+        Animated assets requested as ``webp`` get the ``animated=true`` query
+        parameter, which Discord needs to return an animated WebP instead of a
+        static image.
 
         Parameters
         ----------
@@ -412,7 +476,6 @@ class Asset(AssetMixin):
             An invalid size or format was passed.
         """
         url = yarl.URL(self._url)
-        path, _ = os.path.splitext(url.path)
 
         if format is not MISSING:
             if self._animated:
@@ -420,27 +483,25 @@ class Asset(AssetMixin):
                     raise InvalidArgument(
                         f"format must be one of {VALID_ASSET_FORMATS}"
                     )
-                url = url.with_path(f"{path}.{format}")
+                url = self._with_extension(url, format)
             elif static_format is MISSING:
                 if format not in VALID_STATIC_FORMATS:
                     raise InvalidArgument(
                         f"format must be one of {VALID_STATIC_FORMATS}"
                     )
-                url = url.with_path(f"{path}.{format}")
+                url = self._with_extension(url, format)
 
         if static_format is not MISSING and not self._animated:
             if static_format not in VALID_STATIC_FORMATS:
                 raise InvalidArgument(
                     f"static_format must be one of {VALID_STATIC_FORMATS}"
                 )
-            url = url.with_path(f"{path}.{static_format}")
+            url = self._with_extension(url, static_format)
 
         if size is not MISSING:
             if not utils.valid_icon_size(size):
                 raise InvalidArgument("size must be a power of 2 between 16 and 4096")
-            url = url.with_query(size=size)
-        else:
-            url = url.with_query(url.raw_query_string)
+            url = url.update_query(size=size)
 
         url = str(url)
         return Asset(state=self._state, url=url, key=self._key, animated=self._animated)
@@ -466,11 +527,15 @@ class Asset(AssetMixin):
         if not utils.valid_icon_size(size):
             raise InvalidArgument("size must be a power of 2 between 16 and 4096")
 
-        url = str(yarl.URL(self._url).with_query(size=size))
+        url = str(yarl.URL(self._url).update_query(size=size))
         return Asset(state=self._state, url=url, key=self._key, animated=self._animated)
 
     def with_format(self, format: ValidAssetFormatTypes, /) -> Asset:
         """Returns a new asset with the specified format.
+
+        Animated assets requested as ``webp`` get the ``animated=true`` query
+        parameter, which Discord needs to return an animated WebP instead of a
+        static image.
 
         Parameters
         ----------
@@ -487,16 +552,13 @@ class Asset(AssetMixin):
         InvalidArgument
             The asset has an invalid format.
         """
-
         if self._animated:
             if format not in VALID_ASSET_FORMATS:
                 raise InvalidArgument(f"format must be one of {VALID_ASSET_FORMATS}")
         elif format not in VALID_STATIC_FORMATS:
             raise InvalidArgument(f"format must be one of {VALID_STATIC_FORMATS}")
 
-        url = yarl.URL(self._url)
-        path, _ = os.path.splitext(url.path)
-        url = str(url.with_path(f"{path}.{format}").with_query(url.raw_query_string))
+        url = str(self._with_extension(yarl.URL(self._url), format))
         return Asset(state=self._state, url=url, key=self._key, animated=self._animated)
 
     def with_static_format(self, format: ValidStaticFormatTypes, /) -> Asset:
@@ -520,7 +582,6 @@ class Asset(AssetMixin):
         InvalidArgument
             The asset had an invalid format.
         """
-
         if self._animated:
             return self
         return self.with_format(format)

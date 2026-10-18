@@ -24,25 +24,30 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, cast
 
-from ..components import Thumbnail as ThumbnailComponent
-from ..components import UnfurledMediaItem, _component_factory
+from typing_extensions import TypeVar, override
+
+from ..components import Thumbnail as ThumbnailComponent, UnfurledMediaItem
 from ..enums import ComponentType
+from ..limits import ComponentLimits
+from ._fields import Field, length_limit
 from .item import ViewItem
 
 __all__ = ("Thumbnail",)
 
 if TYPE_CHECKING:
+    from typing_extensions import Self
+
+    from ..components import Component
     from ..types.components import ThumbnailComponent as ThumbnailComponentPayload
     from .view import DesignerView
 
 
-T = TypeVar("T", bound="Thumbnail")
-V = TypeVar("V", bound="DesignerView", covariant=True)
+V_co = TypeVar("V_co", bound="DesignerView", covariant=True, default="DesignerView")
 
 
-class Thumbnail(ViewItem[V]):
+class Thumbnail(ViewItem[V_co]):
     """Represents a UI Thumbnail.
 
     .. versionadded:: 2.7
@@ -66,49 +71,44 @@ class Thumbnail(ViewItem[V]):
         "id",
     )
 
+    __component__ = ThumbnailComponent
+    __component_type__ = ComponentType.thumbnail
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> ThumbnailComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    media: Field[UnfurledMediaItem] = Field("The thumbnail's underlying media item.")
+    description: Field[str | None] = Field(
+        "The thumbnail's description, up to 1024 characters.",
+        length_limit(ComponentLimits.THUMBNAIL_DESCRIPTION_MAX),
+    )
+    spoiler: Field[bool] = Field(
+        "Whether the thumbnail has the spoiler overlay. Defaults to ``False``."
+    )
+
     def __init__(
         self,
         url: str,
         *,
-        description: str = None,
-        spoiler: bool = False,
-        id: int = None,
-    ):
-        super().__init__()
-
-        media = UnfurledMediaItem(url)
-
-        self._underlying = self._generate_underlying(
-            id=id,
-            media=media,
-            description=description,
-            spoiler=spoiler,
-        )
-
-    def _generate_underlying(
-        self,
-        media: UnfurledMediaItem | None = None,
         description: str | None = None,
         spoiler: bool | None = False,
         id: int | None = None,
-    ) -> ThumbnailComponent:
-        super()._generate_underlying(ThumbnailComponent)
-        return ThumbnailComponent._raw_construct(
-            type=ComponentType.thumbnail,
-            id=id or self.id,
-            media=media or self.media,
-            description=description or self.description,
-            spoiler=spoiler if spoiler is not None else self.spoiler,
+    ) -> None:
+        super().__init__()
+
+        self._build_underlying(
+            id=id,
+            media=UnfurledMediaItem(url),
+            description=description,
+            spoiler=spoiler,
         )
-
-    @property
-    def media(self) -> UnfurledMediaItem:
-        """The thumbnail's underlying media item."""
-        return self.underlying.media
-
-    @media.setter
-    def media(self, value: UnfurledMediaItem) -> None:
-        self.underlying.media = value
 
     @property
     def url(self) -> str:
@@ -119,30 +119,13 @@ class Thumbnail(ViewItem[V]):
     def url(self, value: str) -> None:
         self.underlying.media.url = value
 
-    @property
-    def description(self) -> str | None:
-        """The thumbnail's description, up to 1024 characters."""
-        return self.underlying.description
-
-    @description.setter
-    def description(self, description: str | None) -> None:
-        self.underlying.description = description
-
-    @property
-    def spoiler(self) -> bool:
-        """Whether the thumbnail has the spoiler overlay. Defaults to ``False``."""
-
-        return self.underlying.spoiler
-
-    @spoiler.setter
-    def spoiler(self, spoiler: bool) -> None:
-        self.underlying.spoiler = spoiler
-
+    @override
     def to_component_dict(self) -> ThumbnailComponentPayload:
-        return super().to_component_dict()
+        return cast("ThumbnailComponentPayload", super().to_component_dict())
 
     @classmethod
-    def from_component(cls: type[T], component: ThumbnailComponent) -> T:
+    @override
+    def from_component(cls, component: ThumbnailComponent) -> Self:
         return cls(
             component.media and component.media.url,
             description=component.description,
@@ -150,4 +133,4 @@ class Thumbnail(ViewItem[V]):
             id=component.id,
         )
 
-    callback = None
+    callback = None  # pyright: ignore[reportAssignmentType]

@@ -26,41 +26,42 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import re
-import weakref
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, overload
-from urllib.parse import quote as urlquote
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import aiohttp
 
 from .. import utils
+from .._internal.cache_peek import cached_guild
 from ..asset import Asset
 from ..channel import ForumChannel, PartialMessageable
 from ..enums import WebhookType, try_enum
-from ..errors import (
-    DiscordServerError,
-    Forbidden,
-    HTTPException,
-    InvalidArgument,
-    NotFound,
-)
-from ..file import VoiceMessage
-from ..flags import MessageFlags
-from ..http import Route
+from ..http.ratelimit import MAX_TRIES
 from ..message import Attachment, Message
 from ..mixins import Hashable
 from ..object import Object
 from ..threads import Thread
 from ..user import BaseUser, User
+from . import _core
+from ._core import (
+    Done,
+    Execution,
+    WebhookLimits,
+    WebhookRequest,
+    WebhookRequests,
+    _WebhookState,
+    interaction_response_request,
+    original_response_request,
+    parse_webhook_url,
+    partial_webhook_data,
+)
 
 __all__ = (
-    "Webhook",
-    "WebhookMessage",
     "PartialWebhookChannel",
     "PartialWebhookGuild",
+    "Webhook",
+    "WebhookMessage",
 )
 
 from ..utils import warn_deprecated
@@ -68,47 +69,63 @@ from ..utils import warn_deprecated
 _log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    import datetime
+    import datetime as dt
 
     from ..abc import Snowflake
     from ..channel import TextChannel
     from ..embeds import Embed
     from ..file import File
-    from ..guild import Guild
-    from ..http import Response
+    from ..guild import Guild, PartialGuild
+    from ..http import Response, Route
     from ..interactions import Interaction
     from ..mentions import AllowedMentions
     from ..poll import Poll
     from ..state import ConnectionState
+    from ..types.channel import PartialChannel
     from ..types.message import Message as MessagePayload
-    from ..types.webhook import FollowerWebhook as FollowerWebhookPayload
-    from ..types.webhook import Webhook as WebhookPayload
-    from ..ui.view import BaseView
+    from ..types.webhook import (
+        FollowerWebhook as FollowerWebhookPayload,
+        SourceGuild as SourceGuildPayload,
+        Webhook as WebhookPayload,
+    )
+    from ..ui.view import BaseView, DesignerView, View
+    from ..user import ClientUser, User as UserModel
 
 MISSING = utils.MISSING
+handle_message_parameters = _core.handle_message_parameters
 
 
-class AsyncDeferredLock:
-    def __init__(self, lock: asyncio.Lock):
-        self.lock = lock
-        self.delta: float | None = None
-
-    async def __aenter__(self):
-        await self.lock.acquire()
-        return self
-
-    def delay_by(self, delta: float) -> None:
-        self.delta = delta
-
-    async def __aexit__(self, type, value, traceback):
-        if self.delta:
-            await asyncio.sleep(self.delta)
-        self.lock.release()
+def _form(multipart: list[dict[str, Any]]) -> aiohttp.FormData:
+    form_data = aiohttp.FormData(quote_fields=False)
+    for field in multipart:
+        form_data.add_field(**field)
+    return form_data
 
 
 class AsyncWebhookAdapter:
-    def __init__(self):
-        self._locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+    def __init__(self) -> None:
+        self._limits: WebhookLimits[asyncio.Lock] = WebhookLimits(asyncio.Lock)
+
+    async def execute(
+        self,
+        request: WebhookRequest,
+        *,
+        session: aiohttp.ClientSession,
+        proxy: str | None = None,
+        proxy_auth: aiohttp.BasicAuth | None = None,
+    ) -> Any:
+        return await self.request(
+            request.route,
+            session,
+            payload=request.payload,
+            multipart=request.multipart,
+            proxy=proxy,
+            proxy_auth=proxy_auth,
+            files=request.files,
+            reason=request.reason,
+            auth_token=request.auth_token,
+            params=request.params,
+        )
 
     async def request(
         self,
@@ -124,378 +141,43 @@ class AsyncWebhookAdapter:
         auth_token: str | None = None,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        headers: dict[str, str] = {}
-        files = files or []
-        to_send: str | aiohttp.FormData | None = None
-        bucket = (route.webhook_id, route.webhook_token)
+        run = Execution(
+            WebhookRequest(
+                route, payload, multipart, files, reason, auth_token, params
+            ),
+            self._limits,
+        )
+        if delay := self._limits.global_delay():
+            await asyncio.sleep(delay)
 
-        try:
-            lock = self._locks[bucket]
-        except KeyError:
-            self._locks[bucket] = lock = asyncio.Lock()
-
-        if payload is not None:
-            headers["Content-Type"] = "application/json"
-            to_send = utils._to_json(payload)
-
-        if auth_token is not None:
-            headers["Authorization"] = f"Bot {auth_token}"
-
-        if reason is not None:
-            headers["X-Audit-Log-Reason"] = urlquote(reason, safe="/ ")
-
-        response: aiohttp.ClientResponse | None = None
-        data: dict[str, Any] | str | None = None
-        method = route.method
-        url = route.url
-        webhook_id = route.webhook_id
-
-        async with AsyncDeferredLock(lock) as lock:
-            for attempt in range(5):
-                for file in files:
-                    file.reset(seek=attempt)
-
-                if multipart:
-                    form_data = aiohttp.FormData(quote_fields=False)
-                    for p in multipart:
-                        form_data.add_field(**p)
-                    to_send = form_data
-                try:
-                    async with session.request(
-                        method,
-                        url,
-                        data=to_send,
-                        headers=headers,
-                        params=params,
-                        proxy=proxy,
-                        proxy_auth=proxy_auth,
-                    ) as response:
-                        _log.debug(
-                            "Webhook ID %s with %s %s has returned status code %s",
-                            webhook_id,
-                            method,
-                            url,
-                            response.status,
-                        )
-                        data = (await response.text(encoding="utf-8")) or None
-                        if (
-                            data
-                            and response.headers["Content-Type"] == "application/json"
-                        ):
-                            data = json.loads(data)
-
-                        remaining = response.headers.get("X-Ratelimit-Remaining")
-                        if remaining == "0" and response.status != 429:
-                            delta = utils._parse_ratelimit_header(response)
-                            _log.debug(
-                                (
-                                    "Webhook ID %s has been pre-emptively rate limited,"
-                                    " waiting %.2f seconds"
-                                ),
-                                webhook_id,
-                                delta,
+        async with self._limits.lock_for(route):
+            try:
+                for attempt in range(MAX_TRIES):
+                    run.begin(attempt)
+                    try:
+                        async with session.request(
+                            route.method,
+                            route.url,
+                            data=_form(multipart) if multipart else run.body,
+                            headers=run.headers,
+                            params=params,
+                            proxy=proxy,
+                            proxy_auth=proxy_auth,
+                        ) as response:
+                            step = run.handle(
+                                response, await response.text(encoding="utf-8"), attempt
                             )
-                            lock.delay_by(delta)
-
-                        if 300 > response.status >= 200:
-                            return data
-
-                        if response.status == 429:
-                            if not response.headers.get("Via"):
-                                raise HTTPException(response, data)
-
-                            retry_after: float = data["retry_after"]  # type: ignore
-                            _log.warning(
-                                (
-                                    "Webhook ID %s is rate limited. Retrying in %.2f"
-                                    " seconds"
-                                ),
-                                webhook_id,
-                                retry_after,
-                            )
-                            await asyncio.sleep(retry_after)
-                            continue
-
-                        if response.status >= 500:
-                            await asyncio.sleep(1 + attempt * 2)
-                            continue
-
-                        if response.status == 403:
-                            raise Forbidden(response, data)
-                        elif response.status == 404:
-                            raise NotFound(response, data)
-                        else:
-                            raise HTTPException(response, data)
-
-                except OSError as e:
-                    if attempt < 4 and e.errno in (54, 10054):
-                        await asyncio.sleep(1 + attempt * 2)
-                        continue
-                    raise
-
-            if response:
-                if response.status >= 500:
-                    raise DiscordServerError(response, data)
-                raise HTTPException(response, data)
-
-            raise RuntimeError("Unreachable code in HTTP handling.")
-
-    def delete_webhook(
-        self,
-        webhook_id: int,
-        *,
-        token: str | None = None,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-        reason: str | None = None,
-    ) -> Response[None]:
-        route = Route("DELETE", "/webhooks/{webhook_id}", webhook_id=webhook_id)
-        return self.request(
-            route,
-            session=session,
-            proxy=proxy,
-            proxy_auth=proxy_auth,
-            reason=reason,
-            auth_token=token,
-        )
-
-    def delete_webhook_with_token(
-        self,
-        webhook_id: int,
-        token: str,
-        *,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-        reason: str | None = None,
-    ) -> Response[None]:
-        route = Route(
-            "DELETE",
-            "/webhooks/{webhook_id}/{webhook_token}",
-            webhook_id=webhook_id,
-            webhook_token=token,
-        )
-        return self.request(
-            route, session=session, proxy=proxy, proxy_auth=proxy_auth, reason=reason
-        )
-
-    def edit_webhook(
-        self,
-        webhook_id: int,
-        token: str,
-        payload: dict[str, Any],
-        *,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-        reason: str | None = None,
-    ) -> Response[WebhookPayload]:
-        route = Route("PATCH", "/webhooks/{webhook_id}", webhook_id=webhook_id)
-        return self.request(
-            route,
-            session=session,
-            proxy=proxy,
-            proxy_auth=proxy_auth,
-            reason=reason,
-            payload=payload,
-            auth_token=token,
-        )
-
-    def edit_webhook_with_token(
-        self,
-        webhook_id: int,
-        token: str,
-        payload: dict[str, Any],
-        *,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-        reason: str | None = None,
-    ) -> Response[WebhookPayload]:
-        route = Route(
-            "PATCH",
-            "/webhooks/{webhook_id}/{webhook_token}",
-            webhook_id=webhook_id,
-            webhook_token=token,
-        )
-        return self.request(
-            route,
-            session=session,
-            proxy=proxy,
-            proxy_auth=proxy_auth,
-            reason=reason,
-            payload=payload,
-        )
-
-    def execute_webhook(
-        self,
-        webhook_id: int,
-        token: str,
-        *,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-        payload: dict[str, Any] | None = None,
-        multipart: list[dict[str, Any]] | None = None,
-        files: list[File] | None = None,
-        thread_id: int | None = None,
-        thread_name: str | None = None,
-        with_components: bool | None = None,
-        wait: bool = False,
-    ) -> Response[MessagePayload | None]:
-        params = {"wait": int(wait)}
-        if thread_id:
-            params["thread_id"] = thread_id
-
-        if thread_name:
-            payload["thread_name"] = thread_name
-
-        if with_components is not None:
-            params["with_components"] = int(with_components)
-
-        route = Route(
-            "POST",
-            "/webhooks/{webhook_id}/{webhook_token}",
-            webhook_id=webhook_id,
-            webhook_token=token,
-        )
-        return self.request(
-            route,
-            session,
-            payload=payload,
-            proxy=proxy,
-            proxy_auth=proxy_auth,
-            multipart=multipart,
-            files=files,
-            params=params,
-        )
-
-    def get_webhook_message(
-        self,
-        webhook_id: int,
-        token: str,
-        message_id: int,
-        *,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-        thread_id: int | None = None,
-    ) -> Response[MessagePayload]:
-        params = {}
-
-        if thread_id:
-            params["thread_id"] = thread_id
-
-        route = Route(
-            "GET",
-            "/webhooks/{webhook_id}/{webhook_token}/messages/{message_id}",
-            webhook_id=webhook_id,
-            webhook_token=token,
-            message_id=message_id,
-        )
-        return self.request(
-            route, session=session, proxy=proxy, proxy_auth=proxy_auth, params=params
-        )
-
-    def edit_webhook_message(
-        self,
-        webhook_id: int,
-        token: str,
-        message_id: int,
-        *,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-        thread_id: int | None = None,
-        payload: dict[str, Any] | None = None,
-        multipart: list[dict[str, Any]] | None = None,
-        files: list[File] | None = None,
-        with_components: bool | None = None,
-    ) -> Response[WebhookMessage]:
-        params = {}
-
-        if thread_id:
-            params["thread_id"] = thread_id
-
-        if with_components is not None:
-            params["with_components"] = int(with_components)
-
-        route = Route(
-            "PATCH",
-            "/webhooks/{webhook_id}/{webhook_token}/messages/{message_id}",
-            webhook_id=webhook_id,
-            webhook_token=token,
-            message_id=message_id,
-        )
-        return self.request(
-            route,
-            session,
-            params=params,
-            payload=payload,
-            proxy=proxy,
-            proxy_auth=proxy_auth,
-            multipart=multipart,
-            files=files,
-        )
-
-    def delete_webhook_message(
-        self,
-        webhook_id: int,
-        token: str,
-        message_id: int,
-        *,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-        thread_id: int | None = None,
-    ) -> Response[None]:
-        params = {}
-
-        if thread_id:
-            params["thread_id"] = thread_id
-
-        route = Route(
-            "DELETE",
-            "/webhooks/{webhook_id}/{webhook_token}/messages/{message_id}",
-            webhook_id=webhook_id,
-            webhook_token=token,
-            message_id=message_id,
-        )
-        return self.request(
-            route, session=session, proxy=proxy, proxy_auth=proxy_auth, params=params
-        )
-
-    def fetch_webhook(
-        self,
-        webhook_id: int,
-        token: str,
-        *,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-    ) -> Response[WebhookPayload | FollowerWebhookPayload]:
-        route = Route("GET", "/webhooks/{webhook_id}", webhook_id=webhook_id)
-        return self.request(
-            route, session=session, proxy=proxy, proxy_auth=proxy_auth, auth_token=token
-        )
-
-    def fetch_webhook_with_token(
-        self,
-        webhook_id: int,
-        token: str,
-        *,
-        session: aiohttp.ClientSession,
-        proxy: str | None = None,
-        proxy_auth: aiohttp.BasicAuth | None = None,
-    ) -> Response[WebhookPayload | FollowerWebhookPayload]:
-        route = Route(
-            "GET",
-            "/webhooks/{webhook_id}/{webhook_token}",
-            webhook_id=webhook_id,
-            webhook_token=token,
-        )
-        return self.request(route, session=session, proxy=proxy, proxy_auth=proxy_auth)
+                    except OSError as e:
+                        step = run.connection_error(e, attempt)
+                        if step is None:
+                            raise
+                    if isinstance(step, Done):
+                        return step.data
+                    await asyncio.sleep(step.delay)
+                run.give_up()
+            finally:
+                if run.hold:
+                    await asyncio.sleep(run.hold)
 
     def create_interaction_response(
         self,
@@ -507,59 +189,13 @@ class AsyncWebhookAdapter:
         proxy_auth: aiohttp.BasicAuth | None = None,
         type: int,
         data: dict[str, Any] | None = None,
-        files: list[File] = None,
+        files: list[File] | None = None,
     ) -> Response[None]:
-        payload: dict[str, Any] = {
-            "type": type,
-        }
-
-        payload["data"] = data if data is not None else {}
-        form = [{"name": "payload_json"}]
-        attachments = []
-        files = files or []
-        for index, file in enumerate(files):
-            attachment_info = {
-                "id": index,
-                "filename": file.filename,
-                "description": file.description,
-            }
-            if isinstance(file, VoiceMessage):
-                attachment_info.update(
-                    waveform=file.waveform,
-                    duration_secs=file.duration_secs,
-                )
-            attachments.append(attachment_info)
-            form.append(
-                {
-                    "name": f"files[{index}]",
-                    "value": file.fp,
-                    "filename": file.filename,
-                    "content_type": "application/octet-stream",
-                }
-            )
-        if attachments:
-            payload["data"]["attachments"] = attachments
-        form[0]["value"] = utils._to_json(payload)
-
-        route = Route(
-            "POST",
-            "/interactions/{webhook_id}/{webhook_token}/callback",
-            webhook_id=interaction_id,
-            webhook_token=token,
+        request = interaction_response_request(
+            interaction_id, token, type=type, data=data, files=files
         )
-
-        params: dict[str, Any] = {
-            "with_response": "true",
-        }
-
-        return self.request(
-            route,
-            session=session,
-            proxy=proxy,
-            proxy_auth=proxy_auth,
-            files=files,
-            multipart=form,
-            params=params,
+        return self.execute(
+            request, session=session, proxy=proxy, proxy_auth=proxy_auth
         )
 
     def get_original_interaction_response(
@@ -571,13 +207,10 @@ class AsyncWebhookAdapter:
         proxy: str | None = None,
         proxy_auth: aiohttp.BasicAuth | None = None,
     ) -> Response[MessagePayload]:
-        r = Route(
-            "GET",
-            "/webhooks/{webhook_id}/{webhook_token}/messages/@original",
-            webhook_id=application_id,
-            webhook_token=token,
+        request = original_response_request("GET", application_id, token)
+        return self.execute(
+            request, session=session, proxy=proxy, proxy_auth=proxy_auth
         )
-        return self.request(r, session=session, proxy=proxy, proxy_auth=proxy_auth)
 
     def edit_original_interaction_response(
         self,
@@ -591,20 +224,16 @@ class AsyncWebhookAdapter:
         multipart: list[dict[str, Any]] | None = None,
         files: list[File] | None = None,
     ) -> Response[MessagePayload]:
-        r = Route(
+        request = original_response_request(
             "PATCH",
-            "/webhooks/{webhook_id}/{webhook_token}/messages/@original",
-            webhook_id=application_id,
-            webhook_token=token,
-        )
-        return self.request(
-            r,
-            session=session,
-            proxy=proxy,
-            proxy_auth=proxy_auth,
+            application_id,
+            token,
             payload=payload,
             multipart=multipart,
             files=files,
+        )
+        return self.execute(
+            request, session=session, proxy=proxy, proxy_auth=proxy_auth
         )
 
     def delete_original_interaction_response(
@@ -616,151 +245,15 @@ class AsyncWebhookAdapter:
         proxy: str | None = None,
         proxy_auth: aiohttp.BasicAuth | None = None,
     ) -> Response[None]:
-        r = Route(
-            "DELETE",
-            "/webhooks/{webhook_id}/{webhook_token}/messages/@original",
-            webhook_id=application_id,
-            webhook_token=token,
+        request = original_response_request("DELETE", application_id, token)
+        return self.execute(
+            request, session=session, proxy=proxy, proxy_auth=proxy_auth
         )
-        return self.request(r, session=session, proxy=proxy, proxy_auth=proxy_auth)
 
 
-class ExecuteWebhookParameters(NamedTuple):
-    payload: dict[str, Any] | None
-    multipart: list[dict[str, Any]] | None
-    files: list[File] | None
-
-
-def handle_message_parameters(
-    content: str | None = MISSING,
-    *,
-    username: str = MISSING,
-    avatar_url: Any = MISSING,
-    tts: bool = False,
-    ephemeral: bool = False,
-    file: File = MISSING,
-    files: list[File] = MISSING,
-    attachments: list[Attachment] = MISSING,
-    embed: Embed | None = MISSING,
-    embeds: list[Embed] = MISSING,
-    view: BaseView | None = MISSING,
-    poll: Poll | None = MISSING,
-    applied_tags: list[Snowflake] = MISSING,
-    allowed_mentions: AllowedMentions | None = MISSING,
-    previous_allowed_mentions: AllowedMentions | None = None,
-    suppress: bool | None = None,
-    thread_name: str | None = None,
-    suppress_embeds: bool = None,
-    silent: bool = False,
-) -> ExecuteWebhookParameters:
-    if files is not MISSING and file is not MISSING:
-        raise TypeError("Cannot mix file and files keyword arguments.")
-    if embeds is not MISSING and embed is not MISSING:
-        raise TypeError("Cannot mix embed and embeds keyword arguments.")
-
-    payload = {}
-    if embeds is not MISSING:
-        if len(embeds) > 10:
-            raise InvalidArgument("embeds has a maximum of 10 elements.")
-        payload["embeds"] = [e.to_dict() for e in embeds]
-
-    if embed is not MISSING:
-        payload["embeds"] = [] if embed is None else [embed.to_dict()]
-    if content is not MISSING:
-        payload["content"] = str(content) if content is not None else None
-    _attachments = []
-    if attachments is not MISSING:
-        _attachments = [a.to_dict() for a in attachments]
-    if suppress is not None:
-        warn_deprecated("suppress", "suppress_embeds", "2.8")
-        if suppress_embeds is None:
-            suppress_embeds = suppress
-    elif suppress_embeds is None:
-        suppress_embeds = False
-    flags = MessageFlags(
-        suppress_embeds=suppress_embeds,
-        ephemeral=ephemeral,
-        suppress_notifications=silent,
-    )
-
-    if view is not MISSING:
-        payload["components"] = view.to_components() if view is not None else []
-        if view and view.is_components_v2():
-            if payload.get("content") or payload.get("embeds"):
-                raise TypeError(
-                    "cannot send embeds or content with a view using v2 component logic"
-                )
-            flags.is_components_v2 = True
-    if poll is not MISSING:
-        payload["poll"] = poll.to_dict()
-    payload["tts"] = tts
-    if avatar_url:
-        payload["avatar_url"] = str(avatar_url)
-    if username:
-        payload["username"] = username
-
-    if applied_tags is not MISSING:
-        payload["applied_tags"] = applied_tags
-
-    if allowed_mentions:
-        if previous_allowed_mentions is not None:
-            payload["allowed_mentions"] = previous_allowed_mentions.merge(
-                allowed_mentions
-            ).to_dict()
-        else:
-            payload["allowed_mentions"] = allowed_mentions.to_dict()
-    elif previous_allowed_mentions is not None:
-        payload["allowed_mentions"] = previous_allowed_mentions.to_dict()
-
-    multipart = []
-    multipart_files = []
-    if file is not MISSING:
-        files = [file]
-
-    if files:
-        voice_message = False
-        for index, file in enumerate(files):
-            multipart_files.append(
-                {
-                    "name": f"files[{index}]",
-                    "value": file.fp,
-                    "filename": file.filename,
-                    "content_type": "application/octet-stream",
-                }
-            )
-            attachment_info = {
-                "id": index,
-                "filename": file.filename,
-                "description": file.description,
-            }
-            if isinstance(file, VoiceMessage):
-                voice_message = True
-                attachment_info.update(
-                    waveform=file.waveform,
-                    duration_secs=file.duration_secs,
-                )
-            _attachments.append(attachment_info)
-        if voice_message:
-            flags = flags + MessageFlags(is_voice_message=True)
-
-    if attachments is not MISSING or _attachments:
-        payload["attachments"] = _attachments
-
-    payload["flags"] = flags.value
-
-    if thread_name:
-        payload["thread_name"] = thread_name
-
-    if multipart_files:
-        multipart.append({"name": "payload_json", "value": utils._to_json(payload)})
-        payload = None
-        multipart += multipart_files
-
-    return ExecuteWebhookParameters(payload=payload, multipart=multipart, files=files)
-
-
+_default_adapter = AsyncWebhookAdapter()
 async_context: ContextVar[AsyncWebhookAdapter] = ContextVar(
-    "async_webhook_context", default=AsyncWebhookAdapter()
+    "async_webhook_context", default=_default_adapter
 )
 
 
@@ -781,11 +274,11 @@ class PartialWebhookChannel(Hashable):
 
     __slots__ = ("id", "name")
 
-    def __init__(self, *, data):
-        self.id = int(data["id"])
-        self.name = data["name"]
+    def __init__(self, *, data: PartialChannel) -> None:
+        self.id: int = int(data["id"])
+        self.name: str = data["name"]
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<PartialWebhookChannel name={self.name!r} id={self.id}>"
 
 
@@ -804,15 +297,20 @@ class PartialWebhookGuild(Hashable):
         The partial guild's name.
     """
 
-    __slots__ = ("id", "name", "_icon", "_state")
+    __slots__ = ("_icon", "_state", "id", "name")
 
-    def __init__(self, *, data, state):
-        self._state = state
-        self.id = int(data["id"])
-        self.name = data["name"]
-        self._icon = data["icon"]
+    def __init__(
+        self,
+        *,
+        data: SourceGuildPayload,
+        state: ConnectionState | _WebhookState,
+    ) -> None:
+        self._state: ConnectionState | _WebhookState = state
+        self.id: int = int(data["id"])
+        self.name: str = data["name"]
+        self._icon: str | None = data["icon"]
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<PartialWebhookGuild name={self.name!r} id={self.id}>"
 
     @property
@@ -820,60 +318,9 @@ class PartialWebhookGuild(Hashable):
         """Returns the guild's icon asset, if available."""
         if self._icon is None:
             return None
-        return Asset._from_guild_icon(self._state, self.id, self._icon)
-
-
-class _FriendlyHttpAttributeErrorHelper:
-    __slots__ = ()
-
-    def __getattr__(self, attr):
-        raise AttributeError("PartialWebhookState does not support http methods.")
-
-
-class _WebhookState:
-    __slots__ = ("_parent", "_webhook")
-
-    def __init__(self, webhook: Any, parent: ConnectionState | _WebhookState | None):
-        self._webhook: Any = webhook
-
-        self._parent: ConnectionState | None
-        self._parent = None if isinstance(parent, _WebhookState) else parent
-
-    def _get_guild(self, guild_id):
-        if self._parent is not None:
-            return self._parent._get_guild(guild_id)
-        return None
-
-    def store_user(self, data):
-        if self._parent is not None:
-            return self._parent.store_user(data)
-        # state parameter is artificial
-        return BaseUser(state=self, data=data)  # type: ignore
-
-    def create_user(self, data):
-        # state parameter is artificial
-        return BaseUser(state=self, data=data)  # type: ignore
-
-    def store_poll(self, poll: Poll, message_id: int):
-        if self._parent is not None:
-            return self._parent.store_poll(poll, message_id)
-        # state parameter is artificial
-        return None
-
-    @property
-    def http(self):
-        if self._parent is not None:
-            return self._parent.http
-
-        # Some data classes assign state.http and that should be kosher
-        # however, using it should result in a late-binding error.
-        return _FriendlyHttpAttributeErrorHelper()
-
-    def __getattr__(self, attr):
-        if self._parent is not None:
-            return getattr(self._parent, attr)
-
-        raise AttributeError(f"PartialWebhookState does not support {attr!r}.")
+        return Asset._from_guild_icon(
+            cast("ConnectionState", self._state), self.id, self._icon
+        )
 
 
 class WebhookMessage(Message):
@@ -888,9 +335,10 @@ class WebhookMessage(Message):
     .. versionadded:: 1.6
     """
 
-    _state: _WebhookState
+    if TYPE_CHECKING:
+        _thread_id: int
 
-    async def edit(
+    async def edit(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         content: str | None = MISSING,
         embeds: list[Embed] = MISSING,
@@ -973,10 +421,12 @@ class WebhookMessage(Message):
         thread = MISSING
         if hasattr(self, "_thread_id"):
             thread = Object(self._thread_id)
-        elif isinstance(self.channel, Thread):
-            thread = Object(self.channel.id)
-        elif isinstance(self.channel, ForumChannel):
-            thread = Object(self.id)
+        else:
+            channel = await self.get_channel()
+            if isinstance(channel, Thread):
+                thread = Object(channel.id)
+            elif isinstance(channel, ForumChannel):
+                thread = Object(self.id)
 
         if attachments is MISSING:
             attachments = self.attachments or MISSING
@@ -989,7 +439,7 @@ class WebhookMessage(Message):
         if suppress_embeds is MISSING:
             suppress_embeds = self.flags.suppress_embeds
 
-        return await self._state._webhook.edit_message(
+        return await cast("_WebhookState", self._state)._webhook.edit_message(
             self.id,
             content=content,
             embeds=embeds,
@@ -1003,7 +453,9 @@ class WebhookMessage(Message):
             suppress_embeds=suppress_embeds,
         )
 
-    async def delete(self, *, delay: float | None = None) -> None:
+    async def delete(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, *, delay: float | None = None
+    ) -> None:
         """|coro|
 
         Deletes the message.
@@ -1026,55 +478,50 @@ class WebhookMessage(Message):
         thread_id: int | None = None
         if hasattr(self, "_thread_id"):
             thread_id = self._thread_id
-        elif isinstance(self.channel, Thread):
-            thread_id = self.channel.id
-
-        if delay is not None:
-
-            async def inner_call(delay: float = delay):
-                await asyncio.sleep(delay)
-                try:
-                    await self._state._webhook.delete_message(
-                        self.id, thread_id=thread_id
-                    )
-                except HTTPException:
-                    pass
-
-            asyncio.create_task(inner_call())
         else:
-            await self._state._webhook.delete_message(self.id, thread_id=thread_id)
+            channel = await self.get_channel()
+            if isinstance(channel, Thread):
+                thread_id = channel.id
+
+        webhook = cast("_WebhookState", self._state)._webhook
+        if delay is not None:
+            utils.delay_task(
+                delay, webhook.delete_message(self.id, thread_id=thread_id)
+            )
+        else:
+            await webhook.delete_message(self.id, thread_id=thread_id)
 
 
-class BaseWebhook(Hashable):
+class BaseWebhook(WebhookRequests, Hashable):
     __slots__: tuple[str, ...] = (
-        "id",
-        "type",
-        "guild_id",
-        "channel_id",
-        "token",
-        "auth_token",
-        "user",
-        "name",
         "_avatar",
+        "_state",
+        "auth_token",
+        "channel_id",
+        "guild_id",
+        "id",
+        "name",
+        "parent",
         "source_channel",
         "source_guild",
-        "_state",
-        "parent",
+        "token",
+        "type",
+        "user",
     )
 
     def __init__(
         self,
         data: WebhookPayload | FollowerWebhookPayload,
         token: str | None = None,
-        state: ConnectionState | None = None,
-    ):
+        state: ConnectionState | _WebhookState | None = None,
+    ) -> None:
         self.auth_token: str | None = token
         self._state: ConnectionState | _WebhookState = state or _WebhookState(
             self, parent=state
         )
         self._update(data)
 
-    def _update(self, data: WebhookPayload | FollowerWebhookPayload):
+    def _update(self, data: WebhookPayload | FollowerWebhookPayload) -> None:
         self.id = int(data["id"])
         self.type = try_enum(WebhookType, int(data["type"]))
         self.channel_id = utils._get_as_snowflake(data, "channel_id")
@@ -1087,19 +534,19 @@ class BaseWebhook(Hashable):
         self.user: BaseUser | User | None = None
         if user is not None:
             # state parameter may be _WebhookState
-            self.user = User(state=self._state, data=user)  # type: ignore
+            self.user = User(state=cast("ConnectionState", self._state), data=user)
 
         source_channel = data.get("source_channel")
-        if source_channel:
-            source_channel = PartialWebhookChannel(data=source_channel)
-
-        self.source_channel: PartialWebhookChannel | None = source_channel
+        self.source_channel: PartialWebhookChannel | None = (
+            PartialWebhookChannel(data=source_channel) if source_channel else None
+        )
 
         source_guild = data.get("source_guild")
-        if source_guild:
-            source_guild = PartialWebhookGuild(data=source_guild, state=self._state)
-
-        self.source_guild: PartialWebhookGuild | None = source_guild
+        self.source_guild: PartialWebhookGuild | None = (
+            PartialWebhookGuild(data=source_guild, state=self._state)
+            if source_guild
+            else None
+        )
 
     def is_partial(self) -> bool:
         """Whether the webhook is a "partial" webhook.
@@ -1115,25 +562,61 @@ class BaseWebhook(Hashable):
         """
         return self.auth_token is not None
 
+    def _cache_state(self) -> ConnectionState | None:
+        state = self._state
+        if isinstance(state, _WebhookState):
+            return state._parent
+        return state
+
     @property
-    def guild(self) -> Guild | None:
+    def guild(self) -> Guild | PartialGuild | None:
         """The guild this webhook belongs to.
 
         If this is a partial webhook, then this will always return ``None``.
+
+        This is a :class:`PartialGuild` when the guild is not cached or when the
+        cache is not held in-process.
         """
-        return self._state and self._state._get_guild(self.guild_id)
+        from ..guild import PartialGuild
+
+        if self.guild_id is None:
+            return None
+        state = self._cache_state()
+        guild = None if state is None else cached_guild(state, self.guild_id)
+        if guild is not None:
+            return guild
+        return PartialGuild(
+            state=cast("ConnectionState", self._state), id=self.guild_id
+        )
 
     @property
-    def channel(self) -> TextChannel | None:
+    def channel(self) -> TextChannel | PartialMessageable | None:
         """The text channel this webhook belongs to.
 
         If this is a partial webhook, then this will always return ``None``.
+
+        This is a :class:`PartialMessageable` when the channel is not cached or when
+        the cache is not held in-process.
         """
-        guild = self.guild
-        return guild and guild.get_channel(self.channel_id)  # type: ignore
+        if self.channel_id is None:
+            return None
+        state = self._cache_state()
+        if (
+            state is not None
+            and state.cache.supports_sync
+            and self.guild_id is not None
+        ):
+            channel = state._guild_bucket("channels", self.guild_id).get_nowait(
+                self.channel_id
+            )
+            if channel is not None:
+                return channel
+        return PartialMessageable(
+            state=cast("ConnectionState", self._state), id=self.channel_id
+        )
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """Returns the webhook's creation time in UTC."""
         return utils.snowflake_time(self.id)
 
@@ -1146,8 +629,10 @@ class BaseWebhook(Hashable):
         """
         if self._avatar is None:
             # Default is always blurple apparently
-            return Asset._from_default_avatar(self._state, 0)
-        return Asset._from_avatar(self._state, self.id, self._avatar)
+            return Asset._from_default_avatar(cast("ConnectionState", self._state), 0)
+        return Asset._from_avatar(
+            cast("ConnectionState", self._state), self.id, self._avatar
+        )
 
 
 class Webhook(BaseWebhook):
@@ -1171,10 +656,11 @@ class Webhook(BaseWebhook):
         from discord import Webhook
         import aiohttp
 
+
         async def foo():
             async with aiohttp.ClientSession() as session:
-                webhook = Webhook.from_url('url-here', session=session)
-                await webhook.send('Hello World', username='Foo')
+                webhook = Webhook.from_url("url-here", session=session)
+                await webhook.send("Hello World", username="Foo")
 
     For a synchronous counterpart, see :class:`SyncWebhook`.
 
@@ -1235,7 +721,35 @@ class Webhook(BaseWebhook):
         .. versionadded:: 2.7
     """
 
-    __slots__: tuple[str, ...] = ("session", "proxy", "proxy_auth")
+    __slots__: tuple[str, ...] = ("proxy", "proxy_auth", "session")
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the cached guild this webhook belongs to.
+
+        If this is a partial webhook, then this will always return ``None``.
+
+        .. versionadded:: 3.0
+        """
+        state = self._cache_state()
+        if state is None or self.guild_id is None:
+            return None
+        return await state._get_guild(self.guild_id)
+
+    async def get_channel(self) -> TextChannel | None:
+        """|coro|
+
+        Returns the cached text channel this webhook belongs to.
+
+        If this is a partial webhook, then this will always return ``None``.
+
+        .. versionadded:: 3.0
+        """
+        state = self._cache_state()
+        if state is None or self.guild_id is None or self.channel_id is None:
+            return None
+        return await state._guild_bucket("channels", self.guild_id).get(self.channel_id)
 
     def __init__(
         self,
@@ -1244,16 +758,16 @@ class Webhook(BaseWebhook):
         proxy: str | None = None,
         proxy_auth: aiohttp.BasicAuth | None = None,
         token: str | None = None,
-        state=None,
+        state: ConnectionState | _WebhookState | None = None,
         parent: Interaction | None = None,
-    ):
+    ) -> None:
         super().__init__(data, token, state)
         self.session = session
         self.proxy: str | None = proxy
         self.proxy_auth: aiohttp.BasicAuth | None = proxy_auth
         self.parent: Interaction | None = parent
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Webhook id={self.id!r}>"
 
     @property
@@ -1298,12 +812,7 @@ class Webhook(BaseWebhook):
             A partial :class:`Webhook`.
             A partial webhook is just a webhook object with an ID and a token.
         """
-        data: WebhookPayload = {
-            "id": id,
-            "type": 1,
-            "token": token,
-        }
-
+        data: WebhookPayload = partial_webhook_data(id, token)
         return cls(data, session, proxy=proxy, proxy_auth=proxy_auth, token=bot_token)
 
     @classmethod
@@ -1345,19 +854,13 @@ class Webhook(BaseWebhook):
         InvalidArgument
             The URL is invalid.
         """
-        m = re.search(
-            r"discord(?:app)?.com/api/webhooks/(?P<id>\d{17,20})/(?P<token>[\w\.\-_]{60,68})",
-            url,
-        )
-        if m is None:
-            raise InvalidArgument("Invalid webhook URL given.")
-
-        data: dict[str, Any] = m.groupdict()
-        data["type"] = 1
-        return cls(data, session, proxy=proxy, proxy_auth=proxy_auth, token=bot_token)  # type: ignore
+        data = parse_webhook_url(url)
+        return cls(data, session, proxy=proxy, proxy_auth=proxy_auth, token=bot_token)
 
     @classmethod
-    def _as_follower(cls, data, *, channel, user) -> Webhook:
+    def _as_follower(
+        cls, data: Any, *, channel: TextChannel, user: ClientUser | UserModel
+    ) -> Webhook:
         name = f"{channel.guild} #{channel}"
         feed: WebhookPayload = {
             "id": data["webhook_id"],
@@ -1376,7 +879,7 @@ class Webhook(BaseWebhook):
 
         state = channel._state
         http = state.http
-        session = http._HTTPClient__session
+        session = http._session
         proxy_auth = http.proxy_auth
         proxy = http.proxy
         return cls(
@@ -1389,9 +892,25 @@ class Webhook(BaseWebhook):
         )
 
     @classmethod
-    def from_state(cls, data, state) -> Webhook:
+    def from_state(
+        cls, data: WebhookPayload | FollowerWebhookPayload, state: ConnectionState
+    ) -> Webhook:
+        """Creates a :class:`Webhook` bound to the HTTP session of a connection state.
+
+        Parameters
+        ----------
+        data: dict[:class:`str`, Any]
+            The webhook payload.
+        state: :class:`ConnectionState`
+            The connection state whose HTTP session is used.
+
+        Returns
+        -------
+        :class:`Webhook`
+            The webhook.
+        """
         http = state.http
-        session = http._HTTPClient__session
+        session = http._session
         proxy_auth = http.proxy_auth
         proxy = http.proxy
         return cls(
@@ -1404,15 +923,27 @@ class Webhook(BaseWebhook):
         )
 
     @classmethod
-    def from_interaction(cls, interaction) -> Webhook:
+    def from_interaction(cls, interaction: Interaction) -> Webhook:
+        """Creates a :class:`Webhook` for the application of an interaction.
+
+        Parameters
+        ----------
+        interaction: :class:`Interaction`
+            The interaction to create the webhook from.
+
+        Returns
+        -------
+        :class:`Webhook`
+            The webhook, authenticated with the interaction token.
+        """
         state = interaction._state
-        data = {
+        data: WebhookPayload = {
             "id": interaction.application_id,
             "type": 3,
             "token": interaction.token,
         }
         http = state.http
-        session = http._HTTPClient__session
+        session = http._session
         proxy_auth = http.proxy_auth
         proxy = http.proxy
         return cls(
@@ -1460,28 +991,12 @@ class Webhook(BaseWebhook):
         InvalidArgument
             This webhook does not have a token associated with it.
         """
-        adapter = async_context.get()
-
-        if prefer_auth and self.auth_token:
-            data = await adapter.fetch_webhook(
-                self.id,
-                self.auth_token,
-                session=self.session,
-                proxy=self.proxy,
-                proxy_auth=self.proxy_auth,
-            )
-        elif self.token:
-            data = await adapter.fetch_webhook_with_token(
-                self.id,
-                self.token,
-                session=self.session,
-                proxy=self.proxy,
-                proxy_auth=self.proxy_auth,
-            )
-        else:
-            raise InvalidArgument(
-                "This webhook does not have a token associated with it"
-            )
+        data = await async_context.get().execute(
+            self._fetch_request(prefer_auth),
+            session=self.session,
+            proxy=self.proxy,
+            proxy_auth=self.proxy_auth,
+        )
 
         return Webhook(
             data,
@@ -1492,7 +1007,9 @@ class Webhook(BaseWebhook):
             state=self._state,
         )
 
-    async def delete(self, *, reason: str | None = None, prefer_auth: bool = True):
+    async def delete(
+        self, *, reason: str | None = None, prefer_auth: bool = True
+    ) -> None:
         """|coro|
 
         Deletes this Webhook.
@@ -1520,31 +1037,12 @@ class Webhook(BaseWebhook):
         InvalidArgument
             This webhook does not have a token associated with it.
         """
-        if self.token is None and self.auth_token is None:
-            raise InvalidArgument(
-                "This webhook does not have a token associated with it"
-            )
-
-        adapter = async_context.get()
-
-        if prefer_auth and self.auth_token:
-            await adapter.delete_webhook(
-                self.id,
-                token=self.auth_token,
-                session=self.session,
-                proxy=self.proxy,
-                proxy_auth=self.proxy_auth,
-                reason=reason,
-            )
-        elif self.token:
-            await adapter.delete_webhook_with_token(
-                self.id,
-                self.token,
-                session=self.session,
-                proxy=self.proxy,
-                proxy_auth=self.proxy_auth,
-                reason=reason,
-            )
+        await async_context.get().execute(
+            self._delete_request(reason, prefer_auth),
+            session=self.session,
+            proxy=self.proxy,
+            proxy_auth=self.proxy_auth,
+        )
 
     async def edit(
         self,
@@ -1589,62 +1087,18 @@ class Webhook(BaseWebhook):
             This webhook does not have a token associated with it, or
             it tried editing a channel without authentication.
         """
-        if self.token is None and self.auth_token is None:
-            raise InvalidArgument(
-                "This webhook does not have a token associated with it"
-            )
-
-        payload = {}
-        if name is not MISSING:
-            payload["name"] = str(name) if name is not None else None
-
-        if avatar is not MISSING:
-            payload["avatar"] = (
-                utils._bytes_to_base64_data(avatar) if avatar is not None else None
-            )
-
-        adapter = async_context.get()
-
-        data: WebhookPayload | None = None
-        # If a channel is given, always use the authenticated endpoint
-        if channel is not None:
-            if self.auth_token is None:
-                raise InvalidArgument("Editing channel requires authenticated webhook")
-
-            payload["channel_id"] = channel.id
-            data = await adapter.edit_webhook(
-                self.id,
-                self.auth_token,
-                payload=payload,
-                session=self.session,
-                proxy=self.proxy,
-                proxy_auth=self.proxy_auth,
+        data = await async_context.get().execute(
+            self._edit_request(
                 reason=reason,
-            )
-
-        if prefer_auth and self.auth_token:
-            data = await adapter.edit_webhook(
-                self.id,
-                self.auth_token,
-                payload=payload,
-                session=self.session,
-                proxy=self.proxy,
-                proxy_auth=self.proxy_auth,
-                reason=reason,
-            )
-        elif self.token:
-            data = await adapter.edit_webhook_with_token(
-                self.id,
-                self.token,
-                payload=payload,
-                session=self.session,
-                proxy=self.proxy,
-                proxy_auth=self.proxy_auth,
-                reason=reason,
-            )
-
-        if data is None:
-            raise RuntimeError("Unreachable code hit: data was not assigned")
+                name=name,
+                avatar=avatar,
+                channel=channel,
+                prefer_auth=prefer_auth,
+            ),
+            session=self.session,
+            proxy=self.proxy,
+            proxy_auth=self.proxy_auth,
+        )
 
         return Webhook(
             data,
@@ -1655,12 +1109,20 @@ class Webhook(BaseWebhook):
             state=self._state,
         )
 
-    def _create_message(self, data):
+    async def _create_message(self, data: MessagePayload) -> WebhookMessage:
         state = _WebhookState(self, parent=self._state)
         # state may be artificial (unlikely at this point...)
-        channel = self.channel or PartialMessageable(state=self._state, id=int(data["channel_id"]))  # type: ignore
+        channel = PartialMessageable(
+            state=cast("ConnectionState", self._state), id=int(data["channel_id"])
+        )
         # state is artificial
-        return WebhookMessage(data=data, state=state, channel=channel)  # type: ignore
+        message = WebhookMessage(
+            data=data, state=cast("ConnectionState", state), channel=channel
+        )
+        if message.guild_id is None:
+            message.guild_id = self.guild_id
+        await state._populate_message(message, data)
+        return message
 
     @overload
     async def send(
@@ -1682,7 +1144,7 @@ class Webhook(BaseWebhook):
         thread_name: str | None = None,
         applied_tags: list[Snowflake] = MISSING,
         wait: Literal[True],
-        delete_after: float = None,
+        delete_after: float | None = None,
         silent: bool = False,
         suppress_embeds: bool = False,
     ) -> WebhookMessage: ...
@@ -1707,7 +1169,7 @@ class Webhook(BaseWebhook):
         thread_name: str | None = None,
         applied_tags: list[Snowflake] = MISSING,
         wait: Literal[False] = ...,
-        delete_after: float = None,
+        delete_after: float | None = None,
         silent: bool = False,
         suppress_embeds: bool = False,
     ) -> None: ...
@@ -1731,7 +1193,7 @@ class Webhook(BaseWebhook):
         thread_name: str | None = None,
         applied_tags: list[Snowflake] = MISSING,
         wait: bool = False,
-        delete_after: float = None,
+        delete_after: float | None = None,
         silent: bool = False,
         suppress_embeds: bool = False,
     ) -> WebhookMessage | None:
@@ -1846,93 +1308,36 @@ class Webhook(BaseWebhook):
             giving it a dispatchable view, you specified both ``thread_name`` and ``thread``,
             or ``applied_tags`` was passed with neither ``thread_name`` nor ``thread`` specified.
         """
-
-        if self.token is None:
-            raise InvalidArgument(
-                "This webhook does not have a token associated with it"
-            )
-
-        previous_mentions: AllowedMentions | None = getattr(
-            self._state, "allowed_mentions", None
-        )
-        if content is None:
-            content = MISSING
-
-        if thread and thread_name:
-            raise InvalidArgument("You cannot specify both a thread and thread_name")
-
-        if applied_tags and not (thread or thread_name):
-            raise InvalidArgument("You cannot specify applied_tags without a thread")
-
-        application_webhook = self.type is WebhookType.application
-        if ephemeral and not application_webhook:
-            raise InvalidArgument(
-                "ephemeral messages can only be sent from application webhooks"
-            )
-
-        if application_webhook:
-            wait = True
-
-        with_components = False
-
-        if view is not MISSING:
-            if (
-                isinstance(self._state, _WebhookState)
-                and view
-                and view.is_dispatchable()
-            ):
-                raise InvalidArgument(
-                    "Dispatchable Webhook views require an associated state with the webhook"
-                )
-            if ephemeral is True and view.timeout is None:
-                view.timeout = 15 * 60.0
-            if not application_webhook:
-                with_components = True
-
-        if poll is None:
-            poll = MISSING
-
-        params = handle_message_parameters(
-            content=content,
+        plan = self._send_plan(
+            content,
             username=username,
             avatar_url=avatar_url,
             tts=tts,
+            ephemeral=ephemeral,
             file=file,
             files=files,
             embed=embed,
             embeds=embeds,
-            ephemeral=ephemeral,
+            allowed_mentions=allowed_mentions,
             view=view,
             poll=poll,
-            applied_tags=applied_tags,
-            allowed_mentions=allowed_mentions,
-            previous_allowed_mentions=previous_mentions,
+            thread=thread,
             thread_name=thread_name,
+            applied_tags=applied_tags,
+            wait=wait,
             silent=silent,
             suppress_embeds=suppress_embeds,
         )
-        adapter = async_context.get()
-        thread_id: int | None = None
-        if thread is not MISSING:
-            thread_id = thread.id
-
-        data = await adapter.execute_webhook(
-            self.id,
-            self.token,
+        data = await async_context.get().execute(
+            plan.request,
             session=self.session,
             proxy=self.proxy,
             proxy_auth=self.proxy_auth,
-            payload=params.payload,
-            multipart=params.multipart,
-            files=params.files,
-            thread_id=thread_id,
-            wait=wait,
-            with_components=with_components,
         )
 
         msg = None
-        if wait:
-            msg = self._create_message(data)
+        if plan.wait:
+            msg = await self._create_message(data)
 
         if view and not view.is_finished():
             message_id = None if msg is None else msg.id
@@ -1940,17 +1345,12 @@ class Webhook(BaseWebhook):
             if self.parent and not view.parent:
                 view.parent = self.parent
             if msg:
-                view._refresh(msg.components)
+                cast("View | DesignerView", view)._refresh(msg.components)
             if view.is_dispatchable():
                 self._state.store_view(view, message_id)
 
-        if delete_after is not None:
-
-            async def delete():
-                await asyncio.sleep(delete_after)
-                await msg.delete()
-
-            asyncio.ensure_future(delete(), loop=self._state.loop)
+        if delete_after is not None and msg is not None:
+            utils.delay_task(delete_after, msg.delete())
 
         return msg
 
@@ -1986,23 +1386,13 @@ class Webhook(BaseWebhook):
         InvalidArgument
             There was no token associated with this webhook.
         """
-
-        if self.token is None:
-            raise InvalidArgument(
-                "This webhook does not have a token associated with it"
-            )
-
-        adapter = async_context.get()
-        data = await adapter.get_webhook_message(
-            self.id,
-            self.token,
-            id,
+        data = await async_context.get().execute(
+            self._fetch_message_request(id, thread_id),
             session=self.session,
             proxy=self.proxy,
             proxy_auth=self.proxy_auth,
-            thread_id=thread_id,
         )
-        msg = self._create_message(data)
+        msg = await self._create_message(data)
         if thread_id and isinstance(msg.channel, PartialMessageable):
             msg._thread_id = thread_id
 
@@ -2022,7 +1412,7 @@ class Webhook(BaseWebhook):
         allowed_mentions: AllowedMentions | None = None,
         thread: Snowflake | None = MISSING,
         suppress: bool | None = None,
-        suppress_embeds: bool = None,
+        suppress_embeds: bool | None = None,
     ) -> WebhookMessage:
         """|coro|
 
@@ -2098,73 +1488,34 @@ class Webhook(BaseWebhook):
             There was no token associated with this webhook or the webhook had
             no state.
         """
-
-        if self.token is None:
-            raise InvalidArgument(
-                "This webhook does not have a token associated with it"
-            )
-
-        with_components = False
-
-        if view is not MISSING:
-            if (
-                isinstance(self._state, _WebhookState)
-                and view
-                and view.is_dispatchable()
-            ):
-                raise InvalidArgument(
-                    "Dispatchable Webhook views require an associated state with the webhook"
-                )
-            if not isinstance(self._state, _WebhookState):
-                self._state.prevent_view_updates_for(message_id)
-            if self.type is not WebhookType.application:
-                with_components = True
-
-        previous_mentions: AllowedMentions | None = getattr(
-            self._state, "allowed_mentions", None
-        )
-        if suppress is not None:
-            warn_deprecated("suppress", "suppress_embeds", "2.8")
-            if suppress_embeds is None:
-                suppress_embeds = suppress
-        elif suppress_embeds is None:
-            suppress_embeds = False
-        params = handle_message_parameters(
+        request = self._edit_message_request(
+            message_id,
             content=content,
+            embeds=embeds,
+            embed=embed,
             file=file,
             files=files,
             attachments=attachments,
-            embed=embed,
-            embeds=embeds,
             view=view,
             allowed_mentions=allowed_mentions,
-            previous_allowed_mentions=previous_mentions,
+            thread=thread,
+            suppress=suppress,
             suppress_embeds=suppress_embeds,
         )
+        if view is not MISSING and not isinstance(self._state, _WebhookState):
+            self._state.prevent_view_updates_for(message_id)
 
-        thread_id: int | None = None
-        if thread is not MISSING:
-            thread_id = thread.id
-
-        adapter = async_context.get()
-        data = await adapter.edit_webhook_message(
-            self.id,
-            self.token,
-            message_id,
+        data = await async_context.get().execute(
+            request,
             session=self.session,
             proxy=self.proxy,
             proxy_auth=self.proxy_auth,
-            thread_id=thread_id,
-            payload=params.payload,
-            multipart=params.multipart,
-            files=params.files,
-            with_components=with_components,
         )
 
-        message = self._create_message(data)
+        message = await self._create_message(data)
         if view and not view.is_finished():
             view.message = message
-            view._refresh(message.components)
+            cast("View | DesignerView", view)._refresh(message.components)
             if view.is_dispatchable():
                 self._state.store_view(view, message_id)
         return message
@@ -2195,18 +1546,9 @@ class Webhook(BaseWebhook):
         Forbidden
             Deleted a message that is not yours.
         """
-        if self.token is None:
-            raise InvalidArgument(
-                "This webhook does not have a token associated with it"
-            )
-
-        adapter = async_context.get()
-        await adapter.delete_webhook_message(
-            self.id,
-            self.token,
-            message_id,
+        await async_context.get().execute(
+            self._delete_message_request(message_id, thread_id),
             session=self.session,
             proxy=self.proxy,
             proxy_auth=self.proxy_auth,
-            thread_id=thread_id,
         )

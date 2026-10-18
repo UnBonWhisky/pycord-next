@@ -24,25 +24,30 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlparse
 
-from ..components import FileComponent, UnfurledMediaItem, _component_factory
+from typing_extensions import TypeVar, override
+
+from ..components import FileComponent, UnfurledMediaItem
 from ..enums import ComponentType
+from ._fields import Field
 from .item import ViewItem
 
 __all__ = ("File",)
 
 if TYPE_CHECKING:
+    from typing_extensions import Self
+
+    from ..components import Component
     from ..types.components import FileComponent as FileComponentPayload
     from .view import DesignerView
 
 
-F = TypeVar("F", bound="File")
-V = TypeVar("V", bound="DesignerView", covariant=True)
+V_co = TypeVar("V_co", bound="DesignerView", covariant=True, default="DesignerView")
 
 
-class File(ViewItem[V]):
+class File(ViewItem[V_co]):
     """Represents a UI File.
 
     .. note::
@@ -66,39 +71,36 @@ class File(ViewItem[V]):
         "id",
     )
 
-    def __init__(self, url: str, *, spoiler: bool = False, id: int | None = None):
+    __component__ = FileComponent
+    __component_type__ = ComponentType.file
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> FileComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    file: Field[UnfurledMediaItem] = Field("The file's underlying media item.")
+    spoiler: Field[bool] = Field(
+        "Whether the file has the spoiler overlay. Defaults to ``False``."
+    )
+    name: Field[str | None] = Field(
+        "The name of this file, if provided by Discord.", readonly=True
+    )
+    size: Field[int | None] = Field(
+        "The size of this file in bytes, if provided by Discord.", readonly=True
+    )
+
+    def __init__(
+        self, url: str, *, spoiler: bool | None = False, id: int | None = None
+    ) -> None:
         super().__init__()
 
-        file = UnfurledMediaItem(url)
-
-        self._underlying = self._generate_underlying(
-            id=id,
-            file=file,
-            spoiler=spoiler,
-        )
-
-    def _generate_underlying(
-        self,
-        file: UnfurledMediaItem | None = None,
-        spoiler: bool | None = None,
-        id: int | None = None,
-    ) -> FileComponent:
-        super()._generate_underlying(FileComponent)
-        return FileComponent._raw_construct(
-            type=ComponentType.file,
-            id=id or self.id,
-            file=file or self.file,
-            spoiler=spoiler if spoiler is not None else self.spoiler,
-        )
-
-    @property
-    def file(self) -> UnfurledMediaItem:
-        """The file's underlying media item."""
-        return self.underlying.file
-
-    @file.setter
-    def file(self, value: UnfurledMediaItem) -> None:
-        self.underlying.file = value
+        self._build_underlying(id=id, file=UnfurledMediaItem(url), spoiler=spoiler)
 
     @property
     def url(self) -> str:
@@ -109,35 +111,19 @@ class File(ViewItem[V]):
     def url(self, value: str) -> None:
         self.underlying.file.url = value
 
-    @property
-    def spoiler(self) -> bool:
-        """Whether the file has the spoiler overlay. Defaults to ``False``."""
-        return self.underlying.spoiler
-
-    @spoiler.setter
-    def spoiler(self, spoiler: bool) -> None:
-        self.underlying.spoiler = spoiler
-
-    @property
-    def name(self) -> str | None:
-        """The name of this file, if provided by Discord."""
-        return self.underlying.name
-
-    @property
-    def size(self) -> int | None:
-        """The size of this file in bytes, if provided by Discord."""
-        return self.underlying.size
-
+    @override
     def refresh_component(self, component: FileComponent) -> None:
         original = self.underlying.file
         component.file._static_url = original._static_url
         self.underlying = component
 
+    @override
     def to_component_dict(self) -> FileComponentPayload:
-        return super().to_component_dict()
+        return cast("FileComponentPayload", super().to_component_dict())
 
     @classmethod
-    def from_component(cls: type[F], component: FileComponent) -> F:
+    @override
+    def from_component(cls, component: FileComponent) -> Self:
         url = component.file and component.file.url
         if not url.startswith("attachment://"):
             url = "attachment://" + urlparse(url).path.rsplit("/", 1)[-1]
@@ -147,4 +133,4 @@ class File(ViewItem[V]):
             id=component.id,
         )
 
-    callback = None
+    callback = None  # pyright: ignore[reportAssignmentType]

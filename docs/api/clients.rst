@@ -10,9 +10,12 @@ Bots
 .. autoclass:: Bot
     :members:
     :inherited-members:
-    :exclude-members: command, event, message_command, slash_command, user_command, listen
+    :exclude-members: command, entry_point_command, event, message_command, slash_command, user_command, listen
 
     .. automethod:: Bot.command(**kwargs)
+        :decorator:
+
+    .. automethod:: Bot.entry_point_command(**kwargs)
         :decorator:
 
     .. automethod:: Bot.event()

@@ -25,22 +25,23 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import datetime
-from typing import TYPE_CHECKING, Any, Union, overload
+import datetime as dt
+from typing import TYPE_CHECKING, Any, cast, overload
 
+from ._internal.aliases import AliasMixin
 from .asset import Asset
 from .colour import Colour
-from .enums import ActivityType, try_enum
+from .enums import ActivityType, StatusDisplayType, try_enum
 from .partial_emoji import PartialEmoji
 from .utils import _get_as_snowflake
 
 __all__ = (
-    "BaseActivity",
     "Activity",
-    "Streaming",
+    "BaseActivity",
+    "CustomActivity",
     "Game",
     "Spotify",
-    "CustomActivity",
+    "Streaming",
 )
 
 """If you're curious, this is the current schema for an activity.
@@ -94,12 +95,17 @@ t.ActivityFlags = {
 """
 
 if TYPE_CHECKING:
-    from .types.activity import Activity as ActivityPayload
-    from .types.activity import ActivityAssets, ActivityParty, ActivityTimestamps
+    from .types.activity import (
+        Activity as ActivityPayload,
+        ActivityAssets,
+        ActivityParty,
+        ActivityTimestamps,
+    )
 
 
 class BaseActivity:
     """The base activity that all user-settable activities inherit from.
+
     A user-settable activity is one that can be used in :meth:`Client.change_presence`.
 
     The following types currently count as user-settable:
@@ -119,21 +125,29 @@ class BaseActivity:
 
     __slots__ = ("_created_at",)
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         self._created_at: float | None = kwargs.pop("created_at", None)
 
     @property
-    def created_at(self) -> datetime.datetime | None:
+    def created_at(self) -> dt.datetime | None:
         """When the user started doing this activity in UTC.
 
         .. versionadded:: 1.3
         """
         if self._created_at is not None:
-            return datetime.datetime.fromtimestamp(
-                self._created_at / 1000, tz=datetime.timezone.utc
+            return dt.datetime.fromtimestamp(
+                self._created_at / 1000, tz=dt.timezone.utc
             )
+        return None
 
     def to_dict(self) -> ActivityPayload:
+        """Convert the activity to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The activity payload.
+        """
         raise NotImplementedError
 
 
@@ -163,6 +177,19 @@ class Activity(BaseActivity):
         The user's current party status or text used for a custom status.
     details: Optional[:class:`str`]
         The detail of the user's current activity.
+    state_url: Optional[:class:`str`]
+        The URL that is linked when clicking on the state text.
+
+        .. versionadded:: 3.0
+    details_url: Optional[:class:`str`]
+        The URL that is linked when clicking on the details text.
+
+        .. versionadded:: 3.0
+    status_display_type: Optional[:class:`StatusDisplayType`]
+        Which field is displayed in the status text of the user, ``None`` when
+        Discord did not send it.
+
+        .. versionadded:: 3.0
     timestamps: Dict[:class:`str`, :class:`int`]
         A dictionary of timestamps. It contains the following optional keys:
 
@@ -177,8 +204,11 @@ class Activity(BaseActivity):
 
         - ``large_image``: A string representing the ID for the large image asset.
         - ``large_text``: A string representing the text when hovering over the large image asset.
+        - ``large_url``: A string representing the URL opened when clicking on the large image asset.
         - ``small_image``: A string representing the ID for the small image asset.
         - ``small_text``: A string representing the text when hovering over the small image asset.
+        - ``small_url``: A string representing the URL opened when clicking on the small image asset.
+        - ``invite_cover_image``: A string representing the ID for the banner shown on a game invite.
 
     party: Dict[:class:`str`, Union[:class:`str`, List[:class:`int`]]]
         A dictionary representing the activity party. It contains the following optional keys:
@@ -204,27 +234,40 @@ class Activity(BaseActivity):
     """
 
     __slots__ = (
-        "state",
-        "details",
         "_created_at",
-        "timestamps",
-        "assets",
-        "party",
-        "flags",
-        "sync_id",
-        "session_id",
-        "type",
-        "name",
-        "url",
         "application_id",
-        "emoji",
+        "assets",
         "buttons",
+        "details",
+        "details_url",
+        "emoji",
+        "flags",
+        "name",
+        "party",
+        "session_id",
+        "state",
+        "state_url",
+        "status_display_type",
+        "sync_id",
+        "timestamps",
+        "type",
+        "url",
     )
 
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.state: str | None = kwargs.pop("state", None)
+        self.state_url: str | None = kwargs.pop("state_url", None)
         self.details: str | None = kwargs.pop("details", None)
+        self.details_url: str | None = kwargs.pop("details_url", None)
+        status_display_type = kwargs.pop("status_display_type", None)
+        self.status_display_type: StatusDisplayType | None = (
+            None
+            if status_display_type is None
+            else status_display_type
+            if isinstance(status_display_type, StatusDisplayType)
+            else try_enum(StatusDisplayType, status_display_type)
+        )
         self.timestamps: ActivityTimestamps = kwargs.pop("timestamps", {})
         self.assets: ActivityAssets = kwargs.pop("assets", {})
         self.party: ActivityParty = kwargs.pop("party", {})
@@ -261,44 +304,49 @@ class Activity(BaseActivity):
             ("session_id", self.session_id),
             ("emoji", self.emoji),
         )
-        inner = " ".join("%s=%r" % t for t in attrs)
+        inner = " ".join(f"{k}={v!r}" for k, v in attrs)
         return f"<Activity {inner}>"
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> ActivityPayload:
+        """Convert the activity to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The activity payload.
+        """
         ret: dict[str, Any] = {}
         for attr in self.__slots__:
             value = getattr(self, attr, None)
             if value is None:
                 continue
 
-            if isinstance(value, dict) and len(value) == 0:
+            if isinstance(value, dict) and not value:
                 continue
 
             ret[attr] = value
         ret["type"] = int(self.type)
+        if self.status_display_type is not None:
+            ret["status_display_type"] = int(self.status_display_type)
         if self.emoji:
             ret["emoji"] = self.emoji.to_dict()
-        return ret
+        return cast("ActivityPayload", ret)
 
     @property
-    def start(self) -> datetime.datetime | None:
+    def start(self) -> dt.datetime | None:
         """When the user started doing this activity in UTC, if applicable."""
-        try:
-            timestamp = self.timestamps["start"] / 1000
-        except KeyError:
+        start = self.timestamps.get("start")
+        if start is None:
             return None
-        else:
-            return datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
+        return dt.datetime.fromtimestamp(start / 1000, tz=dt.timezone.utc)
 
     @property
-    def end(self) -> datetime.datetime | None:
+    def end(self) -> dt.datetime | None:
         """When the user will stop doing this activity in UTC, if applicable."""
-        try:
-            timestamp = self.timestamps["end"] / 1000
-        except KeyError:
+        end = self.timestamps.get("end")
+        if end is None:
             return None
-        else:
-            return datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
+        return dt.datetime.fromtimestamp(end / 1000, tz=dt.timezone.utc)
 
     @property
     def large_image_url(self) -> str | None:
@@ -306,12 +354,10 @@ class Activity(BaseActivity):
         if self.application_id is None:
             return None
 
-        try:
-            large_image = self.assets["large_image"]
-        except KeyError:
+        large_image = self.assets.get("large_image")
+        if large_image is None:
             return None
-        else:
-            return f"{Asset.BASE}/app-assets/{self.application_id}/{large_image}.png"
+        return f"{Asset.BASE}/app-assets/{self.application_id}/{large_image}.png"
 
     @property
     def small_image_url(self) -> str | None:
@@ -319,12 +365,10 @@ class Activity(BaseActivity):
         if self.application_id is None:
             return None
 
-        try:
-            small_image = self.assets["small_image"]
-        except KeyError:
+        small_image = self.assets.get("small_image")
+        if small_image is None:
             return None
-        else:
-            return f"{Asset.BASE}/app-assets/{self.application_id}/{small_image}.png"
+        return f"{Asset.BASE}/app-assets/{self.application_id}/{small_image}.png"
 
     @property
     def large_image_text(self) -> str | None:
@@ -335,6 +379,22 @@ class Activity(BaseActivity):
     def small_image_text(self) -> str | None:
         """Returns the small image asset hover text of this activity if applicable."""
         return self.assets.get("small_text", None)
+
+    @property
+    def large_url(self) -> str | None:
+        """Returns the URL opened when clicking the large image of this activity, if any.
+
+        .. versionadded:: 3.0
+        """
+        return self.assets.get("large_url", None)
+
+    @property
+    def small_url(self) -> str | None:
+        """Returns the URL opened when clicking the small image of this activity, if any.
+
+        .. versionadded:: 3.0
+        """
+        return self.assets.get("small_url", None)
 
 
 class Game(BaseActivity):
@@ -371,9 +431,9 @@ class Game(BaseActivity):
         The game's name.
     """
 
-    __slots__ = ("name", "_end", "_start")
+    __slots__ = ("_end", "_start", "name")
 
-    def __init__(self, name: str, **extra):
+    def __init__(self, name: str, **extra: Any) -> None:
         super().__init__(**extra)
         self.name: str = name
 
@@ -395,21 +455,17 @@ class Game(BaseActivity):
         return ActivityType.playing
 
     @property
-    def start(self) -> datetime.datetime | None:
+    def start(self) -> dt.datetime | None:
         """When the user started playing this game in UTC, if applicable."""
         if self._start:
-            return datetime.datetime.fromtimestamp(
-                self._start / 1000, tz=datetime.timezone.utc
-            )
+            return dt.datetime.fromtimestamp(self._start / 1000, tz=dt.timezone.utc)
         return None
 
     @property
-    def end(self) -> datetime.datetime | None:
+    def end(self) -> dt.datetime | None:
         """When the user will stop playing this game in UTC, if applicable."""
         if self._end:
-            return datetime.datetime.fromtimestamp(
-                self._end / 1000, tz=datetime.timezone.utc
-            )
+            return dt.datetime.fromtimestamp(self._end / 1000, tz=dt.timezone.utc)
         return None
 
     def __str__(self) -> str:
@@ -418,7 +474,14 @@ class Game(BaseActivity):
     def __repr__(self) -> str:
         return f"<Game name={self.name!r}>"
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> ActivityPayload:
+        """Convert the activity to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The activity payload.
+        """
         timestamps: dict[str, Any] = {}
         if self._start:
             timestamps["start"] = self._start
@@ -426,13 +489,16 @@ class Game(BaseActivity):
         if self._end:
             timestamps["end"] = self._end
 
-        return {
-            "type": ActivityType.playing.value,
-            "name": str(self.name),
-            "timestamps": timestamps,
-        }
+        return cast(
+            "ActivityPayload",
+            {
+                "type": ActivityType.playing.value,
+                "name": str(self.name),
+                "timestamps": timestamps,
+            },
+        )
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, Game) and other.name == self.name
 
     def __hash__(self) -> int:
@@ -484,9 +550,9 @@ class Streaming(BaseActivity):
         A dictionary comprised of similar keys than those in :attr:`Activity.assets`.
     """
 
-    __slots__ = ("platform", "name", "game", "url", "details", "assets")
+    __slots__ = ("assets", "details", "game", "name", "platform", "url")
 
-    def __init__(self, *, name: str | None, url: str, **extra: Any):
+    def __init__(self, *, name: str | None, url: str, **extra: Any) -> None:
         super().__init__(**extra)
         self.platform: str | None = name
         self.name: str | None = extra.pop("details", name)
@@ -516,15 +582,19 @@ class Streaming(BaseActivity):
         This corresponds to the ``large_image`` key of the :attr:`Streaming.assets`
         dictionary if it starts with ``twitch:``. Typically this is set by the Discord client.
         """
-
-        try:
-            name = self.assets["large_image"]
-        except KeyError:
+        name = self.assets.get("large_image")
+        if name is None:
             return None
-        else:
-            return name[7:] if name[:7] == "twitch:" else None
+        return name[7:] if name[:7] == "twitch:" else None
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> ActivityPayload:
+        """Convert the activity to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The activity payload.
+        """
         ret: dict[str, Any] = {
             "type": ActivityType.streaming.value,
             "name": str(self.name),
@@ -533,9 +603,9 @@ class Streaming(BaseActivity):
         }
         if self.details:
             ret["details"] = self.details
-        return ret
+        return cast("ActivityPayload", ret)
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, Streaming)
             and other.name == self.name
@@ -546,9 +616,8 @@ class Streaming(BaseActivity):
         return hash(self.name)
 
 
-class Spotify:
-    """Represents a Spotify listening activity from Discord. This is a special case of
-    :class:`Activity` that makes it easier to work with the Spotify integration.
+class Spotify(AliasMixin):
+    """Represents a Spotify listening activity from Discord. This is a special case of :class:`Activity` that makes it easier to work with the Spotify integration.
 
     .. container:: operations
 
@@ -570,17 +639,17 @@ class Spotify:
     """
 
     __slots__ = (
-        "_state",
-        "_details",
-        "_timestamps",
         "_assets",
-        "_party",
-        "_sync_id",
-        "_session_id",
         "_created_at",
+        "_details",
+        "_party",
+        "_session_id",
+        "_state",
+        "_sync_id",
+        "_timestamps",
     )
 
-    def __init__(self, **data):
+    def __init__(self, **data: Any) -> None:
         self._state: str = data.pop("state", "")
         self._details: str = data.pop("details", "")
         self._timestamps: dict[str, int] = data.pop("timestamps", {})
@@ -599,51 +668,51 @@ class Spotify:
         return ActivityType.listening
 
     @property
-    def created_at(self) -> datetime.datetime | None:
+    def created_at(self) -> dt.datetime | None:
         """When the user started listening in UTC.
 
         .. versionadded:: 1.3
         """
         if self._created_at is not None:
-            return datetime.datetime.fromtimestamp(
-                self._created_at / 1000, tz=datetime.timezone.utc
+            return dt.datetime.fromtimestamp(
+                self._created_at / 1000, tz=dt.timezone.utc
             )
+        return None
 
     @property
     def colour(self) -> Colour:
-        """Returns the Spotify integration colour, as a :class:`Colour`.
-
-        There is an alias for this named :attr:`color`
-        """
+        """Returns the Spotify integration colour, as a :class:`Colour`."""
         return Colour(0x1DB954)
 
-    @property
-    def color(self) -> Colour:
-        """Returns the Spotify integration colour, as a :class:`Colour`.
+    def to_dict(self) -> ActivityPayload:
+        """Convert the activity to the payload sent to Discord.
 
-        There is an alias for this named :attr:`colour`
+        Returns
+        -------
+        :class:`dict`
+            The activity payload.
         """
-        return self.colour
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "flags": 48,  # SYNC | PLAY
-            "name": "Spotify",
-            "assets": self._assets,
-            "party": self._party,
-            "sync_id": self._sync_id,
-            "session_id": self._session_id,
-            "timestamps": self._timestamps,
-            "details": self._details,
-            "state": self._state,
-        }
+        return cast(
+            "ActivityPayload",
+            {
+                "flags": 48,  # SYNC | PLAY
+                "name": "Spotify",
+                "assets": self._assets,
+                "party": self._party,
+                "sync_id": self._sync_id,
+                "session_id": self._session_id,
+                "timestamps": self._timestamps,
+                "details": self._details,
+                "state": self._state,
+            },
+        )
 
     @property
     def name(self) -> str:
         """The activity's name. This will always return "Spotify"."""
         return "Spotify"
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, Spotify)
             and other._session_id == self._session_id
@@ -710,21 +779,21 @@ class Spotify:
         return f"https://open.spotify.com/track/{self.track_id}"
 
     @property
-    def start(self) -> datetime.datetime:
+    def start(self) -> dt.datetime:
         """When the user started playing this song in UTC."""
-        return datetime.datetime.fromtimestamp(
-            self._timestamps["start"] / 1000, tz=datetime.timezone.utc
+        return dt.datetime.fromtimestamp(
+            self._timestamps["start"] / 1000, tz=dt.timezone.utc
         )
 
     @property
-    def end(self) -> datetime.datetime:
+    def end(self) -> dt.datetime:
         """When the user will stop playing this song in UTC."""
-        return datetime.datetime.fromtimestamp(
-            self._timestamps["end"] / 1000, tz=datetime.timezone.utc
+        return dt.datetime.fromtimestamp(
+            self._timestamps["end"] / 1000, tz=dt.timezone.utc
         )
 
     @property
-    def duration(self) -> datetime.timedelta:
+    def duration(self) -> dt.timedelta:
         """The duration of the song being played."""
         return self.end - self.start
 
@@ -732,6 +801,9 @@ class Spotify:
     def party_id(self) -> str:
         """The party ID of the listening party."""
         return self._party.get("id", "")
+
+    if TYPE_CHECKING:
+        color = colour
 
 
 class CustomActivity(BaseActivity):
@@ -767,30 +839,34 @@ class CustomActivity(BaseActivity):
         The text used for the custom activity.
     """
 
-    __slots__ = ("name", "emoji", "state")
+    __slots__ = ("emoji", "name", "state")
 
     def __init__(
-        self, name: str | None, *, emoji: PartialEmoji | None = None, **extra: Any
-    ):
+        self,
+        name: str | None,
+        *,
+        emoji: PartialEmoji | str | dict[str, Any] | None = None,
+        **extra: Any,
+    ) -> None:
         super().__init__(**extra)
         self.name: str | None = name
         self.state: str | None = extra.pop("state", name)
         if self.name == "Custom Status":
             self.name = self.state
 
+        value = cast("object", emoji)
         self.emoji: PartialEmoji | None
-        if emoji is None:
-            self.emoji = emoji
-        elif isinstance(emoji, dict):
-            self.emoji = PartialEmoji.from_dict(emoji)
-        elif isinstance(emoji, str):
-            self.emoji = PartialEmoji(name=emoji)
-        elif isinstance(emoji, PartialEmoji):
-            self.emoji = emoji
+        if value is None:
+            self.emoji = None
+        elif isinstance(value, dict):
+            self.emoji = PartialEmoji.from_dict(cast("dict[str, Any]", value))
+        elif isinstance(value, str):
+            self.emoji = PartialEmoji(name=value)
+        elif isinstance(value, PartialEmoji):
+            self.emoji = value
         else:
             raise TypeError(
-                "Expected str, PartialEmoji, or None, received"
-                f" {type(emoji)!r} instead."
+                f"Expected str, PartialEmoji, or None, received {type(value)!r} instead."
             )
 
     @property
@@ -801,7 +877,15 @@ class CustomActivity(BaseActivity):
         """
         return ActivityType.custom
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> ActivityPayload:
+        """Convert the activity to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The activity payload.
+        """
+        o: dict[str, Any]
         if self.name == self.state:
             o = {
                 "type": ActivityType.custom.value,
@@ -816,9 +900,9 @@ class CustomActivity(BaseActivity):
 
         if self.emoji:
             o["emoji"] = self.emoji.to_dict()
-        return o
+        return cast("ActivityPayload", o)
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, CustomActivity)
             and other.name == self.name
@@ -839,7 +923,7 @@ class CustomActivity(BaseActivity):
         return f"<CustomActivity name={self.name!r} emoji={self.emoji!r}>"
 
 
-ActivityTypes = Union[Activity, Game, CustomActivity, Streaming, Spotify]
+ActivityTypes = Activity | Game | CustomActivity | Streaming | Spotify
 
 
 @overload
@@ -859,19 +943,20 @@ def create_activity(data: ActivityPayload | None) -> ActivityTypes | None:
         if "application_id" in data or "session_id" in data:
             return Activity(**data)
         return Game(**data)
-    elif game_type is ActivityType.custom:
+    kwargs = cast("dict[str, Any]", data)
+    if game_type is ActivityType.custom:
         try:
-            name = data.pop("name")
+            name = kwargs.pop("name")
         except KeyError:
-            return Activity(**data)
+            return Activity(**kwargs)
         else:
             # we removed the name key from data already
-            return CustomActivity(name=name, **data)  # type: ignore
+            return CustomActivity(name=name, **kwargs)
     elif game_type is ActivityType.streaming:
         if "url" in data:
             # the url won't be None here
-            return Streaming(**data)  # type: ignore
-        return Activity(**data)
+            return Streaming(**kwargs)
+        return Activity(**kwargs)
     elif (
         game_type is ActivityType.listening
         and "sync_id" in data

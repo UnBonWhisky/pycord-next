@@ -24,20 +24,33 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from typing_extensions import Self
+from typing_extensions import override
 
-from ..components import CheckboxGroup as CheckboxGroupComponent
-from ..components import CheckboxGroupOption
+from ..components import CheckboxGroup as CheckboxGroupComponent, CheckboxGroupOption
 from ..enums import ComponentType
+from ..limits import ComponentLimits
 from ..utils import MISSING
+from ._fields import (
+    Field,
+    count_limit,
+    custom_id_checks,
+    in_range,
+    list_of,
+    new_custom_id,
+    type_check,
+)
 from .item import ModalItem
 
 __all__ = ("CheckboxGroup",)
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from typing_extensions import Self
+
+    from ..components import Component
     from ..interactions import Interaction
     from ..types.components import (
         CheckboxGroupComponent as CheckboxGroupComponentPayload,
@@ -61,7 +74,7 @@ class CheckboxGroup(ModalItem):
     max_values: Optional[:class:`int`]
         The maximum number of options that can be selected.
         Must be between 1 and 10, inclusive.
-    required: Optional[:class:`bool`]
+    required: :class:`bool`
         Whether an option selection is required or not. Defaults to ``True``.
     id: Optional[:class:`int`]
         The checkbox group's ID.
@@ -76,6 +89,52 @@ class CheckboxGroup(ModalItem):
         "id",
     )
 
+    __component__ = CheckboxGroupComponent
+    __component_type__ = ComponentType.checkbox_group
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> CheckboxGroupComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    custom_id: Field[str] = Field(
+        "The custom id that gets received during an interaction.",
+        *custom_id_checks,
+        default=new_custom_id,
+    )
+    min_values: Field[int | None] = Field(
+        "The minimum number of options that must be selected.",
+        type_check(int, nullable=True),
+        in_range(
+            ComponentLimits.CHECKBOX_MIN_VALUES_MIN,
+            ComponentLimits.CHECKBOX_MIN_VALUES_MAX,
+            skip_falsy=True,
+        ),
+    )
+    max_values: Field[int | None] = Field(
+        "The maximum number of options that can be selected.",
+        type_check(int, nullable=True),
+        in_range(
+            ComponentLimits.CHECKBOX_MAX_VALUES_MIN,
+            ComponentLimits.CHECKBOX_MAX_VALUES_MAX,
+            skip_falsy=True,
+        ),
+    )
+    required: Field[bool] = Field(
+        "Whether an option selection is required or not. Defaults to ``True``",
+        type_check(bool),
+    )
+    options: Field[list[CheckboxGroupOption]] = Field(
+        "A list of options that can be selected in this group.",
+        list_of(CheckboxGroupOption),
+        count_limit(ComponentLimits.CHECKBOX_OPTIONS_MAX),
+    )
+
     def __init__(
         self,
         *,
@@ -85,126 +144,23 @@ class CheckboxGroup(ModalItem):
         max_values: int | None = None,
         required: bool = True,
         id: int | None = None,
-    ):
+    ) -> None:
         super().__init__()
-        if min_values and (min_values < 0 or min_values > 10):
-            raise ValueError("min_values must be between 0 and 10")
-        if max_values and (max_values < 1 or max_values > 10):
-            raise ValueError("max_values must be between 1 and 10")
-        if custom_id is not None and not isinstance(custom_id, str):
-            raise TypeError(
-                f"expected custom_id to be str, not {custom_id.__class__.__name__}"
-            )
-        if not isinstance(required, bool):
-            raise TypeError(f"required must be bool not {required.__class__.__name__}")
-        custom_id = os.urandom(16).hex() if custom_id is None else custom_id
         self._selected_values: list[str] | None = None
 
-        self._underlying: CheckboxGroupComponent = self._generate_underlying(
+        self._build_underlying(
             custom_id=custom_id,
-            options=[],
+            options=options or [],
             min_values=min_values,
             max_values=max_values,
             required=required,
             id=id,
         )
-        if options:
-            self.options = options
-
-    def _generate_underlying(
-        self,
-        custom_id: str | None = None,
-        options: list[CheckboxGroupOption] | None = None,
-        min_values: int | None = None,
-        max_values: int | None = None,
-        required: bool | None = None,
-        id: int | None = None,
-    ) -> CheckboxGroupComponent:
-        super()._generate_underlying(CheckboxGroupComponent)
-        return CheckboxGroupComponent._raw_construct(
-            type=ComponentType.checkbox_group,
-            custom_id=custom_id or self.custom_id,
-            options=options if options is not None else self.options,
-            min_values=min_values if min_values is not None else self.min_values,
-            max_values=max_values if max_values is not None else self.max_values,
-            required=required if required is not None else self.required,
-            id=id or self.id,
-        )
-
-    @property
-    def custom_id(self) -> str:
-        """The custom id that gets received during an interaction."""
-        return self.underlying.custom_id
-
-    @custom_id.setter
-    def custom_id(self, value: str):
-        if not isinstance(value, str):
-            raise TypeError(f"custom_id must be str not {value.__class__.__name__}")
-        if len(value) > 100:
-            raise ValueError("custom_id must be 100 characters or fewer")
-        self.underlying.custom_id = value
-
-    @property
-    def min_values(self) -> int | None:
-        """The minimum number of options that must be selected."""
-        return self.underlying.min_values
-
-    @min_values.setter
-    def min_values(self, value: int | None):
-        if value and not isinstance(value, int):
-            raise TypeError(
-                f"min_values must be None or int not {value.__class__.__name__}"
-            )
-        if value and (value < 0 or value > 10):
-            raise ValueError("min_values must be between 0 and 10")
-        self.underlying.min_values = value
-
-    @property
-    def max_values(self) -> int | None:
-        """The maximum number of options that can be selected."""
-        return self.underlying.max_values
-
-    @max_values.setter
-    def max_values(self, value: int | None):
-        if value and not isinstance(value, int):
-            raise TypeError(
-                f"max_values must be None or int not {value.__class__.__name__}"
-            )
-        if value and (value < 1 or value > 10):
-            raise ValueError("max_values must be between 1 and 10")
-        self.underlying.max_values = value
-
-    @property
-    def required(self) -> bool:
-        """Whether an option selection is required or not. Defaults to ``True``"""
-        return self.underlying.required
-
-    @required.setter
-    def required(self, value: bool):
-        if not isinstance(value, bool):
-            raise TypeError(f"required must be bool, not {value.__class__.__name__}")
-        self.underlying.required = bool(value)
 
     @property
     def values(self) -> list[str] | None:
         """The values selected by the user. This will be ``None`` if the checkbox group has not been submitted in a modal yet."""
         return self._selected_values
-
-    @property
-    def options(self) -> list[CheckboxGroupOption]:
-        """A list of options that can be selected in this group."""
-        return self.underlying.options
-
-    @options.setter
-    def options(self, value: list[CheckboxGroupOption]):
-        if not isinstance(value, list):
-            raise TypeError("options must be a list of CheckboxGroupOption")
-        if len(value) > 10:
-            raise ValueError("you may only provide up to 10 options.")
-        if not all(isinstance(obj, CheckboxGroupOption) for obj in value):
-            raise TypeError("all list items must subclass CheckboxGroupOption")
-
-        self.underlying.options = value
 
     def add_option(
         self,
@@ -238,7 +194,6 @@ class CheckboxGroup(ModalItem):
         ValueError
             The number of options exceeds 10.
         """
-
         option = CheckboxGroupOption(
             label=label,
             value=value,
@@ -261,25 +216,28 @@ class CheckboxGroup(ModalItem):
         ValueError
             The number of options exceeds 10.
         """
-
-        if len(self.underlying.options) >= 10:
-            raise ValueError("maximum number of options already provided")
+        if len(self.underlying.options) >= ComponentLimits.CHECKBOX_OPTIONS_MAX:
+            raise ValueError(
+                f"maximum number of options already provided ({ComponentLimits.CHECKBOX_OPTIONS_MAX})"
+            )
 
         self.underlying.options.append(option)
         return self
 
     def clear_options(self) -> Self:
         """Remove all options from the checkbox group."""
-
         self.underlying.options.clear()
         return self
 
+    @override
     def to_component_dict(self) -> CheckboxGroupComponentPayload:
         return self.underlying.to_dict()
 
-    def refresh_state(self, data) -> None:
+    @override
+    def refresh_state(self, data: Mapping[str, Any]) -> None:
         self._selected_values = data.get("values", [])
 
+    @override
     def refresh_from_modal(
         self, interaction: Interaction, data: CheckboxGroupComponentPayload
     ) -> None:

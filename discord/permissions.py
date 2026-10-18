@@ -25,21 +25,28 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from .flags import BaseFlags, alias_flag_value, fill_with_flags, flag_value
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+    from typing_extensions import Self
+
 __all__ = (
-    "Permissions",
     "PermissionOverwrite",
+    "Permissions",
 )
 
 
 # A permission alias works like a regular flag but is marked
 # So the PermissionOverwrite knows to work with it
-class permission_alias(alias_flag_value):
+class PermissionAlias(alias_flag_value):
     alias: str
+
+
+permission_alias = PermissionAlias
 
 
 def make_permission_alias(
@@ -123,8 +130,8 @@ class Permissions(BaseFlags):
 
     __slots__ = ()
 
-    def __init__(self, permissions: int = 0, **kwargs: bool):
-        if not isinstance(permissions, int):
+    def __init__(self, permissions: int = 0, **kwargs: bool) -> None:
+        if not isinstance(permissions, int):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError(
                 "Expected int parameter, received"
                 f" {permissions.__class__.__name__} instead."
@@ -138,23 +145,19 @@ class Permissions(BaseFlags):
 
     def is_subset(self, other: Permissions) -> bool:
         """Returns ``True`` if self has the same or fewer permissions as other."""
-        if isinstance(other, Permissions):
+        if isinstance(other, Permissions):  # pyright: ignore[reportUnnecessaryIsInstance]
             return (self.value & other.value) == self.value
-        else:
-            raise TypeError(
-                f"cannot compare {self.__class__.__name__} with"
-                f" {other.__class__.__name__}"
-            )
+        raise TypeError(
+            f"cannot compare {self.__class__.__name__} with {other.__class__.__name__}"
+        )
 
     def is_superset(self, other: Permissions) -> bool:
         """Returns ``True`` if self has the same or more permissions as other."""
-        if isinstance(other, Permissions):
+        if isinstance(other, Permissions):  # pyright: ignore[reportUnnecessaryIsInstance]
             return (self.value | other.value) == self.value
-        else:
-            raise TypeError(
-                f"cannot compare {self.__class__.__name__} with"
-                f" {other.__class__.__name__}"
-            )
+        raise TypeError(
+            f"cannot compare {self.__class__.__name__} with {other.__class__.__name__}"
+        )
 
     def is_strict_subset(self, other: Permissions) -> bool:
         """Returns ``True`` if the permissions on other are a strict subset of those on self."""
@@ -164,30 +167,24 @@ class Permissions(BaseFlags):
         """Returns ``True`` if the permissions on other are a strict superset of those on self."""
         return self.is_superset(other) and self != other
 
-    __le__: Callable[[Permissions], bool] = is_subset
-    __ge__: Callable[[Permissions], bool] = is_superset
-    __lt__: Callable[[Permissions], bool] = is_strict_subset
-    __gt__: Callable[[Permissions], bool] = is_strict_superset
+    __le__ = is_subset
+    __ge__ = is_superset
+    __lt__ = is_strict_subset
+    __gt__ = is_strict_superset
 
     @classmethod
-    def none(cls: type[P]) -> P:
-        """A factory method that creates a :class:`Permissions` with all
-        permissions set to ``False``.
-        """
+    def none(cls) -> Self:
+        """A factory method that creates a :class:`Permissions` with all permissions set to ``False``."""
         return cls(0)
 
     @classmethod
-    def all(cls: type[P]) -> P:
-        """A factory method that creates a :class:`Permissions` with all
-        permissions set to ``True``.
-        """
+    def all(cls) -> Self:
+        """A factory method that creates a :class:`Permissions` with all permissions set to ``True``."""
         return cls(~(~1 << 52))
 
     @classmethod
-    def all_channel(cls: type[P]) -> P:
-        """A :class:`Permissions` with all channel-specific permissions set to
-        ``True`` and the guild-specific ones set to ``False``. The guild-specific
-        permissions are currently:
+    def all_channel(cls) -> Self:
+        """A :class:`Permissions` with all channel-specific permissions set to ``True`` and the guild-specific ones set to ``False``. The guild-specific permissions are currently:
 
         - :attr:`manage_emojis`
         - :attr:`view_audit_log`
@@ -207,13 +204,15 @@ class Permissions(BaseFlags):
            Added :attr:`create_public_threads`, :attr:`create_private_threads`, :attr:`manage_threads`,
            :attr:`use_external_stickers`, :attr:`send_messages_in_threads` and
            :attr:`request_to_speak` permissions.
+
+        .. versionchanged:: 3.0
+           Added :attr:`create_events` permission.
         """
-        return cls(0b111110110110011111101111111111101010001)
+        return cls(0b111110110110011111101111111111101010001 | (1 << 44))
 
     @classmethod
-    def general(cls: type[P]) -> P:
-        """A factory method that creates a :class:`Permissions` with all
-        "General" permissions from the official Discord UI set to ``True``.
+    def general(cls) -> Self:
+        """A factory method that creates a :class:`Permissions` with all "General" permissions from the official Discord UI set to ``True``.
 
         .. versionchanged:: 1.7
            Permission :attr:`read_messages` is now included in the general permissions, but
@@ -222,22 +221,23 @@ class Permissions(BaseFlags):
            no longer part of the general permissions.
         .. versionchanged:: 2.7
            Added :attr:`view_creator_monetization_analytics` permission.
+
+        .. versionchanged:: 3.0
+           Added :attr:`create_guild_expressions` permission.
         """
-        return cls(0b100000000001110000000010000000010010110000)
+        return cls(0b100000000001110000000010000000010010110000 | (1 << 43))
 
     @classmethod
-    def membership(cls: type[P]) -> P:
-        """A factory method that creates a :class:`Permissions` with all
-        "Membership" permissions from the official Discord UI set to ``True``.
+    def membership(cls) -> Self:
+        """A factory method that creates a :class:`Permissions` with all "Membership" permissions from the official Discord UI set to ``True``.
 
         .. versionadded:: 1.7
         """
         return cls(0b00001100000000000000000000000111)
 
     @classmethod
-    def text(cls: type[P]) -> P:
-        """A factory method that creates a :class:`Permissions` with all
-        "Text" permissions from the official Discord UI set to ``True``.
+    def text(cls) -> Self:
+        """A factory method that creates a :class:`Permissions` with all "Text" permissions from the official Discord UI set to ``True``.
 
         .. versionchanged:: 1.7
            Permission :attr:`read_messages` is no longer part of the text permissions.
@@ -250,34 +250,29 @@ class Permissions(BaseFlags):
         return cls(0b111110010000000000001111111100001000000)
 
     @classmethod
-    def voice(cls: type[P]) -> P:
-        """A factory method that creates a :class:`Permissions` with all
-        "Voice" permissions from the official Discord UI set to ``True``.
-        """
+    def voice(cls) -> Self:
+        """A factory method that creates a :class:`Permissions` with all "Voice" permissions from the official Discord UI set to ``True``."""
         return cls(0b1001001001000000000000011111100000000001100000000)
 
     @classmethod
-    def stage(cls: type[P]) -> P:
-        """A factory method that creates a :class:`Permissions` with all
-        "Stage Channel" permissions from the official Discord UI set to ``True``.
+    def stage(cls) -> Self:
+        """A factory method that creates a :class:`Permissions` with all "Stage Channel" permissions from the official Discord UI set to ``True``.
 
         .. versionadded:: 1.7
         """
         return cls(1 << 32)
 
     @classmethod
-    def stage_moderator(cls: type[P]) -> P:
-        """A factory method that creates a :class:`Permissions` with all
-        "Stage Moderator" permissions from the official Discord UI set to ``True``.
+    def stage_moderator(cls) -> Self:
+        """A factory method that creates a :class:`Permissions` with all "Stage Moderator" permissions from the official Discord UI set to ``True``.
 
         .. versionadded:: 1.7
         """
         return cls(0b100000001010000000000000000000000)
 
     @classmethod
-    def advanced(cls: type[P]) -> P:
-        """A factory method that creates a :class:`Permissions` with all
-        "Advanced" permissions from the official Discord UI set to ``True``.
+    def advanced(cls) -> Self:
+        """A factory method that creates a :class:`Permissions` with all "Advanced" permissions from the official Discord UI set to ``True``.
 
         .. versionadded:: 1.7
         """
@@ -291,7 +286,7 @@ class Permissions(BaseFlags):
         listed. Extraneous key/value pairs will be silently ignored.
 
         Parameters
-        ------------
+        ----------
         \*\*kwargs
             A list of key/value pairs to bulk update permissions with.
         """
@@ -300,6 +295,15 @@ class Permissions(BaseFlags):
                 setattr(self, key, value)
 
     def handle_overwrite(self, allow: int, deny: int) -> None:
+        """Applies an allow/deny pair of raw permission values to this one.
+
+        Parameters
+        ----------
+        allow: :class:`int`
+            The raw value of the permissions to set.
+        deny: :class:`int`
+            The raw value of the permissions to clear.
+        """
         # Basically this is what's happening here.
         # We have an original bit array, e.g. 1010
         # Then we have another bit array that is 'denied', e.g. 1111
@@ -631,6 +635,22 @@ class Permissions(BaseFlags):
         return 1 << 42
 
     @flag_value
+    def create_guild_expressions(self) -> int:
+        """:class:`bool`: Returns ``True`` if a user can create emojis, stickers and soundboard sounds, and edit and delete those they created.
+
+        .. versionadded:: 3.0
+        """
+        return 1 << 43
+
+    @flag_value
+    def create_events(self) -> int:
+        """:class:`bool`: Returns ``True`` if a user can create scheduled events, and edit and delete those they created.
+
+        .. versionadded:: 3.0
+        """
+        return 1 << 44
+
+    @flag_value
     def use_external_sounds(self) -> int:
         """:class:`bool`: Returns ``True`` if a user can use external soundboard sounds in a voice channel.
 
@@ -665,6 +685,7 @@ class Permissions(BaseFlags):
     @flag_value
     def use_external_apps(self) -> int:
         """:class:`bool`: Returns ``True`` if a member's user-installed apps can show public responses.
+
         Users will still be able to use user-installed apps, but responses will be ephemeral.
 
         This only applies to apps that are also not installed to the guild.
@@ -693,9 +714,9 @@ class Permissions(BaseFlags):
 PO = TypeVar("PO", bound="PermissionOverwrite")
 
 
-def _augment_from_permissions(cls):
+def _augment_from_permissions(cls: type[PO]) -> type[PO]:
     cls.VALID_NAMES = set(Permissions.VALID_FLAGS)
-    aliases = set()
+    aliases: set[str] = set()
 
     # make descriptors for all the valid names and aliases
     for name, value in Permissions.__dict__.items():
@@ -708,10 +729,10 @@ def _augment_from_permissions(cls):
             continue
 
         # god bless Python
-        def getter(self, x=key):
+        def getter(self: PermissionOverwrite, x: str = key) -> bool | None:
             return self._values.get(x)
 
-        def setter(self, value, x=key):
+        def setter(self: PermissionOverwrite, value: bool | None, x: str = key) -> None:
             self._set(x, value)
 
         prop = property(getter, setter)
@@ -749,7 +770,7 @@ class PermissionOverwrite:
            Note that aliases are not shown.
 
     Parameters
-    -----------
+    ----------
     \*\*kwargs
         Set the value of permissions by their name.
     """
@@ -807,6 +828,8 @@ class PermissionOverwrite:
         start_embedded_activities: bool | None
         moderate_members: bool | None
         use_soundboard: bool | None
+        create_guild_expressions: bool | None
+        create_events: bool | None
         use_external_sounds: bool | None
         send_voice_messages: bool | None
         set_voice_channel_status: bool | None
@@ -814,7 +837,7 @@ class PermissionOverwrite:
         use_external_apps: bool | None
         pin_messages: bool | None
 
-    def __init__(self, **kwargs: bool | None):
+    def __init__(self, **kwargs: bool | None) -> None:
         self._values: dict[str, bool | None] = {}
 
         for key, value in kwargs.items():
@@ -823,8 +846,10 @@ class PermissionOverwrite:
 
             setattr(self, key, value)
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, PermissionOverwrite) and self._values == other._values
+
+    __hash__ = None  # pyright: ignore[reportAssignmentType]
 
     def _set(self, key: str, value: bool | None) -> None:
         if value not in (True, None, False):
@@ -839,7 +864,6 @@ class PermissionOverwrite:
 
     def pair(self) -> tuple[Permissions, Permissions]:
         """Returns the (allow, deny) pair from this overwrite."""
-
         allow = Permissions.none()
         deny = Permissions.none()
 
@@ -852,7 +876,7 @@ class PermissionOverwrite:
         return allow, deny
 
     @classmethod
-    def from_pair(cls: type[PO], allow: Permissions, deny: Permissions) -> PO:
+    def from_pair(cls, allow: Permissions, deny: Permissions) -> Self:
         """Creates an overwrite from an allow/deny pair of :class:`Permissions`."""
         ret = cls()
         for key, value in allow:
@@ -886,7 +910,7 @@ class PermissionOverwrite:
         listed. Extraneous key/value pairs will be silently ignored.
 
         Parameters
-        ------------
+        ----------
         \*\*kwargs
             A list of key/value pairs to bulk update with.
         """

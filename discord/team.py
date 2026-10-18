@@ -36,8 +36,7 @@ from .user import BaseUser
 
 if TYPE_CHECKING:
     from .state import ConnectionState
-    from .types.team import Team as TeamPayload
-    from .types.team import TeamMember as TeamMemberPayload
+    from .types.team import Team as TeamPayload, TeamMember as TeamMemberPayload
 
 __all__ = (
     "Team",
@@ -62,9 +61,9 @@ class Team:
         .. versionadded:: 1.3
     """
 
-    __slots__ = ("_state", "id", "name", "_icon", "owner_id", "members")
+    __slots__ = ("_icon", "_state", "id", "members", "name", "owner_id")
 
-    def __init__(self, state: ConnectionState, data: TeamPayload):
+    def __init__(self, state: ConnectionState, data: TeamPayload) -> None:
         self._state: ConnectionState = state
 
         self.id: int = int(data["id"])
@@ -142,9 +141,11 @@ class TeamMember(BaseUser):
         The role of the team member (e.g. admin, developer, read_only).
     """
 
-    __slots__ = ("team", "membership_state", "role")
+    __slots__ = ("membership_state", "role", "team")
 
-    def __init__(self, team: Team, state: ConnectionState, data: TeamMemberPayload):
+    def __init__(
+        self, team: Team, state: ConnectionState, data: TeamMemberPayload
+    ) -> None:
         self.team: Team = team
         self.membership_state: TeamMembershipState = try_enum(
             TeamMembershipState, data["membership_state"]
@@ -177,4 +178,11 @@ class TeamMember(BaseUser):
         "TeamMember.permissions is deprecated and will return an empty list. Use TeamMember.role instead."
     )
     def permissions(self) -> list[str]:
+        """The permissions of the member, always empty.
+
+        Returns
+        -------
+        List[:class:`str`]
+            An empty list.
+        """
         return []

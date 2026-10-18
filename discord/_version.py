@@ -25,25 +25,25 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import re
 import warnings
 from importlib.metadata import PackageNotFoundError, version
 
 from typing_extensions import TypedDict, deprecated
 
-__all__ = ("__version__", "VersionInfo", "version_info")
+__all__ = ("VersionInfo", "__version__", "version_info")
 
 from typing import Literal, NamedTuple
 
 try:
-    __version__ = version("py-cord")
+    __version__: str = version("py-cord")
 except PackageNotFoundError:
     # Package is not installed
     try:
-        from setuptools_scm import get_version  # type: ignore[import]
+        from setuptools_scm import get_version  # type: ignore[import-not-found]
 
-        __version__ = get_version()
+        __version__ = str(get_version())  # pyright: ignore[reportUnknownArgumentType]
     except ImportError:
         # setuptools_scm is not installed
         __version__ = "0.0.0"
@@ -58,13 +58,29 @@ except PackageNotFoundError:
 
 
 class AdvancedVersionInfo(TypedDict):
+    """The advanced version information of the library."""
+
     serial: int
     build: int | None
     commit: str | None
-    date: datetime.date | None
+    date: dt.date | None
 
 
 class VersionInfo(NamedTuple):
+    """A named tuple representing the library version.
+
+    Attributes
+    ----------
+    major: :class:`int`
+        The major version.
+    minor: :class:`int`
+        The minor version.
+    micro: :class:`int`
+        The micro version.
+    releaselevel: :class:`str`
+        The release level, one of ``alpha``, ``beta``, ``candidate`` or ``final``.
+    """
+
     major: int
     minor: int
     micro: int
@@ -74,12 +90,12 @@ class VersionInfo(NamedTuple):
     # global variable to store the advanced version info.
     @property
     def advanced(self) -> AdvancedVersionInfo:
-        return _advanced
+        """The advanced version information."""
+        return _advanced_holder[0]
 
     @advanced.setter
-    def advanced(self, value: object) -> None:
-        global _advanced
-        _advanced = value
+    def advanced(self, value: AdvancedVersionInfo) -> None:
+        _advanced_holder[0] = value
 
     @property
     @deprecated(
@@ -113,7 +129,7 @@ class VersionInfo(NamedTuple):
     @deprecated(
         'VersionInfo.date is deprecated since version 2.4, consider using .advanced["date"] instead.'
     )
-    def date(self) -> datetime.date | None:
+    def date(self) -> dt.date | None:
         return self.advanced["date"]
 
 
@@ -141,8 +157,9 @@ elif raw_info["level"] is None:
 else:
     raise RuntimeError("Invalid release level")
 
+date_info: dt.date | None
 if (raw_date := raw_info["date"] or raw_info["date1"]) is not None:
-    date_info = datetime.date(
+    date_info = dt.date(
         int(raw_date[:4]),
         int(raw_date[4:6]),
         int(raw_date[6:]),
@@ -151,15 +168,17 @@ else:
     date_info = None
 
 version_info: VersionInfo = VersionInfo(
-    major=int(raw_info["major"] or 0) or None,
-    minor=int(raw_info["minor"] or 0) or None,
-    micro=int(raw_info["patch"] or 0) or None,
+    major=int(raw_info["major"] or 0),
+    minor=int(raw_info["minor"] or 0),
+    micro=int(raw_info["patch"] or 0),
     releaselevel=level_info,
 )
 
-_advanced = AdvancedVersionInfo(
-    serial=raw_info["serial"],
-    build=int(raw_info["build"] or 0) or None,
-    commit=raw_info["commit"],
-    date=date_info,
-)
+_advanced_holder: list[AdvancedVersionInfo] = [
+    AdvancedVersionInfo(
+        serial=int(raw_info["serial"] or 0),
+        build=int(raw_info["build"] or 0) or None,
+        commit=raw_info["commit"],
+        date=date_info,
+    )
+]

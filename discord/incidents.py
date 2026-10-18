@@ -24,12 +24,13 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import datetime
 from typing import TYPE_CHECKING
 
 from .utils import parse_time
 
 if TYPE_CHECKING:
+    import datetime as dt
+
     from .types.guild import IncidentsData as IncidentsDataPayload
 
 __all__ = ("IncidentsData",)
@@ -51,30 +52,37 @@ class IncidentsData:
     """
 
     __slots__ = (
-        "invites_disabled_until",
-        "dms_disabled_until",
         "dm_spam_detected_at",
+        "dms_disabled_until",
+        "invites_disabled_until",
         "raid_detected_at",
     )
 
-    def __init__(self, data: IncidentsDataPayload):
-        self.invites_disabled_until: datetime.datetime | None = parse_time(
+    def __init__(self, data: IncidentsDataPayload) -> None:
+        self.invites_disabled_until: dt.datetime | None = parse_time(
             data.get("invites_disabled_until")
         )
 
-        self.dms_disabled_until: datetime.datetime | None = parse_time(
+        self.dms_disabled_until: dt.datetime | None = parse_time(
             data.get("dms_disabled_until")
         )
 
-        self.dm_spam_detected_at: datetime.datetime | None = parse_time(
+        self.dm_spam_detected_at: dt.datetime | None = parse_time(
             data.get("dm_spam_detected_at")
         )
 
-        self.raid_detected_at: datetime.datetime | None = parse_time(
+        self.raid_detected_at: dt.datetime | None = parse_time(
             data.get("raid_detected_at")
         )
 
     def to_dict(self) -> IncidentsDataPayload:
+        """Convert this object to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The payload.
+        """
         return {
             "invites_disabled_until": self.invites_disabled_until
             and self.invites_disabled_until.isoformat(),

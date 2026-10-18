@@ -22,19 +22,22 @@ A changelog for versions prior to v2.0 can be found [here](old_changelog.rst).
 
 
 # Only write if it's changed to avoid recompiling the docs
-def write_new():
-    with open(new_changelog, "w", encoding="utf-8") as fw:
-        fw.write(CHANGELOG_TEXT)
+def write_if_changed(path, text):
+    try:
+        with open(path, encoding="utf-8") as f:
+            if f.read() == text:
+                return
+    except FileNotFoundError:
+        pass
+    with open(path, "w", encoding="utf-8") as fw:
+        fw.write(text)
 
 
-try:
-    c_file = open(new_changelog, encoding="utf-8")
-except FileNotFoundError:
-    write_new()
-else:
-    if c_file.read() != CHANGELOG_TEXT:
-        write_new()
-    c_file.close()
+write_if_changed(new_changelog, CHANGELOG_TEXT)
+
+# CHANGES.md (differences between pycord and pycord-next) is included the same way
+with open(os.path.join(os.path.dirname(__file__), "..", "CHANGES.md"), encoding="utf-8") as f:
+    write_if_changed(os.path.join(os.path.dirname(__file__), "changes.md"), f.read())
 
 sys.path.insert(0, os.path.abspath(".."))
 sys.path.append(os.path.abspath("extensions"))
@@ -55,6 +58,7 @@ extensions = [
     "attributetable",
     "resourcelinks",
     "nitpick_file_ignorer",
+    "documented_properties",
     "myst_parser",
     "sphinx_copybutton",
     "sphinxext.opengraph",
@@ -298,7 +302,11 @@ linkcheck_exclude_documents = [
 linkcheck_anchors_ignore_for_url = [r"https://github.com/Delitefully/DiscordLists"]
 
 modindex_common_prefix = ["discord."]
-suppress_warnings = ["autosectionlabel.*"]
+suppress_warnings = [
+    "autosectionlabel.*",
+    # CommandPrefix is a type alias defined under TYPE_CHECKING only
+    "sphinx_autodoc_typehints.forward_reference",
+]
 myst_enable_extensions = [
     "amsmath",
     "attrs_inline",

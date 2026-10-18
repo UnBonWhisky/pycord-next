@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from . import utils
 from .enums import (
@@ -40,23 +40,28 @@ from .mixins import Hashable
 from .object import Object
 
 __all__ = (
-    "AutoModRule",
     "AutoModAction",
     "AutoModActionMetadata",
+    "AutoModRule",
     "AutoModTriggerMetadata",
 )
 
 if TYPE_CHECKING:
+    from typing_extensions import Self
+
     from .abc import Snowflake
     from .channel import ForumChannel, TextChannel, VoiceChannel
     from .guild import Guild
     from .member import Member
     from .role import Role
     from .state import ConnectionState
-    from .types.automod import AutoModAction as AutoModActionPayload
-    from .types.automod import AutoModActionMetadata as AutoModActionMetadataPayload
-    from .types.automod import AutoModRule as AutoModRulePayload
-    from .types.automod import AutoModTriggerMetadata as AutoModTriggerMetadataPayload
+    from .types.automod import (
+        AutoModAction as AutoModActionPayload,
+        AutoModActionMetadata as AutoModActionMetadataPayload,
+        AutoModRule as AutoModRulePayload,
+        AutoModTriggerMetadata as AutoModTriggerMetadataPayload,
+        EditAutoModRule,
+    )
 
 MISSING = utils.MISSING
 
@@ -86,8 +91,8 @@ class AutoModActionMetadata:
 
     __slots__ = (
         "channel_id",
-        "timeout_duration",
         "custom_message",
+        "timeout_duration",
     )
 
     def __init__(
@@ -95,13 +100,20 @@ class AutoModActionMetadata:
         channel_id: int = MISSING,
         timeout_duration: timedelta = MISSING,
         custom_message: str = MISSING,
-    ):
+    ) -> None:
         self.channel_id: int = channel_id
         self.timeout_duration: timedelta = timeout_duration
         self.custom_message: str = custom_message
 
-    def to_dict(self) -> dict:
-        data = {}
+    def to_dict(self) -> AutoModActionMetadataPayload:
+        """Convert this object to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The payload.
+        """
+        data: dict[str, Any] = {}
 
         if self.channel_id is not MISSING:
             data["channel_id"] = self.channel_id
@@ -112,11 +124,23 @@ class AutoModActionMetadata:
         if self.custom_message is not MISSING:
             data["custom_message"] = self.custom_message
 
-        return data
+        return cast("AutoModActionMetadataPayload", data)
 
     @classmethod
-    def from_dict(cls, data: AutoModActionMetadataPayload):
-        kwargs = {}
+    def from_dict(cls, data: AutoModActionMetadataPayload) -> Self:
+        """Create the object from a payload sent by Discord.
+
+        Parameters
+        ----------
+        data: :class:`dict`
+            The payload.
+
+        Returns
+        -------
+        :class:`AutoModActionMetadata`
+            The new object.
+        """
+        kwargs: dict[str, Any] = {}
 
         if (channel_id := data.get("channel_id")) is not None:
             kwargs["channel_id"] = int(channel_id)
@@ -136,12 +160,11 @@ class AutoModActionMetadata:
             "timeout_duration",
             "custom_message",
         )
-        inner = []
-
-        for attr in repr_attrs:
-            if (value := getattr(self, attr)) is not MISSING:
-                inner.append(f"{attr}={value}")
-        inner = " ".join(inner)
+        inner = " ".join(
+            f"{attr}={value}"
+            for attr in repr_attrs
+            if (value := getattr(self, attr)) is not MISSING
+        )
 
         return f"<AutoModActionMetadata {inner}>"
 
@@ -162,22 +185,46 @@ class AutoModAction:
     # note that AutoModActionType.timeout is only valid for trigger type 1?
 
     __slots__ = (
-        "type",
         "metadata",
+        "type",
     )
 
-    def __init__(self, action_type: AutoModActionType, metadata: AutoModActionMetadata):
+    def __init__(
+        self, action_type: AutoModActionType, metadata: AutoModActionMetadata
+    ) -> None:
         self.type: AutoModActionType = action_type
         self.metadata: AutoModActionMetadata = metadata
 
-    def to_dict(self) -> dict:
-        return {
-            "type": self.type.value,
-            "metadata": self.metadata.to_dict(),
-        }
+    def to_dict(self) -> AutoModActionPayload:
+        """Convert this object to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The payload.
+        """
+        return cast(
+            "AutoModActionPayload",
+            {
+                "type": self.type.value,
+                "metadata": self.metadata.to_dict(),
+            },
+        )
 
     @classmethod
-    def from_dict(cls, data: AutoModActionPayload):
+    def from_dict(cls, data: AutoModActionPayload) -> Self:
+        """Create the object from a payload sent by Discord.
+
+        Parameters
+        ----------
+        data: :class:`dict`
+            The payload.
+
+        Returns
+        -------
+        :class:`object`
+            The new object.
+        """
         return cls(
             try_enum(AutoModActionType, data["type"]),
             AutoModActionMetadata.from_dict(data["metadata"]),
@@ -238,11 +285,11 @@ class AutoModTriggerMetadata:
     """
 
     __slots__ = (
-        "keyword_filter",
-        "regex_patterns",
-        "presets",
         "allow_list",
+        "keyword_filter",
         "mention_total_limit",
+        "presets",
+        "regex_patterns",
     )
 
     def __init__(
@@ -252,15 +299,22 @@ class AutoModTriggerMetadata:
         presets: list[AutoModKeywordPresetType] = MISSING,
         allow_list: list[str] = MISSING,
         mention_total_limit: int = MISSING,
-    ):
+    ) -> None:
         self.keyword_filter = keyword_filter
         self.regex_patterns = regex_patterns
         self.presets = presets
         self.allow_list = allow_list
         self.mention_total_limit = mention_total_limit
 
-    def to_dict(self) -> dict:
-        data = {}
+    def to_dict(self) -> AutoModTriggerMetadataPayload:
+        """Convert this object to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The payload.
+        """
+        data: dict[str, Any] = {}
 
         if self.keyword_filter is not MISSING:
             data["keyword_filter"] = self.keyword_filter
@@ -277,11 +331,23 @@ class AutoModTriggerMetadata:
         if self.mention_total_limit is not MISSING:
             data["mention_total_limit"] = self.mention_total_limit
 
-        return data
+        return cast("AutoModTriggerMetadataPayload", data)
 
     @classmethod
-    def from_dict(cls, data: AutoModTriggerMetadataPayload):
-        kwargs = {}
+    def from_dict(cls, data: AutoModTriggerMetadataPayload) -> Self:
+        """Create the object from a payload sent by Discord.
+
+        Parameters
+        ----------
+        data: :class:`dict`
+            The payload.
+
+        Returns
+        -------
+        :class:`AutoModTriggerMetadata`
+            The new object.
+        """
+        kwargs: dict[str, Any] = {}
 
         if (keyword_filter := data.get("keyword_filter")) is not None:
             kwargs["keyword_filter"] = keyword_filter
@@ -310,12 +376,11 @@ class AutoModTriggerMetadata:
             "allow_list",
             "mention_total_limit",
         )
-        inner = []
-
-        for attr in repr_attrs:
-            if (value := getattr(self, attr)) is not MISSING:
-                inner.append(f"{attr}={value}")
-        inner = " ".join(inner)
+        inner = " ".join(
+            f"{attr}={value}"
+            for attr in repr_attrs
+            if (value := getattr(self, attr)) is not MISSING
+        )
 
         return f"<AutoModTriggerMetadata {inner}>"
 
@@ -370,17 +435,17 @@ class AutoModRule(Hashable):
     __slots__ = (
         "__dict__",
         "_state",
-        "id",
-        "guild_id",
-        "name",
-        "creator_id",
-        "event_type",
-        "trigger_type",
-        "trigger_metadata",
         "actions",
+        "creator_id",
         "enabled",
-        "exempt_role_ids",
+        "event_type",
         "exempt_channel_ids",
+        "exempt_role_ids",
+        "guild_id",
+        "id",
+        "name",
+        "trigger_metadata",
+        "trigger_type",
     )
 
     def __init__(
@@ -388,7 +453,7 @@ class AutoModRule(Hashable):
         *,
         state: ConnectionState,
         data: AutoModRulePayload,
-    ):
+    ) -> None:
         self._state: ConnectionState = state
         self.id: int = int(data["id"])
         self.guild_id: int = int(data["guild_id"])
@@ -418,28 +483,51 @@ class AutoModRule(Hashable):
 
     @property
     def guild(self) -> Guild | None:
-        """The guild this rule belongs to."""
-        return self._state._get_guild(self.guild_id)
+        """The guild this rule belongs to.
+
+        This reads the in-process cache and raises :exc:`SyncCacheAccessError`
+        with a remote cache backend, use :meth:`get_guild` instead.
+        """
+        return self._state._guilds.get_nowait(self.guild_id)
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the cached guild this rule belongs to.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Optional[:class:`Guild`]
+            The guild, or ``None`` if it is not cached.
+        """
+        return await self._state._get_guild(self.guild_id)
 
     @property
     def creator(self) -> Member | None:
-        """The member who created this rule."""
-        if self.guild is None:
-            return None
-        return self.guild.get_member(self.creator_id)
+        """The member who created this rule.
+
+        This reads the in-process cache and raises :exc:`SyncCacheAccessError`
+        with a remote cache backend, use :meth:`get_creator` instead.
+        """
+        return self._state._guild_bucket("members", self.guild_id).get_nowait(
+            self.creator_id
+        )
 
     @cached_property
     def exempt_roles(self) -> list[Role | Object]:
-        """The roles that are exempt
-        from this rule.
+        """The roles that are exempt from this rule.
 
         If a role is not found in the guild's cache,
         then it will be returned as an :class:`Object`.
+
+        This reads the in-process cache and raises :exc:`SyncCacheAccessError`
+        with a remote cache backend, use :meth:`get_exempt_roles` instead.
         """
-        if self.guild is None:
-            return [Object(role_id) for role_id in self.exempt_role_ids]
+        bucket = self._state._guild_bucket("roles", self.guild_id)
         return [
-            self.guild.get_role(role_id) or Object(role_id)
+            bucket.get_nowait(role_id) or Object(role_id)
             for role_id in self.exempt_role_ids
         ]
 
@@ -451,11 +539,71 @@ class AutoModRule(Hashable):
 
         If a channel is not found in the guild's cache,
         then it will be returned as an :class:`Object`.
+
+        This reads the in-process cache and raises :exc:`SyncCacheAccessError`
+        with a remote cache backend, use :meth:`get_exempt_channels` instead.
         """
-        if self.guild is None:
-            return [Object(channel_id) for channel_id in self.exempt_channel_ids]
+        bucket = self._state._guild_bucket("channels", self.guild_id)
         return [
-            self.guild.get_channel(channel_id) or Object(channel_id)
+            bucket.get_nowait(channel_id) or Object(channel_id)
+            for channel_id in self.exempt_channel_ids
+        ]
+
+    async def get_creator(self) -> Member | None:
+        """|coro|
+
+        Returns the cached member who created this rule.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Optional[:class:`Member`]
+            The member, or ``None`` if they are not cached.
+        """
+        return await self._state._get_member(self.guild_id, self.creator_id)
+
+    async def get_exempt_roles(self) -> list[Role | Object]:
+        """|coro|
+
+        Returns the roles that are exempt from this rule.
+
+        If a role is not found in the guild's cache,
+        then it will be returned as an :class:`Object`.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        List[Union[:class:`Role`, :class:`Object`]]
+            The exempt roles.
+        """
+        bucket = self._state._guild_bucket("roles", self.guild_id)
+        return [
+            await bucket.get(role_id) or Object(role_id)
+            for role_id in self.exempt_role_ids
+        ]
+
+    async def get_exempt_channels(
+        self,
+    ) -> list[TextChannel | ForumChannel | VoiceChannel | Object]:
+        """|coro|
+
+        Returns the channels that are exempt from this rule.
+
+        If a channel is not found in the guild's cache,
+        then it will be returned as an :class:`Object`.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        List[Union[:class:`TextChannel`, :class:`ForumChannel`, :class:`VoiceChannel`, :class:`Object`]]
+            The exempt channels.
+        """
+        bucket = self._state._guild_bucket("channels", self.guild_id)
+        return [
+            await bucket.get(channel_id) or Object(channel_id)
             for channel_id in self.exempt_channel_ids
         ]
 
@@ -529,7 +677,7 @@ class AutoModRule(Hashable):
             The operation failed.
         """
         http = self._state.http
-        payload = {}
+        payload: dict[str, Any] = {}
 
         if name is not MISSING:
             payload["name"] = name
@@ -555,6 +703,10 @@ class AutoModRule(Hashable):
 
         if payload:
             data = await http.edit_auto_moderation_rule(
-                self.guild_id, self.id, payload, reason=reason
+                self.guild_id,
+                self.id,
+                cast("EditAutoModRule", payload),
+                reason=reason,
             )
             return AutoModRule(state=self._state, data=data)
+        return None

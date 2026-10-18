@@ -1,0 +1,1 @@
+aiocache[memcached]>=0.12.3,<0.13

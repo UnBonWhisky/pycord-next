@@ -25,17 +25,17 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, SupportsInt, Union
+from typing import TYPE_CHECKING, SupportsInt
 
 from . import utils
 from .mixins import Hashable
 
 if TYPE_CHECKING:
-    import datetime
+    import datetime as dt
 
     from .abc import Snowflake
 
-    SupportsIntCast = Union[SupportsInt, str, bytes, bytearray]
+    SupportsIntCast = SupportsInt | str | bytes | bytearray
 
 __all__ = ("Object",)
 
@@ -76,7 +76,14 @@ class Object(Hashable):
         The model this object's ID is based off.
     """
 
-    def __init__(self, id: SupportsIntCast, type: type[Snowflake] = utils.MISSING):
+    __slots__ = (
+        "id",
+        "type",
+    )
+
+    def __init__(
+        self, id: SupportsIntCast, type: type[Snowflake] = utils.MISSING
+    ) -> None:
         try:
             id = int(id)
         except ValueError:
@@ -91,7 +98,7 @@ class Object(Hashable):
         return f"<Object id={self.id!r}>"
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """Returns the snowflake's creation time in UTC."""
         return utils.snowflake_time(self.id)
 

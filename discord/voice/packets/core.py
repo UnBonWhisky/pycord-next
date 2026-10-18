@@ -46,14 +46,14 @@ class Packet:
         ssrc: int
         sequence: int
         timestamp: int
-        type: int
-        decrypted_data: bytes
+        type: int | None
+        decrypted_data: bytes | None
 
     def __init__(self, data: bytes) -> None:
         self.data: bytes = data
 
     def __repr__(self) -> str:
-        return f"<{self.__class__.__name__}> data={len(self.data)} bytes>"
+        return f"<{self.__class__.__name__} data={len(self.data)} bytes>"
 
     def __bool__(self) -> bool:
         return bool(self.data)
@@ -86,6 +86,13 @@ class Packet:
         return self.sequence < other.sequence and self.timestamp < other.timestamp
 
     def is_silence(self) -> bool:
+        """Check whether this packet contains an opus silence frame.
+
+        Returns
+        -------
+        :class:`bool`
+            Whether the packet is a silence packet.
+        """
         data = getattr(self, "decrypted_data", None)
         return data == OPUS_SILENCE
 

@@ -22,6 +22,8 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 import argparse
 import pathlib
 import re
@@ -50,12 +52,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def find_unreleased_section(text: str) -> tuple[int, int]:
-    match = re.search(r"^## \[Unreleased\]\s*", text, flags=re.M)
+    match = re.search(r"^## \[Unreleased\]\s*", text, flags=re.MULTILINE)
     if not match:
         sys.exit("Missing '## [Unreleased]' heading in changelog.")
     start = match.start()
     after = match.end()
-    next_header = re.search(r"^## \[", text[after:], flags=re.M)
+    next_header = re.search(r"^## \[", text[after:], flags=re.MULTILINE)
     end = after + next_header.start() if next_header else len(text)
     return start, end
 
@@ -143,11 +145,11 @@ def update_links(
         f"[{version}]: https://github.com/{repository}/compare/{base_tag}...v{version}"
     )
 
-    updated = re.sub(r"^\[unreleased\]: .*", unreleased_link, text, flags=re.M)
+    updated = re.sub(r"^\[unreleased\]: .*", unreleased_link, text, flags=re.MULTILINE)
 
-    if re.search(rf"^\[{re.escape(version)}\]: ", updated, flags=re.M):
+    if re.search(rf"^\[{re.escape(version)}\]: ", updated, flags=re.MULTILINE):
         updated = re.sub(
-            rf"^\[{re.escape(version)}\]: .*", release_link, updated, flags=re.M
+            rf"^\[{re.escape(version)}\]: .*", release_link, updated, flags=re.MULTILINE
         )
     else:
 
@@ -158,7 +160,7 @@ def update_links(
             r"^\[unreleased\]: .*$",
             insert_after_unreleased,
             updated,
-            flags=re.M,
+            flags=re.MULTILINE,
             count=1,
         )
         if new_updated == updated:
@@ -184,7 +186,7 @@ def main() -> None:
 
     rc_bodies: list[str] = []
     if "rc" not in args.version:
-        section_pattern = re.compile(r"^## \[(?P<title>[^\]]+)\][^\n]*\n", re.M)
+        section_pattern = re.compile(r"^## \[(?P<title>[^\]]+)\][^\n]*\n", re.MULTILINE)
         matches = list(section_pattern.finditer(rest))
         base_prefix = f"{args.version}rc"
 

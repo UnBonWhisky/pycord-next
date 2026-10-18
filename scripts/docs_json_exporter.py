@@ -22,8 +22,11 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 import json
 import os
+from pathlib import Path
 
 from bs4 import BeautifulSoup
 
@@ -40,7 +43,7 @@ folders = [
 result = {}
 try:
     for folder in folders:
-        if not os.path.isdir(folder):
+        if not Path(folder).is_dir():
             log(f"Skipping missing folder: {folder}")
             continue
         base_html = os.path.normpath("docs/_build/html")
@@ -51,8 +54,8 @@ try:
             for html_file in files:
                 if not html_file.endswith(".html"):
                     continue
-                file_path = os.path.join(root, html_file)
-                with open(file_path, encoding="utf-8") as f:
+                file_path = Path(root) / html_file
+                with file_path.open(encoding="utf-8") as f:
                     soup = BeautifulSoup(f, "html.parser")
                     page_index = {}
                     for class_dl in soup.find_all("dl", class_="class"):
@@ -82,7 +85,7 @@ try:
                         page_index[func_name] = []
                     result[rel_dir][html_file] = page_index
     cleaned_result = {k: v for k, v in result.items() if v}
-    with open("docs.json", "w", encoding="utf-8") as out:
+    with Path("docs.json").open("w", encoding="utf-8") as out:
         json.dump(cleaned_result, out, indent=2, ensure_ascii=False)
     log("Exported docs to docs.json")
     log("To upload as artifact: docs.json")

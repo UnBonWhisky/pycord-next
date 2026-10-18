@@ -24,16 +24,21 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from typing_extensions import override
 
 from ..components import Checkbox as CheckboxComponent
 from ..enums import ComponentType
+from ._fields import Field, custom_id_checks, new_custom_id, type_check
 from .item import ModalItem
 
 __all__ = ("Checkbox",)
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from ..components import Component
     from ..interactions import Interaction
     from ..types.components import CheckboxComponent as CheckboxComponentPayload
 
@@ -47,8 +52,8 @@ class Checkbox(ModalItem):
     ----------
     custom_id: Optional[:class:`str`]
         The ID of the checkbox that gets received during an interaction.
-    default: Optional[:class:`bool`]
-        Whether this checkbox is selected by default or not.
+    default: :class:`bool`
+        Whether this checkbox is selected by default or not. Defaults to ``False``.
     id: Optional[:class:`int`]
         The checkbox's ID.
     """
@@ -59,78 +64,55 @@ class Checkbox(ModalItem):
         "id",
     )
 
+    __component__ = CheckboxComponent
+    __component_type__ = ComponentType.checkbox
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> CheckboxComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    custom_id: Field[str] = Field(
+        "The custom id that gets received during an interaction.",
+        *custom_id_checks,
+        default=new_custom_id,
+    )
+    default: Field[bool] = Field(
+        "Whether this checkbox is selected by default or not. Defaults to ``False``",
+        type_check(bool),
+    )
+
     def __init__(
         self,
         *,
         custom_id: str | None = None,
-        default: bool = False,
+        default: bool | None = False,
         id: int | None = None,
-    ):
+    ) -> None:
         super().__init__()
-        if custom_id is not None and not isinstance(custom_id, str):
-            raise TypeError(
-                f"expected custom_id to be str, not {custom_id.__class__.__name__}"
-            )
-        if not isinstance(default, bool):
-            raise TypeError(f"default must be bool, not {default.__class__.__name__}")
-        custom_id = os.urandom(16).hex() if custom_id is None else custom_id
         self._value: bool | None = None
 
-        self._underlying: CheckboxComponent = self._generate_underlying(
-            custom_id=custom_id,
-            default=default,
-            id=id,
-        )
-
-    def _generate_underlying(
-        self,
-        custom_id: str | None = None,
-        default: bool | None = None,
-        id: int | None = None,
-    ) -> CheckboxComponent:
-        super()._generate_underlying(CheckboxComponent)
-        return CheckboxComponent._raw_construct(
-            type=ComponentType.checkbox,
-            custom_id=custom_id or self.custom_id,
-            default=default if default is not None else self.default,
-            id=id or self.id,
-        )
-
-    @property
-    def custom_id(self) -> str:
-        """The custom id that gets received during an interaction."""
-        return self.underlying.custom_id
-
-    @custom_id.setter
-    def custom_id(self, value: str):
-        if not isinstance(value, str):
-            raise TypeError(f"custom_id must be str not {value.__class__.__name__}")
-        if len(value) > 100:
-            raise ValueError("custom_id must be 100 characters or fewer")
-        self.underlying.custom_id = value
-
-    @property
-    def default(self) -> bool:
-        """Whether this checkbox is selected by default or not. Defaults to ``False``"""
-        return self.underlying.default
-
-    @default.setter
-    def default(self, value: bool):
-        if not isinstance(value, bool):
-            raise TypeError(f"default must be bool, not {value.__class__.__name__}")
-        self.underlying.default = bool(value)
+        self._build_underlying(custom_id=custom_id, default=default, id=id)
 
     @property
     def value(self) -> bool | None:
         """Whether this checkbox was selected or not by the user. This will be ``None`` if the checkbox has not been submitted via a modal yet."""
         return self._value
 
+    @override
     def to_component_dict(self) -> CheckboxComponentPayload:
         return self.underlying.to_dict()
 
-    def refresh_state(self, data) -> None:
+    @override
+    def refresh_state(self, data: Mapping[str, Any]) -> None:
         self._value = data.get("value", None)
 
+    @override
     def refresh_from_modal(
         self, interaction: Interaction, data: CheckboxComponentPayload
     ) -> None:

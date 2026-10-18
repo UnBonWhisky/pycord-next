@@ -1,5 +1,5 @@
+import asyncio
 import random
-from asyncio import TimeoutError
 
 import discord
 
@@ -43,7 +43,7 @@ async def guess_number(ctx: discord.ApplicationContext):
         guess: discord.Message = await bot.wait_for(
             "message", check=is_valid_guess, timeout=5.0
         )
-    except TimeoutError:
+    except asyncio.TimeoutError:
         return await ctx.send_followup(f"Sorry, you took too long it was {answer}.")
 
     if int(guess.content) == answer:

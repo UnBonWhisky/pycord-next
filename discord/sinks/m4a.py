@@ -22,12 +22,15 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 import io
-import os
 import subprocess
 import time
+from pathlib import Path
+from typing import Any
 
-from .core import CREATE_NO_WINDOW, Filters, Sink, default_filters
+from .core import CREATE_NO_WINDOW, AudioData, Filters, Sink, default_filters
 from .errors import M4ASinkError
 
 
@@ -35,19 +38,24 @@ class M4ASink(Sink):
     """A special sink for .m4a files.
 
     .. versionadded:: 2.0
+
+    Parameters
+    ----------
+    filters: dict[:class:`str`, Any] | None
+        The filters of the sink, see :class:`~discord.sinks.Filters`.
     """
 
-    def __init__(self, *, filters=None):
+    def __init__(self, *, filters: dict[str, Any] | None = None) -> None:
         if filters is None:
             filters = default_filters
         self.filters = filters
         Filters.__init__(self, **self.filters)
 
-        self.encoding = "m4a"
+        self.encoding: str = "m4a"
         self.vc = None
         self.audio_data = {}
 
-    def format_audio(self, audio):
+    def format_audio(self, audio: AudioData) -> None:
         """Formats the recorded audio.
 
         Raises
@@ -57,11 +65,11 @@ class M4ASink(Sink):
         M4ASinkError
             Formatting the audio failed.
         """
-        if self.vc.recording:
+        if self.recording:
             raise M4ASinkError(
                 "Audio may only be formatted after recording is finished."
             )
-        m4a_file = f"{time.time()}.tmp"
+        m4a_file = Path(f"{time.time()}.tmp")
         args = [
             "ffmpeg",
             "-f",
@@ -76,12 +84,10 @@ class M4ASink(Sink):
             "-",
             "-f",
             "ipod",
-            m4a_file,
+            str(m4a_file),
         ]
-        if os.path.exists(m4a_file):
-            os.remove(
-                m4a_file
-            )  # process will get stuck asking whether to overwrite, if file already exists.
+        if m4a_file.exists():
+            m4a_file.unlink()  # process will get stuck asking whether to overwrite, if file already exists.
         try:
             process = subprocess.Popen(
                 args, creationflags=CREATE_NO_WINDOW, stdin=subprocess.PIPE
@@ -90,14 +96,14 @@ class M4ASink(Sink):
             raise M4ASinkError("ffmpeg was not found.") from None
         except subprocess.SubprocessError as exc:
             raise M4ASinkError(
-                "Popen failed: {0.__class__.__name__}: {0}".format(exc)
+                f"Popen failed: {exc.__class__.__name__}: {exc}"
             ) from exc
 
         process.communicate(audio.file.read())
 
-        with open(m4a_file, "rb") as f:
+        with m4a_file.open("rb") as f:
             audio.file = io.BytesIO(f.read())
             audio.file.seek(0)
-        os.remove(m4a_file)
+        m4a_file.unlink()
 
         audio.on_format(self.encoding)

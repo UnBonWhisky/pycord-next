@@ -24,17 +24,29 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
+
+from typing_extensions import override
 
 from ..components import FileUpload as FileUploadComponent
 from ..enums import ComponentType
+from ..limits import ComponentLimits
 from ..message import Attachment
+from ._fields import (
+    Field,
+    custom_id_checks,
+    in_range,
+    new_custom_id,
+    type_check,
+)
 from .item import ModalItem
 
 __all__ = ("FileUpload",)
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from ..components import Component
     from ..interactions import Interaction
     from ..types.components import FileUploadComponent as FileUploadComponentPayload
 
@@ -54,7 +66,7 @@ class FileUpload(ModalItem):
     max_values: Optional[:class:`int`]
         The maximum number of files that can be uploaded.
         Must be between 1 and 10, inclusive.
-    required: Optional[:class:`bool`]
+    required: :class:`bool`
         Whether the file upload field is required or not. Defaults to ``True``.
     id: Optional[:class:`int`]
         The file upload field's ID.
@@ -68,6 +80,47 @@ class FileUpload(ModalItem):
         "id",
     )
 
+    __component__ = FileUploadComponent
+    __component_type__ = ComponentType.file_upload
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> FileUploadComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    custom_id: Field[str] = Field(
+        "The custom id that gets received during an interaction.",
+        *custom_id_checks,
+        default=new_custom_id,
+    )
+    min_values: Field[int | None] = Field(
+        "The minimum number of files that must be uploaded. Defaults to 0.",
+        type_check(int, nullable=True),
+        in_range(
+            ComponentLimits.FILE_UPLOAD_MIN_VALUES_MIN,
+            ComponentLimits.FILE_UPLOAD_MIN_VALUES_MAX,
+            skip_falsy=True,
+        ),
+    )
+    max_values: Field[int | None] = Field(
+        "The maximum number of files that can be uploaded.",
+        type_check(int, nullable=True),
+        in_range(
+            ComponentLimits.FILE_UPLOAD_MAX_VALUES_MIN,
+            ComponentLimits.FILE_UPLOAD_MAX_VALUES_MAX,
+            skip_falsy=True,
+        ),
+    )
+    required: Field[bool] = Field(
+        "Whether the input file upload is required or not. Defaults to ``True``.",
+        type_check(bool),
+    )
+
     def __init__(
         self,
         *,
@@ -76,22 +129,11 @@ class FileUpload(ModalItem):
         max_values: int | None = None,
         required: bool = True,
         id: int | None = None,
-    ):
+    ) -> None:
         super().__init__()
-        if min_values and (min_values < 0 or min_values > 10):
-            raise ValueError("min_values must be between 0 and 10")
-        if max_values and (max_values < 1 or max_values > 10):
-            raise ValueError("max_values must be between 1 and 10")
-        if custom_id is not None and not isinstance(custom_id, str):
-            raise TypeError(
-                f"expected custom_id to be str, not {custom_id.__class__.__name__}"
-            )
-        if not isinstance(required, bool):
-            raise TypeError(f"required must be bool not {required.__class__.__name__}")  # type: ignore
-        custom_id = os.urandom(16).hex() if custom_id is None else custom_id
         self._attachments: list[Attachment] | None = None
 
-        self._underlying: FileUploadComponent = self._generate_underlying(
+        self._build_underlying(
             custom_id=custom_id,
             min_values=min_values,
             max_values=max_values,
@@ -99,101 +141,25 @@ class FileUpload(ModalItem):
             id=id,
         )
 
-    def _generate_underlying(
-        self,
-        custom_id: str | None = None,
-        min_values: int | None = None,
-        max_values: int | None = None,
-        required: bool | None = None,
-        id: int | None = None,
-    ) -> FileUploadComponent:
-        super()._generate_underlying(FileUploadComponent)
-        return FileUploadComponent._raw_construct(
-            type=ComponentType.file_upload,
-            custom_id=custom_id or self.custom_id,
-            min_values=min_values if min_values is not None else self.min_values,
-            max_values=max_values if max_values is not None else self.max_values,
-            required=required if required is not None else self.required,
-            id=id or self.id,
-        )
-
-    @property
-    def custom_id(self) -> str:
-        """The custom id that gets received during an interaction."""
-        return self.underlying.custom_id
-
-    @custom_id.setter
-    def custom_id(self, value: str):
-        if not isinstance(value, str):
-            raise TypeError(f"custom_id must be str not {value.__class__.__name__}")
-        if len(value) > 100:
-            raise ValueError("custom_id must be 100 characters or fewer")
-        self.underlying.custom_id = value
-
-    @property
-    def min_values(self) -> int | None:
-        """The minimum number of files that must be uploaded. Defaults to 0."""
-        return self.underlying.min_values
-
-    @min_values.setter
-    def min_values(self, value: int | None):
-        if value and not isinstance(value, int):
-            raise TypeError(f"min_values must be None or int not {value.__class__.__name__}")  # type: ignore
-        if value and (value < 0 or value > 10):
-            raise ValueError("min_values must be between 0 and 10")
-        self.underlying.min_values = value
-
-    @property
-    def max_values(self) -> int | None:
-        """The maximum number of files that can be uploaded."""
-        return self.underlying.max_values
-
-    @max_values.setter
-    def max_values(self, value: int | None):
-        if value and not isinstance(value, int):
-            raise TypeError(f"max_values must be None or int not {value.__class__.__name__}")  # type: ignore
-        if value and (value < 1 or value > 10):
-            raise ValueError("max_values must be between 1 and 10")
-        self.underlying.max_values = value
-
-    @property
-    def required(self) -> bool:
-        """Whether the input file upload is required or not. Defaults to ``True``."""
-        return self.underlying.required
-
-    @required.setter
-    def required(self, value: bool):
-        if not isinstance(value, bool):
-            raise TypeError(f"required must be bool not {value.__class__.__name__}")  # type: ignore
-        self.underlying.required = bool(value)
-
     @property
     def values(self) -> list[Attachment] | None:
         """The files that were uploaded to the field. This will be ``None`` if the file upload has not been submitted via a modal yet."""
         return self._attachments
 
+    @override
     def to_component_dict(self) -> FileUploadComponentPayload:
         return self.underlying.to_dict()
 
-    def refresh_from_modal(self, interaction: Interaction, data: dict) -> None:
+    @override
+    def refresh_from_modal(
+        self, interaction: Interaction, data: Mapping[str, Any]
+    ) -> None:
         values = data.get("values", [])
+        resolved = cast("Mapping[str, Any]", interaction.data)["resolved"]
         self._attachments = [
             Attachment(
                 state=interaction._state,
-                data=interaction.data["resolved"]["attachments"][attachment_id],
+                data=resolved["attachments"][attachment_id],
             )
             for attachment_id in values
         ]
-
-    @classmethod
-    def from_component(
-        cls: type[FileUpload], component: FileUploadComponent
-    ) -> FileUpload:
-
-        return cls(
-            custom_id=component.custom_id,
-            min_values=component.min_values,
-            max_values=component.max_values,
-            required=component.required,
-            id=component.id,
-        )

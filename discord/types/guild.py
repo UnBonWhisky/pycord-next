@@ -30,12 +30,14 @@ from typing import Literal
 from typing_extensions import NotRequired, Required, TypedDict
 
 from .activity import PartialPresenceUpdate
-from .channel import GuildChannel
+from .channel import GuildChannel, StageInstance
 from .emoji import Emoji
-from .member import Member
+from .member import MemberWithUser
 from .role import Role
 from .scheduled_events import ScheduledEvent
 from .snowflake import Snowflake
+from .soundboard import SoundboardSound
+from .sticker import GuildSticker
 from .threads import Thread
 from .user import User
 from .voice import GuildVoiceState
@@ -69,9 +71,13 @@ GuildFeature = Literal[
     "CHANNEL_BANNER",
     "COMMERCE",
     "COMMUNITY",
+    "CREATOR_MONETIZABLE_PROVISIONAL",
+    "CREATOR_STORE_PAGE",
     "DEVELOPER_SUPPORT_SERVER",
     "DISCOVERABLE",
     "FEATURABLE",
+    "GUESTS_ENABLED",
+    "GUILD_TAGS",
     "HAS_DIRECTORY_ENTRY",
     "HUB",
     "INTERNAL_EMPLOYEE_ONLY",
@@ -90,7 +96,9 @@ GuildFeature = Literal[
     "PARTNERED",
     "PREMIUM_TIER_3_OVERRIDE",
     "PREVIEW_ENABLED",
+    "PRUNE_REQUIRES_ADMIN",
     "ROLE_ICONS",
+    "ROLE_SUBSCRIPTIONS_AVAILABLE_FOR_PURCHASE",
     "ROLE_SUBSCRIPTIONS_ENABLED",
     "RAID_ALERTS_DISABLED",
     "SEVEN_DAY_THREAD_ARCHIVE",
@@ -136,7 +144,7 @@ class Guild(_BaseGuildPreview):
     large: NotRequired[bool]
     member_count: NotRequired[int]
     voice_states: NotRequired[list[GuildVoiceState]]
-    members: NotRequired[list[Member]]
+    members: NotRequired[list[MemberWithUser]]
     channels: NotRequired[list[GuildChannel]]
     presences: NotRequired[list[PartialPresenceUpdate]]
     threads: NotRequired[list[Thread]]
@@ -146,6 +154,9 @@ class Guild(_BaseGuildPreview):
     premium_progress_bar_enabled: NotRequired[bool]
     max_video_channel_users: NotRequired[int]
     guild_scheduled_events: NotRequired[list[ScheduledEvent]]
+    stickers: NotRequired[list[GuildSticker]]
+    stage_instances: NotRequired[list[StageInstance]]
+    soundboard_sounds: NotRequired[list[SoundboardSound]]
     owner_id: Snowflake
     afk_channel_id: Snowflake | None
     afk_timeout: int
@@ -180,10 +191,11 @@ class GuildPrune(TypedDict):
 
 
 class ChannelPositionUpdate(TypedDict):
-    id: Snowflake
-    position: int | None
-    lock_permissions: bool | None
-    parent_id: Snowflake | None
+    id: Required[Snowflake]
+    position: NotRequired[int | None]
+    lock_permissions: NotRequired[bool | None]
+    parent_id: NotRequired[Snowflake | None]
+    flags: NotRequired[int | None]
 
 
 class RolePositionUpdate(TypedDict, total=False):

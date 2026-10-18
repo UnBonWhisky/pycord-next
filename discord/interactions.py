@@ -26,13 +26,13 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import asyncio
-import datetime
-from collections.abc import Coroutine
-from typing import TYPE_CHECKING, Any, Union, overload
+import contextlib
+from typing import TYPE_CHECKING, Any, cast, overload
 
 from typing_extensions import deprecated
 
 from . import utils
+from ._internal.cache_peek import cached_guild, cached_guild_channel
 from .channel import ChannelType, PartialMessageable, _threaded_channel_factory
 from .enums import (
     InteractionContextType,
@@ -43,11 +43,10 @@ from .enums import (
 from .errors import ClientException, InteractionResponded, InvalidArgument
 from .file import File, VoiceMessage
 from .flags import MessageFlags
-from .guild import Guild
+from .guild import Guild, PartialGuild
 from .member import Member
 from .message import Attachment, Message
 from .monetization import Entitlement
-from .object import Object
 from .permissions import Permissions
 from .user import User
 from .utils import warn_deprecated
@@ -59,18 +58,23 @@ from .webhook.async_ import (
 )
 
 __all__ = (
+    "AuthorizingIntegrationOwners",
     "Interaction",
+    "InteractionCallback",
+    "InteractionCallbackActivityInstanceResource",
     "InteractionMessage",
+    "InteractionMetadata",
     "InteractionResponse",
     "MessageInteraction",
-    "InteractionMetadata",
-    "AuthorizingIntegrationOwners",
-    "InteractionCallback",
 )
 
 if TYPE_CHECKING:
+    import datetime as dt
+    from collections.abc import Coroutine, Mapping
+
     from aiohttp import ClientSession
 
+    from .abc import MessageableChannel
     from .channel import (
         CategoryChannel,
         DMChannel,
@@ -83,31 +87,50 @@ if TYPE_CHECKING:
     from .client import Client
     from .commands import ApplicationCommand, OptionChoice
     from .embeds import Embed
+    from .http import HTTPClient
     from .mentions import AllowedMentions
     from .poll import Poll
     from .state import ConnectionState
     from .threads import Thread
-    from .types.interactions import Interaction as InteractionPayload
-    from .types.interactions import InteractionCallback as InteractionCallbackPayload
-    from .types.interactions import InteractionCallbackResponse, InteractionData
-    from .types.interactions import InteractionMetadata as InteractionMetadataPayload
-    from .types.interactions import MessageInteraction as MessageInteractionPayload
+    from .types.interaction_metadata import (
+        InteractionMetadata as InteractionMetadataPayload,
+        MessageInteraction as MessageInteractionPayload,
+    )
+    from .types.interactions import (
+        Interaction as InteractionPayload,
+        InteractionCallback as InteractionCallbackPayload,
+        InteractionCallbackActivityInstance as InteractionCallbackActivityInstancePayload,
+        InteractionCallbackResponse,
+        InteractionData,
+    )
+    from .types.message import Message as MessagePayload
+    from .types.user import User as UserPayload
     from .ui.modal import BaseModal
     from .ui.view import BaseView
 
-    InteractionChannel = Union[
-        VoiceChannel,
-        StageChannel,
-        TextChannel,
-        ForumChannel,
-        CategoryChannel,
-        Thread,
-        DMChannel,
-        GroupChannel,
-        PartialMessageable,
-    ]
+    InteractionChannel = (
+        VoiceChannel
+        | StageChannel
+        | TextChannel
+        | ForumChannel
+        | CategoryChannel
+        | Thread
+        | DMChannel
+        | GroupChannel
+        | PartialMessageable
+    )
 
 MISSING: Any = utils.MISSING
+
+
+def _is_file(value: object) -> bool:
+    return isinstance(value, File)
+
+
+def _require_message(message: Message | None) -> Message:
+    if message is None:
+        raise ClientException("The interaction has no message to edit.")
+    return message
 
 
 class Interaction:
@@ -164,6 +187,11 @@ class Interaction:
         Will be `None` until the interaction is responded to.
 
         .. versionadded:: 2.7
+    activity_instance: Optional[:class:`InteractionCallbackActivityInstanceResource`]
+        The activity launched or joined as the response to the interaction.
+        Will be ``None`` unless :meth:`InteractionResponse.launch_activity` was used.
+
+        .. versionadded:: 3.0
     command: Optional[:class:`ApplicationCommand`]
         The command that this interaction belongs to.
 
@@ -183,53 +211,58 @@ class Interaction:
     """
 
     __slots__: tuple[str, ...] = (
-        "id",
-        "type",
-        "guild_id",
-        "channel",
-        "channel_id",
-        "data",
+        "_app_permissions",
+        "_channel_data",
+        "_cs_app_permissions",
+        "_cs_channel",
+        "_cs_followup",
+        "_cs_response",
+        "_guild",
+        "_guild_data",
+        "_message_data",
+        "_original_response",
+        "_permissions",
+        "_raw_data",
+        "_session",
+        "_state",
+        "activity_instance",
         "application_id",
-        "message",
-        "user",
-        "locale",
-        "guild_locale",
-        "token",
-        "version",
-        "custom_id",
-        "entitlements",
-        "context",
+        "attachment_size_limit",
         "authorizing_integration_owners",
         "callback",
+        "channel",
+        "channel_id",
         "command",
-        "view",
+        "context",
+        "custom_id",
+        "data",
+        "entitlements",
+        "guild_id",
+        "guild_locale",
+        "id",
+        "locale",
+        "message",
         "modal",
-        "attachment_size_limit",
-        "_raw_data",
-        "_channel_data",
-        "_message_data",
-        "_guild_data",
-        "_guild",
-        "_permissions",
-        "_app_permissions",
-        "_state",
-        "_session",
-        "_original_response",
-        "_cs_app_permissions",
-        "_cs_response",
-        "_cs_followup",
-        "_cs_channel",
+        "token",
+        "type",
+        "user",
+        "user_id",
+        "version",
+        "view",
     )
 
-    def __init__(self, *, data: InteractionPayload, state: ConnectionState):
+    def __init__(self, *, data: InteractionPayload, state: ConnectionState) -> None:
         self._state: ConnectionState = state
-        self._session: ClientSession = state.http._HTTPClient__session
+        self._session: ClientSession = state.http._session
         self._original_response: InteractionMessage | None = None
         self.callback: InteractionCallback | None = None
+        self.activity_instance: InteractionCallbackActivityInstanceResource | None = (
+            None
+        )
         self._cs_channel: InteractionChannel | None = MISSING
         self._from_data(data)
 
-    def _from_data(self, data: InteractionPayload):
+    def _from_data(self, data: InteractionPayload) -> None:
         self._raw_data: InteractionPayload = data
         self.id: int = int(data["id"])
         self.type: InteractionType = try_enum(InteractionType, data["type"])
@@ -264,44 +297,32 @@ class Interaction:
         self.command: ApplicationCommand | None = None
         self.view: BaseView | None = None
         self.modal: BaseModal | None = None
-        self.attachment_size_limit: int = data.get("attachment_size_limit")
+        self.attachment_size_limit: int = cast("int", data.get("attachment_size_limit"))
 
         self.message: Message | None = None
-        self.channel = None
+        self.channel: InteractionChannel | None = None
 
         self.user: User | Member | None = None
         self._permissions: int = 0
 
         self._guild: Guild | None = None
         self._guild_data = data.get("guild")
-        if self.guild is None and self._guild_data:
+        if self._guild_data:
             self._guild = Guild(data=self._guild_data, state=self._state)
 
-        # TODO: there's a potential data loss here
         if self.guild_id:
-            guild = (
-                self.guild
-                or self._state._get_guild(self.guild_id)
-                or Object(id=self.guild_id)
-            )
-            try:
-                member = data["member"]  # type: ignore
-            except KeyError:
-                pass
-            else:
+            member = data.get("member")
+            if member is not None:
                 self._permissions = int(member.get("permissions", 0))
-                if not isinstance(guild, Object):
-                    cache_flag = self._state.member_cache_flags.interaction
-                    self.user = guild._get_and_update_member(
-                        member, int(member["user"]["id"]), cache_flag
-                    )
-                else:
-                    self.user = Member(state=self._state, data=member, guild=guild)
-        else:
-            try:
-                self.user = User(state=self._state, data=data["user"])
-            except KeyError:
-                pass
+                self.user = Member(
+                    state=self._state,
+                    data=member,
+                    guild=PartialGuild(state=self._state, id=self.guild_id),
+                )
+        elif (user_data := data.get("user")) is not None:
+            with contextlib.suppress(KeyError):
+                self.user = User(state=self._state, data=user_data)
+        self.user_id: int | None = self.user.id if self.user is not None else None
 
         channel = data.get("channel")
         data_ch_type: int | None = channel.get("type") if channel else None
@@ -309,15 +330,21 @@ class Interaction:
 
         if data_ch_type is not None:
             factory, ch_type = _threaded_channel_factory(data_ch_type)
-            if ch_type in (ChannelType.group, ChannelType.private):
+            if factory is not None and ch_type in (
+                ChannelType.group,
+                ChannelType.private,
+            ):
                 self.channel = factory(me=self.user, data=channel, state=self._state)
 
-        if self.channel is None and self.guild:
-            self.channel = self.guild._resolve_channel(self.channel_id)
-            if self.channel is None and factory is not None:
+        if self.channel is None and self.guild_id is not None and factory is not None:
+            try:
                 self.channel = factory(
-                    state=self._state, data=channel, guild=self.guild
+                    state=self._state,
+                    data=channel,
+                    guild=PartialGuild(state=self._state, id=self.guild_id),
                 )
+            except KeyError:
+                self.channel = None
 
         if self.channel is None and self.channel_id is not None:
             ch_type = (
@@ -331,7 +358,9 @@ class Interaction:
 
         if message_data := data.get("message"):
             self.message = Message(
-                state=self._state, channel=self.channel, data=message_data
+                state=self._state,
+                channel=cast("MessageableChannel", self.channel),
+                data=message_data,
             )
 
         self._message_data = message_data
@@ -342,14 +371,41 @@ class Interaction:
         return self._state._get_client()
 
     @property
-    def guild(self) -> Guild | None:
-        """The guild the interaction was sent from."""
+    def guild(self) -> Guild | PartialGuild | None:
+        """The guild the interaction was sent from.
+
+        This is the guild partial object of the payload when it has one,
+        otherwise the cached guild with the in-process cache, and a
+        :class:`PartialGuild` handle when it is not cached or the cache backend
+        is not the in-process one.
+        """
         if self._guild:
             return self._guild
-        return self._state and self._state._get_guild(self.guild_id)
+        if self.guild_id is None:
+            return None
+        return cached_guild(self._state, self.guild_id) or PartialGuild(
+            state=self._state, id=self.guild_id
+        )
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the guild the interaction was sent from.
+
+        Unlike :attr:`guild` this reads the cache asynchronously, so it returns the
+        cached :class:`Guild` with any cache backend.
+
+        Returns
+        -------
+        Optional[:class:`Guild`]
+            The guild, or ``None`` if it is not cached or the interaction was not sent from a guild.
+        """
+        if self._guild:
+            return self._guild
+        return await self._state._get_guild(self.guild_id)
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """Returns the interaction's creation time in UTC."""
         return utils.snowflake_time(self.id)
 
@@ -367,6 +423,7 @@ class Interaction:
     )
     def cached_channel(self) -> InteractionChannel | None:
         """The cached channel from which the interaction was sent.
+
         DM channels are not resolved. These are :class:`PartialMessageable` instead.
 
         .. deprecated:: 2.7
@@ -374,18 +431,16 @@ class Interaction:
         if self._cs_channel is not MISSING:
             return self._cs_channel
         r: InteractionChannel | None = None
-        guild = self.guild
-        channel = guild and guild._resolve_channel(self.channel_id)
-        if channel is None:
-            if self.channel_id is not None:
-                type = (
-                    ChannelType.text
-                    if self.guild_id is not None
-                    else ChannelType.private
-                )
-                r = PartialMessageable(state=self._state, id=self.channel_id, type=type)
-        else:
-            r = channel
+        channel = cached_guild_channel(self._state, self.guild_id, self.channel_id)
+        if channel is not None and getattr(channel, "obfuscated", False):
+            r = self.channel
+        elif channel is not None:
+            r = cast("InteractionChannel", channel)
+        elif self.channel_id is not None:
+            type = (
+                ChannelType.text if self.guild_id is not None else ChannelType.private
+            )
+            r = PartialMessageable(state=self._state, id=self.channel_id, type=type)
         self._cs_channel = r
         return r
 
@@ -458,6 +513,18 @@ class Interaction:
         """
         return self.is_user_authorised()
 
+    async def _create_response_message(
+        self, channel: InteractionChannel, data: MessagePayload
+    ) -> InteractionMessage:
+        state = _InteractionMessageState(self, self._state)
+        message = InteractionMessage(
+            state=cast("ConnectionState", state),
+            channel=cast("MessageableChannel", channel),
+            data=data,
+        )
+        await self._state._populate_message(message, data)
+        return message
+
     async def original_response(self) -> InteractionMessage:
         """|coro|
 
@@ -481,7 +548,6 @@ class Interaction:
         ClientException
             The channel for the message could not be resolved.
         """
-
         if self._original_response is not None:
             return self._original_response
 
@@ -500,15 +566,14 @@ class Interaction:
             proxy=http.proxy,
             proxy_auth=http.proxy_auth,
         )
-        state = _InteractionMessageState(self, self._state)
-        message = InteractionMessage(state=state, channel=channel, data=data)  # type: ignore
+        message = await self._create_response_message(channel, data)
         self._original_response = message
         return message
 
     @deprecated(
         "Interaction.original_message is deprecated since version 2.2, consider using Interaction.original_response instead."
     )
-    async def original_message(self):
+    async def original_message(self) -> InteractionMessage:
         """An alias for :meth:`original_response`.
 
         Returns
@@ -538,7 +603,7 @@ class Interaction:
         allowed_mentions: AllowedMentions | None = None,
         delete_after: float | None = None,
         suppress: bool | None = None,
-        suppress_embeds: bool = None,
+        suppress_embeds: bool | None = None,
     ) -> InteractionMessage:
         """|coro|
 
@@ -602,7 +667,6 @@ class Interaction:
         ValueError
             The length of ``embeds`` was invalid.
         """
-
         previous_mentions: AllowedMentions | None = self._state.allowed_mentions
         if suppress is not None:
             warn_deprecated("suppress", "suppress_embeds", "2.8")
@@ -639,8 +703,9 @@ class Interaction:
         )
 
         # The message channel types should always match
-        state = _InteractionMessageState(self, self._state)
-        message = InteractionMessage(state=state, channel=self.channel, data=data)  # type: ignore
+        message = await self._create_response_message(
+            cast("InteractionChannel", self.channel), data
+        )
         if view:
             if not view.is_finished():
                 view._refresh(message.components)
@@ -657,7 +722,7 @@ class Interaction:
     @deprecated(
         "Interaction.edit_original_message is deprecated since version 2.2, consider using Interaction.edit_original_response instead."
     )
-    async def edit_original_message(self, **kwargs):
+    async def edit_original_message(self, **kwargs: Any) -> InteractionMessage:
         """An alias for :meth:`edit_original_response`.
 
         Returns
@@ -717,7 +782,7 @@ class Interaction:
     @deprecated(
         "Interaction.delete_original_message is deprecated since version 2.2, consider using Interaction.delete_original_response instead."
     )
-    async def delete_original_message(self, **kwargs):
+    async def delete_original_message(self, **kwargs: Any) -> None:
         """An alias for :meth:`delete_original_response`.
 
         Raises
@@ -763,7 +828,7 @@ class Interaction:
         suppress_embeds: bool = False,
     ) -> Interaction | WebhookMessage: ...
 
-    async def respond(self, *args, **kwargs) -> Interaction | WebhookMessage:
+    async def respond(self, *args: Any, **kwargs: Any) -> Interaction | WebhookMessage:
         """|coro|
 
         Sends either a response or a message using the followup webhook determined by whether the interaction
@@ -818,12 +883,11 @@ class Interaction:
         try:
             if not self.response.is_done():
                 return await self.response.send_message(*args, **kwargs)
-            else:
-                return await self.followup.send(*args, **kwargs)
+            return await self.followup.send(*args, **kwargs)
         except InteractionResponded:
             return await self.followup.send(*args, **kwargs)
 
-    async def edit(self, *args, **kwargs) -> InteractionMessage | None:
+    async def edit(self, *args: Any, **kwargs: Any) -> InteractionMessage | None:
         """|coro|
 
         Either respond to the interaction with an edit_message or edits the existing response, determined by
@@ -837,8 +901,7 @@ class Interaction:
         try:
             if not self.response.is_done():
                 return await self.response.edit_message(*args, **kwargs)
-            else:
-                return await self.edit_original_response(*args, **kwargs)
+            return await self.edit_original_response(*args, **kwargs)
         except InteractionResponded:
             return await self.edit_original_response(*args, **kwargs)
 
@@ -851,8 +914,7 @@ class Interaction:
         Dict[:class:`str`, Any]
             A dictionary of :class:`str` interaction keys bound to the respective value.
         """
-
-        data = {
+        data: dict[str, Any] = {
             "id": self.id,
             "application_id": self.application_id,
             "type": self.type.value,
@@ -899,12 +961,12 @@ class InteractionResponse:
     """
 
     __slots__: tuple[str, ...] = (
-        "_responded",
         "_parent",
+        "_responded",
         "_response_lock",
     )
 
-    def __init__(self, parent: Interaction):
+    def __init__(self, parent: Interaction) -> None:
         self._parent: Interaction = parent
         self._responded: bool = False
         self._response_lock = asyncio.Lock()
@@ -1034,21 +1096,24 @@ class InteractionResponse:
 
     async def _process_callback_response(
         self, callback_response: InteractionCallbackResponse
-    ):
-        if callback_response.get("resource", {}).get("message"):
+    ) -> None:
+        resource = callback_response.get("resource", {})
+
+        if message_data := resource.get("message"):
             # TODO: fix later to not raise?
             channel = self._parent.channel
             if channel is None:
                 raise ClientException(
                     "Channel for message could not be resolved. Please open a issue on GitHub if you encounter this error."
                 )
-            state = _InteractionMessageState(self._parent, self._parent._state)
-            message = InteractionMessage(
-                state=state,
-                channel=channel,
-                data=callback_response["resource"]["message"],
-            )  # type: ignore
-            self._parent._original_response = message
+            self._parent._original_response = (
+                await self._parent._create_response_message(channel, message_data)
+            )
+
+        if activity_instance := resource.get("activity_instance"):
+            self._parent.activity_instance = (
+                InteractionCallbackActivityInstanceResource(activity_instance)
+            )
 
         self._parent.callback = InteractionCallback(callback_response["interaction"])
 
@@ -1186,20 +1251,19 @@ class InteractionResponse:
             raise InvalidArgument("cannot pass both file and files parameter to send()")
 
         if file is not None:
-            if not isinstance(file, File):
+            if not _is_file(file):
                 raise InvalidArgument("file parameter must be File")
-            else:
-                files = [file]
+            files = [file]
 
         if files is not None:
             if len(files) > 10:
                 raise InvalidArgument(
                     "files parameter must be a list of up to 10 elements"
                 )
-            elif not all(isinstance(file, File) for file in files):
+            if not all(_is_file(f) for f in files):
                 raise InvalidArgument("files parameter must be a list of File")
 
-            if any(isinstance(file, VoiceMessage) for file in files):
+            if any(isinstance(f, VoiceMessage) for f in files):
                 flags = flags + MessageFlags(is_voice_message=True)
 
         payload["flags"] = flags.value
@@ -1224,8 +1288,8 @@ class InteractionResponse:
             )
         finally:
             if files:
-                for file in files:
-                    file.close()
+                for f in files:
+                    f.close()
 
         self._responded = True
         await self._process_callback_response(callback_response)
@@ -1318,7 +1382,7 @@ class InteractionResponse:
 
         is_cv2 = None
 
-        payload = {}
+        payload: dict[str, Any] = {}
         if content is not MISSING:
             payload["content"] = None if content is None else str(content)
         if embed is not MISSING and embeds is not MISSING:
@@ -1333,7 +1397,8 @@ class InteractionResponse:
             payload["attachments"] = [a.to_dict() for a in attachments]
 
         if view is not MISSING:
-            state.prevent_view_updates_for(message_id)
+            if message_id is not None:
+                state.prevent_view_updates_for(message_id)
             payload["components"] = [] if view is None else view.to_components()
             if view and view.is_components_v2():
                 is_cv2 = True
@@ -1344,31 +1409,34 @@ class InteractionResponse:
             )
 
         if file is not MISSING:
-            if not isinstance(file, File):
+            if not _is_file(file):
                 raise InvalidArgument("file parameter must be a File")
-            else:
-                files = [file]
-                if "attachments" not in payload:
-                    # we keep previous attachments when adding a new file
-                    payload["attachments"] = [a.to_dict() for a in msg.attachments]
+            files = [file]
+            if "attachments" not in payload:
+                # we keep previous attachments when adding a new file
+                payload["attachments"] = [
+                    a.to_dict() for a in _require_message(msg).attachments
+                ]
 
         if files is not MISSING:
             if len(files) > 10:
                 raise InvalidArgument(
                     "files parameter must be a list of up to 10 elements"
                 )
-            elif not all(isinstance(file, File) for file in files):
+            if not all(_is_file(f) for f in files):
                 raise InvalidArgument("files parameter must be a list of File")
             if "attachments" not in payload:
                 # we keep previous attachments when adding new files
-                payload["attachments"] = [a.to_dict() for a in msg.attachments]
+                payload["attachments"] = [
+                    a.to_dict() for a in _require_message(msg).attachments
+                ]
 
         if suppress is not MISSING or is_cv2:
-            flags = MessageFlags._from_value(msg.flags.value)
+            flags = MessageFlags._from_value(_require_message(msg).flags.value)
             if is_cv2:
                 flags.is_components_v2 = True
             if suppress is not MISSING:
-                flags.suppress_embeds = suppress
+                flags.suppress_embeds = cast("bool", suppress)
             payload["flags"] = flags.value
 
         if allowed_mentions is None:
@@ -1402,8 +1470,8 @@ class InteractionResponse:
             )
         finally:
             if files:
-                for file in files:
-                    file.close()
+                for f in files:
+                    f.close()
 
         self._responded = True
         await self._process_callback_response(callback_response)
@@ -1421,6 +1489,7 @@ class InteractionResponse:
         choices: list[OptionChoice],
     ) -> None:
         """|coro|
+
         Responds to this interaction by sending the autocomplete choices.
 
         Parameters
@@ -1464,6 +1533,7 @@ class InteractionResponse:
 
     async def send_modal(self, modal: BaseModal) -> Interaction:
         """|coro|
+
         Responds to this interaction by sending a modal dialog.
         This cannot be used to respond to another modal dialog submission.
 
@@ -1484,7 +1554,7 @@ class InteractionResponse:
 
         parent = self._parent
 
-        payload = modal.to_dict()
+        payload = cast("dict[str, Any]", modal.to_dict())
         adapter = async_context.get()
         http = parent._state.http
         callback_response: InteractionCallbackResponse = await self._locked_response(
@@ -1500,7 +1570,10 @@ class InteractionResponse:
         )
         self._responded = True
         await self._process_callback_response(callback_response)
-        self._parent._state.store_modal(modal, self._parent.user.id)
+        user = self._parent.user
+        if user is None:
+            raise ClientException("The interaction has no user to store the modal for.")
+        self._parent._state.store_modal(modal, user.id)
         return self._parent
 
     @deprecated(
@@ -1543,6 +1616,43 @@ class InteractionResponse:
         await self._process_callback_response(callback_response)
         return self._parent
 
+    async def launch_activity(self) -> Interaction:
+        """|coro|
+
+        Responds to this interaction by launching the activity associated with the bot.
+
+        This is only available for applications that have activities enabled.
+
+        .. versionadded:: 3.0
+
+        Raises
+        ------
+        HTTPException
+            Launching the activity failed.
+        InteractionResponded
+            This interaction has already been responded to before.
+        """
+        if self._responded:
+            raise InteractionResponded(self._parent)
+
+        parent = self._parent
+
+        adapter = async_context.get()
+        http = parent._state.http
+        callback_response: InteractionCallbackResponse = await self._locked_response(
+            adapter.create_interaction_response(
+                parent.id,
+                parent.token,
+                session=parent._session,
+                proxy=http.proxy,
+                proxy_auth=http.proxy_auth,
+                type=InteractionResponseType.launch_activity.value,
+            )
+        )
+        self._responded = True
+        await self._process_callback_response(callback_response)
+        return self._parent
+
     async def _locked_response(self, coro: Coroutine[Any, Any, Any]) -> Any:
         """|coro|
 
@@ -1574,26 +1684,26 @@ class InteractionResponse:
 
 
 class _InteractionMessageState:
-    __slots__ = ("_parent", "_interaction")
+    __slots__ = ("_interaction", "_parent")
 
-    def __init__(self, interaction: Interaction, parent: ConnectionState):
+    def __init__(self, interaction: Interaction, parent: ConnectionState) -> None:
         self._interaction: Interaction = interaction
         self._parent: ConnectionState = parent
 
-    def _get_guild(self, guild_id):
+    def _get_guild(self, guild_id: int | None) -> Coroutine[Any, Any, Guild | None]:
         return self._parent._get_guild(guild_id)
 
-    def store_user(self, data):
+    def store_user(self, data: UserPayload) -> Coroutine[Any, Any, User]:
         return self._parent.store_user(data)
 
-    def create_user(self, data):
+    def create_user(self, data: UserPayload) -> User:
         return self._parent.create_user(data)
 
     @property
-    def http(self):
+    def http(self) -> HTTPClient:
         return self._parent.http
 
-    def __getattr__(self, attr):
+    def __getattr__(self, attr: str) -> Any:
         return getattr(self._parent, attr)
 
 
@@ -1610,9 +1720,9 @@ class InteractionMessage(Message):
     """
 
     __slots__ = ()
-    _state: _InteractionMessageState
+    _state: _InteractionMessageState  # pyright: ignore[reportIncompatibleVariableOverride]
 
-    async def edit(
+    async def edit(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         content: str | None = MISSING,
         embeds: list[Embed] = MISSING,
@@ -1706,7 +1816,9 @@ class InteractionMessage(Message):
             suppress_embeds=suppress_embeds,
         )
 
-    async def delete(self, *, delay: float | None = None) -> None:
+    async def delete(
+        self, *, delay: float | None = None, reason: str | None = None
+    ) -> None:
         """|coro|
 
         Deletes the message.
@@ -1716,6 +1828,10 @@ class InteractionMessage(Message):
         delay: Optional[:class:`float`]
             If provided, the number of seconds to wait before deleting the message.
             The waiting is done in the background and deletion failures are ignored.
+        reason: Optional[:class:`str`]
+            Ignored, deleting the response of an interaction does not take an
+            audit log reason. It only exists so that this method matches
+            :meth:`Message.delete`.
 
         Raises
         ------
@@ -1758,15 +1874,17 @@ class MessageInteraction:
         The raw interaction data.
     """
 
-    __slots__: tuple[str, ...] = ("id", "type", "name", "user", "data", "_state")
+    __slots__: tuple[str, ...] = ("_state", "data", "id", "name", "type", "user")
 
-    def __init__(self, *, data: MessageInteractionPayload, state: ConnectionState):
+    def __init__(
+        self, *, data: MessageInteractionPayload, state: ConnectionState
+    ) -> None:
         self._state = state
         self.data = data
         self.id: int = int(data["id"])
-        self.type: InteractionType = data["type"]
+        self.type: InteractionType = try_enum(InteractionType, data["type"])
         self.name: str = data["name"]
-        self.user: User = self._state.store_user(data["user"])
+        self.user: User = self._state.create_user(data["user"])
 
 
 class InteractionMetadata:
@@ -1797,19 +1915,21 @@ class InteractionMetadata:
     """
 
     __slots__: tuple[str, ...] = (
+        "_cs_interacted_message",
+        "_cs_original_response_message",
+        "_state",
+        "authorizing_integration_owners",
         "id",
+        "interacted_message_id",
+        "original_response_message_id",
+        "triggering_interaction_metadata",
         "type",
         "user",
-        "authorizing_integration_owners",
-        "original_response_message_id",
-        "interacted_message_id",
-        "triggering_interaction_metadata",
-        "_state",
-        "_cs_original_response_message",
-        "_cs_interacted_message",
     )
 
-    def __init__(self, *, data: InteractionMetadataPayload, state: ConnectionState):
+    def __init__(
+        self, *, data: InteractionMetadataPayload, state: ConnectionState
+    ) -> None:
         self._state = state
         self.id: int = int(data["id"])
         self.type: InteractionType = try_enum(InteractionType, data["type"])
@@ -1829,7 +1949,7 @@ class InteractionMetadata:
                 data=tim, state=state
             )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"<InteractionMetadata id={self.id} type={self.type!r} user={self.user!r}>"
         )
@@ -1837,20 +1957,50 @@ class InteractionMetadata:
     @utils.cached_slot_property("_cs_original_response_message")
     def original_response_message(self) -> Message | None:
         """Optional[:class:`Message`]: The original response message.
+
         Returns ``None`` if the message is not in cache, or if :attr:`original_response_message_id` is ``None``.
         """
-        if not self.original_response_message_id:
+        if not self.original_response_message_id or self._state._messages is None:
             return None
-        return self._state._get_message(self.original_response_message_id)
+        return self._state._messages.get_nowait(self.original_response_message_id)
 
     @utils.cached_slot_property("_cs_interacted_message")
     def interacted_message(self) -> Message | None:
         """Optional[:class:`Message`]: The message that triggered the interaction.
+
         Returns ``None`` if the message is not in cache, or if :attr:`interacted_message_id` is ``None``.
         """
-        if not self.interacted_message_id:
+        if not self.interacted_message_id or self._state._messages is None:
             return None
-        return self._state._get_message(self.interacted_message_id)
+        return self._state._messages.get_nowait(self.interacted_message_id)
+
+    async def get_original_response_message(self) -> Message | None:
+        """|coro|
+
+        Returns the original response message from the cache, with any cache backend.
+
+        Returns
+        -------
+        Optional[:class:`Message`]
+            The message, or ``None`` if it is not in cache or :attr:`original_response_message_id` is ``None``.
+        """
+        if not self.original_response_message_id or self._state._messages is None:
+            return None
+        return await self._state._messages.get(self.original_response_message_id)
+
+    async def get_interacted_message(self) -> Message | None:
+        """|coro|
+
+        Returns the message that triggered the interaction from the cache, with any cache backend.
+
+        Returns
+        -------
+        Optional[:class:`Message`]
+            The message, or ``None`` if it is not in cache or :attr:`interacted_message_id` is ``None``.
+        """
+        if not self.interacted_message_id or self._state._messages is None:
+            return None
+        return await self._state._messages.get(self.interacted_message_id)
 
 
 class AuthorizingIntegrationOwners:
@@ -1868,46 +2018,79 @@ class AuthorizingIntegrationOwners:
         from the user in the bot's DMs.
     """
 
-    __slots__ = ("user_id", "guild_id", "_state", "_cs_user", "_cs_guild")
+    __slots__ = ("_cs_guild", "_cs_user", "_state", "guild_id", "user_id")
 
-    def __init__(self, data: dict[str, Any], state: ConnectionState):
+    def __init__(self, data: Mapping[Any, Any], state: ConnectionState) -> None:
         self._state = state
         # keys are Application Integration Types as strings
         self.user_id = int(uid) if (uid := data.get("1")) is not None else None
         self.guild_id = (
-            int(guild_id) if (guild_id := data.get("0", None)) is not None else None
+            int(guild_id) if (guild_id := data.get("0")) is not None else None
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<AuthorizingIntegrationOwners user_id={self.user_id} guild_id={self.guild_id}>"
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, AuthorizingIntegrationOwners)
             and self.user_id == other.user_id
             and self.guild_id == other.guild_id
         )
 
-    def __ne__(self, other):
+    def __ne__(self, other: object) -> bool:
         return not self.__eq__(other)
+
+    def __hash__(self) -> int:
+        return hash((self.user_id, self.guild_id))
 
     @utils.cached_slot_property("_cs_user")
     def user(self) -> User | None:
         """Optional[:class:`User`]: The user that authorized the integration.
+
         Returns ``None`` if the user is not in cache, or if :attr:`user_id` is ``None``.
         """
         if not self.user_id:
             return None
-        return self._state.get_user(self.user_id)
+        return self._state._users.get_nowait(self.user_id)
 
     @utils.cached_slot_property("_cs_guild")
     def guild(self) -> Guild | None:
         """Optional[:class:`Guild`]: The guild that authorized the integration.
+
         Returns ``None`` if the guild is not in cache, or if :attr:`guild_id` is ``0`` or ``None``.
         """
         if not self.guild_id:
             return None
-        return self._state._get_guild(self.guild_id)
+        return self._state._guilds.get_nowait(self.guild_id)
+
+    async def get_user(self) -> User | None:
+        """|coro|
+
+        Returns the user that authorized the integration from the cache, with any cache backend.
+
+        Returns
+        -------
+        Optional[:class:`User`]
+            The user, or ``None`` if the user is not in cache or :attr:`user_id` is ``None``.
+        """
+        if not self.user_id:
+            return None
+        return await self._state._users.get(self.user_id)
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the guild that authorized the integration from the cache, with any cache backend.
+
+        Returns
+        -------
+        Optional[:class:`Guild`]
+            The guild, or ``None`` if the guild is not in cache or :attr:`guild_id` is ``0`` or ``None``.
+        """
+        if not self.guild_id:
+            return None
+        return await self._state._guilds.get(self.guild_id)
 
 
 class InteractionCallback:
@@ -1916,7 +2099,8 @@ class InteractionCallback:
     .. versionadded:: 2.7
     """
 
-    def __init__(self, data: InteractionCallbackPayload):
+    def __init__(self, data: InteractionCallbackPayload) -> None:
+        self._activity_instance_id: str | None = data.get("activity_instance_id")
         self._response_message_loading: bool = data.get(
             "response_message_loading", False
         )
@@ -1924,9 +2108,10 @@ class InteractionCallback:
             "response_message_ephemeral", False
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"<InteractionCallback "
+            f"_activity_instance_id={self._activity_instance_id} "
             f"_response_message_loading={self._response_message_loading} "
             f"_response_message_ephemeral={self._response_message_ephemeral}>"
         )
@@ -1941,3 +2126,33 @@ class InteractionCallback:
         This might be useful for determining if the message was forced to be ephemeral.
         """
         return self._response_message_ephemeral
+
+    @property
+    def activity_instance_id(self) -> str | None:
+        """Instance ID of the Activity if one was launched or joined.
+
+        If no activity was launched or joined this will be ``None``.
+
+        .. versionadded:: 3.0
+        """
+        return self._activity_instance_id
+
+
+class InteractionCallbackActivityInstanceResource:
+    """Information about the Activity that was launched or joined as a response to an interaction.
+
+    .. versionadded:: 3.0
+
+    Attributes
+    ----------
+    id: :class:`str`
+        Instance ID of the Activity that was launched or joined.
+    """
+
+    __slots__ = ("id",)
+
+    def __init__(self, data: InteractionCallbackActivityInstancePayload) -> None:
+        self.id: str = data["id"]
+
+    def __repr__(self) -> str:
+        return f"<InteractionCallbackActivityInstanceResource id={self.id!r}>"

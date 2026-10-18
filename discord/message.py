@@ -25,22 +25,25 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import datetime
+import contextlib
+import copy
+import datetime as dt
 import io
+import os
 import re
-from collections.abc import AsyncGenerator, Callable, Sequence
-from os import PathLike
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    TypeAlias,
     TypeVar,
-    Union,
-    overload,
+    cast,
 )
 from urllib.parse import parse_qs, urlparse
 
 from . import utils
+from ._internal.cache_peek import cached_channel, cached_guild
 from .channel import PartialMessageable
 from .components import _component_factory
 from .embeds import Embed
@@ -49,45 +52,57 @@ from .enums import ChannelType, MessageReferenceType, MessageType, try_enum
 from .errors import InvalidArgument
 from .file import File
 from .flags import AttachmentFlags, MessageFlags
-from .guild import Guild
+from .guild import Guild, PartialGuild
 from .member import Member
 from .mixins import Hashable
 from .object import Object
 from .partial_emoji import PartialEmoji
 from .poll import Poll
 from .reaction import Reaction
+from .shared_client_theme import SharedClientTheme
 from .sticker import StickerItem
 from .threads import Thread
-from .utils import MISSING, escape_mentions, find, warn_deprecated
+from .utils import MISSING, escape_mentions, warn_deprecated
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable, Mapping
+    from os import PathLike
+
+    from typing_extensions import Self
+
     from .abc import (
         GuildChannel,
         MessageableChannel,
         PartialMessageableChannel,
         Snowflake,
     )
-    from .channel import TextChannel
     from .components import Component
     from .interactions import MessageInteraction
+    from .iterators import MessageSearchIterator
     from .mentions import AllowedMentions
     from .role import Role
     from .state import ConnectionState
     from .types.components import Component as ComponentPayload
     from .types.embed import Embed as EmbedPayload
-    from .types.member import Member as MemberPayload
-    from .types.member import UserWithMember as UserWithMemberPayload
-    from .types.message import Attachment as AttachmentPayload
-    from .types.message import ForwardedMessage as ForwardedMessagePayload
-    from .types.message import Message as MessagePayload
-    from .types.message import MessageActivity as MessageActivityPayload
-    from .types.message import MessageApplication as MessageApplicationPayload
-    from .types.message import MessageCall as MessageCallPayload
-    from .types.message import MessagePin as MessagePinPayload
-    from .types.message import MessageReference as MessageReferencePayload
-    from .types.message import MessageSnapshot as MessageSnapshotPayload
-    from .types.message import Reaction as ReactionPayload
+    from .types.member import (
+        Member as MemberPayload,
+        UserWithMember as UserWithMemberPayload,
+    )
+    from .types.message import (
+        Attachment as AttachmentPayload,
+        ForwardedMessage as ForwardedMessagePayload,
+        Message as MessagePayload,
+        MessageActivity as MessageActivityPayload,
+        MessageApplication as MessageApplicationPayload,
+        MessageCall as MessageCallPayload,
+        MessagePin as MessagePinPayload,
+        MessageReference as MessageReferencePayload,
+        MessageSnapshot as MessageSnapshotPayload,
+        Reaction as ReactionPayload,
+        SharedClientTheme as SharedClientThemePayload,
+    )
     from .types.poll import Poll as PollPayload
+    from .types.raw_models import ReactionActionEvent
     from .types.snowflake import SnowflakeList
     from .types.threads import ThreadArchiveDuration
     from .types.user import User as UserPayload
@@ -95,22 +110,25 @@ if TYPE_CHECKING:
     from .user import User
 
     MR = TypeVar("MR", bound="MessageReference")
-    EmojiInputType = Union[GuildEmoji, AppEmoji, PartialEmoji, str]
+    EmojiInputType: TypeAlias = GuildEmoji | AppEmoji | PartialEmoji | str
+
+_T = TypeVar("_T")
 
 __all__ = (
     "Attachment",
-    "Message",
-    "MessagePin",
-    "PartialMessage",
-    "MessageReference",
-    "MessageCall",
     "DeletedReferencedMessage",
     "ForwardedMessage",
+    "Message",
+    "MessageCall",
+    "MessagePin",
+    "MessageReference",
     "MessageSnapshot",
+    "PartialMessage",
 )
 
 
-def convert_emoji_reaction(emoji):
+def convert_emoji_reaction(emoji: object) -> str:
+    """Convert an emoji, or a reaction, to the string Discord expects."""
     if isinstance(emoji, Reaction):
         emoji = emoji.emoji
 
@@ -213,27 +231,28 @@ class Attachment(Hashable):
     """
 
     __slots__ = (
-        "id",
-        "size",
-        "height",
-        "width",
-        "filename",
-        "url",
-        "proxy_url",
+        "_ex",
         "_http",
+        "_is",
+        "_spoiler",
         "content_type",
-        "ephemeral",
         "description",
         "duration_secs",
-        "waveform",
+        "ephemeral",
+        "filename",
         "flags",
-        "_ex",
-        "_is",
+        "height",
         "hm",
+        "id",
+        "proxy_url",
+        "size",
         "title",
+        "url",
+        "waveform",
+        "width",
     )
 
-    def __init__(self, *, data: AttachmentPayload, state: ConnectionState):
+    def __init__(self, *, data: AttachmentPayload, state: ConnectionState) -> None:
         self.id: int = int(data["id"])
         self.size: int = data["size"]
         self.height: int | None = data.get("height")
@@ -252,6 +271,7 @@ class Attachment(Hashable):
         self._ex: str | None = None
         self._is: str | None = None
         self.hm: str | None = None
+        self._spoiler: bool | None = None
 
         query = urlparse(self.url).query
         extras = ["_ex", "_is", "hm"]
@@ -262,22 +282,68 @@ class Attachment(Hashable):
                     setattr(self, attr, value)
 
     @property
-    def expires_at(self) -> datetime.datetime | None:
-        """This attachment URL's expiry time in UTC."""
+    def expires_at(self) -> dt.datetime | None:
+        """The expiry time of this attachment URL in UTC."""
         if not self._ex:
             return None
-        return datetime.datetime.utcfromtimestamp(int(self._ex, 16))
+        return dt.datetime.fromtimestamp(int(self._ex, 16), tz=dt.timezone.utc).replace(
+            tzinfo=None
+        )
 
     @property
-    def issued_at(self) -> datetime.datetime | None:
+    def issued_at(self) -> dt.datetime | None:
         """The attachment URL's issue time in UTC."""
         if not self._is:
             return None
-        return datetime.datetime.utcfromtimestamp(int(self._is, 16))
+        return dt.datetime.fromtimestamp(int(self._is, 16), tz=dt.timezone.utc).replace(
+            tzinfo=None
+        )
 
     def is_spoiler(self) -> bool:
-        """Whether this attachment contains a spoiler."""
-        return self.filename.startswith("SPOILER_")
+        """Whether this attachment contains a spoiler.
+
+        This is ``True`` when the attachment has the :attr:`AttachmentFlags.is_spoiler`
+        flag or when its filename starts with ``SPOILER_``.
+        """
+        if self._spoiler is not None:
+            return self._spoiler
+        return self.flags.is_spoiler or self.filename.startswith("SPOILER_")
+
+    def with_changes(
+        self,
+        *,
+        description: str | None = MISSING,
+        is_spoiler: bool = MISSING,
+    ) -> Attachment:
+        """Returns a copy of this attachment with an updated description and/or spoiler state.
+
+        The copy is meant to be passed in the ``attachments`` list of :meth:`Message.edit`
+        to change the alt text or the spoiler flag of an attachment that is kept.
+        This attachment is left untouched.
+
+        .. versionadded:: 3.0
+
+        Parameters
+        ----------
+        description: Optional[:class:`str`]
+            The new description (alt text, up to 1024 characters).
+            Pass ``None`` to remove it.
+        is_spoiler: :class:`bool`
+            Whether the attachment should be marked as a spoiler.
+
+        Returns
+        -------
+        :class:`Attachment`
+            The updated copy.
+        """
+        new = copy.copy(self)
+        new.flags = AttachmentFlags._from_value(self.flags.value)
+        if description is not MISSING:
+            new.description = description
+        if is_spoiler is not MISSING:
+            new.flags.is_spoiler = is_spoiler
+            new._spoiler = is_spoiler
+        return new
 
     def __repr__(self) -> str:
         return f"<Attachment id={self.id} filename={self.filename!r} url={self.url!r}>"
@@ -287,7 +353,7 @@ class Attachment(Hashable):
 
     async def save(
         self,
-        fp: io.BufferedIOBase | PathLike,
+        fp: io.BufferedIOBase | PathLike[str] | PathLike[bytes],
         *,
         seek_begin: bool = True,
         use_cached: bool = False,
@@ -330,30 +396,29 @@ class Attachment(Hashable):
         InvalidArgument
             Argument `chunksize` is less than 1.
         """
+        data: AsyncGenerator[bytes, None] | bytes
         if chunksize is not None:
             data = self.read_chunked(use_cached=use_cached, chunksize=chunksize)
         else:
             data = await self.read(use_cached=use_cached)
 
         if isinstance(fp, io.BufferedIOBase):
-            if chunksize is not None:
+            if isinstance(data, bytes):
+                written = fp.write(data)
+            else:
                 written = 0
                 async for chunk in data:
                     written += fp.write(chunk)
-            else:
-                written = fp.write(data)
             if seek_begin:
                 fp.seek(0)
             return written
-        else:
-            with open(fp, "wb") as f:
-                if chunksize is not None:
-                    written = 0
-                    async for chunk in data:
-                        written += f.write(chunk)
-                    return written
-                else:
-                    return f.write(data)
+        with Path(os.fsdecode(fp)).open("wb") as f:
+            if isinstance(data, bytes):
+                return f.write(data)
+            written = 0
+            async for chunk in data:
+                written += f.write(chunk)
+            return written
 
     async def read(self, *, use_cached: bool = False) -> bytes:
         """|coro|
@@ -387,8 +452,7 @@ class Attachment(Hashable):
             The attachment was deleted.
         """
         url = self.proxy_url if use_cached else self.url
-        data = await self._http.get_from_cdn(url)
-        return data
+        return await self._http.get_from_cdn(url)
 
     async def read_chunked(
         self, chunksize: int, *, use_cached: bool = False
@@ -467,7 +531,6 @@ class Attachment(Hashable):
         NotFound
             The attachment was deleted.
         """
-
         data = await self.read(use_cached=use_cached)
         return File(
             io.BytesIO(data),
@@ -477,13 +540,14 @@ class Attachment(Hashable):
         )
 
     def to_dict(self) -> AttachmentPayload:
+        """Convert this attachment to its payload."""
         result: AttachmentPayload = {
             "filename": self.filename,
             "id": self.id,
             "proxy_url": self.proxy_url,
             "size": self.size,
             "url": self.url,
-            "spoiler": self.is_spoiler(),
+            "is_spoiler": self.is_spoiler(),
         }
         if self.height:
             result["height"] = self.height
@@ -491,14 +555,15 @@ class Attachment(Hashable):
             result["width"] = self.width
         if self.content_type:
             result["content_type"] = self.content_type
-        if self.description:
+        if self.description is not None:
             result["description"] = self.description
+        if self.flags.value:
+            result["flags"] = self.flags.value
         return result
 
 
 class DeletedReferencedMessage:
-    """A special sentinel type that denotes whether the
-    resolved message referenced message had since been deleted.
+    """A special sentinel type that denotes whether the resolved referenced message was deleted.
 
     The purpose of this class is to separate referenced messages that could not be
     fetched and those that were previously fetched but have since been deleted.
@@ -508,7 +573,7 @@ class DeletedReferencedMessage:
 
     __slots__ = ("_parent",)
 
-    def __init__(self, parent: MessageReference):
+    def __init__(self, parent: MessageReference) -> None:
         self._parent: MessageReference = parent
 
     def __repr__(self) -> str:
@@ -521,7 +586,7 @@ class DeletedReferencedMessage:
     def id(self) -> int:
         """The message ID of the deleted referenced message."""
         # the parent's message id won't be None here
-        return self._parent.message_id  # type: ignore
+        return cast("int", self._parent.message_id)
 
     @property
     def channel_id(self) -> int:
@@ -574,13 +639,13 @@ class MessageReference:
     """
 
     __slots__ = (
-        "message_id",
+        "_state",
         "channel_id",
-        "guild_id",
         "fail_if_not_exists",
+        "guild_id",
+        "message_id",
         "resolved",
         "type",
-        "_state",
     )
 
     def __init__(
@@ -591,7 +656,7 @@ class MessageReference:
         guild_id: int | None = None,
         fail_if_not_exists: bool = True,
         type: MessageReferenceType = MessageReferenceType.default,
-    ):
+    ) -> None:
         self._state: ConnectionState | None = None
         self.resolved: Message | DeletedReferencedMessage | None = None
         self.type: MessageReferenceType = type
@@ -601,16 +666,15 @@ class MessageReference:
         self.fail_if_not_exists: bool = fail_if_not_exists
 
     @classmethod
-    def with_state(
-        cls: type[MR], state: ConnectionState, data: MessageReferencePayload
-    ) -> MR:
+    def with_state(cls, state: ConnectionState, data: MessageReferencePayload) -> Self:
+        """Build a reference bound to a connection state from its payload."""
         self = cls.__new__(cls)
         self.type = (
             try_enum(MessageReferenceType, data.get("type"))
             or MessageReferenceType.default
         )
         self.message_id = utils._get_as_snowflake(data, "message_id")
-        self.channel_id = utils._get_as_snowflake(data, "channel_id")
+        self.channel_id = cast("int", utils._get_as_snowflake(data, "channel_id"))
         self.guild_id = utils._get_as_snowflake(data, "guild_id")
         self.fail_if_not_exists = data.get("fail_if_not_exists", True)
         self._state = state
@@ -619,12 +683,12 @@ class MessageReference:
 
     @classmethod
     def from_message(
-        cls: type[MR],
+        cls,
         message: Message,
         *,
         fail_if_not_exists: bool = True,
         type: MessageReferenceType = MessageReferenceType.default,
-    ) -> MR:
+    ) -> Self:
         """Creates a :class:`MessageReference` from an existing :class:`~discord.Message`.
 
         .. versionadded:: 1.6
@@ -661,8 +725,29 @@ class MessageReference:
 
     @property
     def cached_message(self) -> Message | None:
-        """The cached message, if found in the internal message cache."""
-        return self._state and self._state._get_message(self.message_id)
+        """The cached message, if found in the internal message cache.
+
+        This reads the in-memory cache, use :meth:`get_cached_message` with a remote cache backend.
+        """
+        if self._state is None or self.message_id is None:
+            return None
+        if self._state._messages is None:
+            return None
+        return self._state._messages.get_nowait(self.message_id)
+
+    async def get_cached_message(self) -> Message | None:
+        """|coro|
+
+        Returns the referenced message, if found in the internal message cache.
+
+        Returns
+        -------
+        Optional[:class:`Message`]
+            The cached message, or ``None`` if it is not cached.
+        """
+        if self._state is None or self.message_id is None:
+            return None
+        return await self._state._get_message(self.message_id)
 
     @property
     def jump_url(self) -> str:
@@ -681,6 +766,7 @@ class MessageReference:
         )
 
     def to_dict(self) -> MessageReferencePayload:
+        """Convert this reference to its payload."""
         result: MessageReferencePayload = (
             {"message_id": self.message_id} if self.message_id is not None else {}
         )
@@ -688,7 +774,7 @@ class MessageReference:
         result["type"] = self.type and self.type.value
         if self.guild_id is not None:
             result["guild_id"] = self.guild_id
-        if self.fail_if_not_exists is not None:
+        if self.fail_if_not_exists is not None:  # pyright: ignore[reportUnnecessaryComparison]
             result["fail_if_not_exists"] = self.fail_if_not_exists
         return result
 
@@ -701,12 +787,23 @@ class MessageCall:
     .. versionadded:: 2.6
     """
 
-    def __init__(self, state: ConnectionState, data: MessageCallPayload):
+    __slots__ = (
+        "_ended_timestamp",
+        "_participants",
+        "_state",
+    )
+
+    def __init__(self, state: ConnectionState, data: MessageCallPayload) -> None:
         self._state: ConnectionState = state
         self._participants: SnowflakeList = data.get("participants", [])
-        self._ended_timestamp: datetime.datetime | None = utils.parse_time(
-            data["ended_timestamp"]
+        self._ended_timestamp: dt.datetime | None = utils.parse_time(
+            data.get("ended_timestamp")
         )
+
+    @property
+    def participant_ids(self) -> list[int]:
+        """A list of the IDs of the users that participated in this call."""
+        return [int(i) for i in self._participants]
 
     @property
     def participants(self) -> list[User | Object]:
@@ -714,11 +811,34 @@ class MessageCall:
 
         If a user is not found in the client's cache,
         then it will be returned as an :class:`Object`.
+
+        This reads the in-memory cache, use :meth:`get_participants` with a remote cache backend.
         """
-        return [self._state.get_user(int(i)) or Object(i) for i in self._participants]
+        return [
+            self._state._users.get_nowait(user_id) or Object(user_id)
+            for user_id in self.participant_ids
+        ]
+
+    async def get_participants(self) -> list[User | Object]:
+        """|coro|
+
+        Returns the users that participated in this call.
+
+        If a user is not found in the client's cache,
+        then it will be returned as an :class:`Object`.
+
+        Returns
+        -------
+        List[Union[:class:`User`, :class:`Object`]]
+            The participants of this call.
+        """
+        return [
+            await self._state.get_user(user_id) or Object(user_id)
+            for user_id in self.participant_ids
+        ]
 
     @property
-    def ended_at(self) -> datetime.datetime | None:
+    def ended_at(self) -> dt.datetime | None:
         """An aware timestamp of when the call ended."""
         return self._ended_timestamp
 
@@ -732,13 +852,15 @@ class ForwardedMessage:
     ----------
     type: :class:`MessageType`
         The type of the original message. In most cases this should not be checked, but it is helpful
-        in cases where it might be a system message for :attr:`system_content`.
+        in cases where it might be a system message for :meth:`get_system_content`.
     original_message: Optional[Union[:class:`Message`, :class:`PartialMessage`]]
         The original message that was forwarded, if available.
     channel: Union[:class:`TextChannel`, :class:`Thread`, :class:`DMChannel`, :class:`GroupChannel`, :class:`PartialMessageable`]
-        The :class:`TextChannel` or :class:`Thread` that the original message was sent from.
-    guild: Optional[Union[:class:`Guild`, :class:`Object`]]
-        The guild that the original message belonged to, if applicable.
+        The channel that the original message was sent from, or a :class:`PartialMessageable`
+        handle if it is not in an in-process cache.
+    guild: Optional[Union[:class:`Guild`, :class:`PartialGuild`]]
+        The guild that the original message belonged to, if applicable, or a
+        :class:`PartialGuild` handle if it is not in an in-process cache.
     content: :class:`str`
         The contents of the original message.
     embeds: List[:class:`Embed`]
@@ -755,14 +877,33 @@ class ForwardedMessage:
             from one guild to another.
     role_mentions: List[:class:`Role`]
         A list of :class:`Role` that were originally mentioned.
-
-        .. warning::
-            This is only available using :meth:`abc.Messageable.fetch_message`.
+        This reads the in-memory cache, use :meth:`get_role_mentions` with a remote cache backend.
+    role_mention_ids: List[:class:`int`]
+        A list of the IDs of the roles that were originally mentioned.
     stickers: List[:class:`StickerItem`]
         A list of sticker items given to the original message.
     components: List[:class:`Component`]
         A list of components in the original message.
     """
+
+    __slots__ = (
+        "_edited_timestamp",
+        "_reference",
+        "_state",
+        "attachments",
+        "channel",
+        "components",
+        "content",
+        "embeds",
+        "flags",
+        "guild",
+        "id",
+        "mentions",
+        "original_message",
+        "role_mention_ids",
+        "stickers",
+        "type",
+    )
 
     def __init__(
         self,
@@ -770,22 +911,28 @@ class ForwardedMessage:
         state: ConnectionState,
         reference: MessageReference,
         data: ForwardedMessagePayload,
-    ):
+    ) -> None:
         self._state: ConnectionState = state
         self._reference = reference
-        self.id: int = reference.message_id
-        self.channel = state.get_channel(reference.channel_id) or (
-            reference.channel_id
+        self.id: int = cast("int", reference.message_id)
+        self.channel = reference.channel_id and (
+            cached_channel(state, reference.channel_id)
+            or PartialMessageable(state=state, id=reference.channel_id)
+        )
+        self.guild = reference.guild_id and (
+            cached_guild(state, reference.guild_id)
+            or PartialGuild(state=state, id=reference.guild_id)
+        )
+        cached_message = (
+            state._messages.get_nowait(self.id)
+            if self.id and state._messages is not None and state.cache.supports_sync
+            else None
+        )
+        self.original_message = cached_message or (
+            self.id
             and PartialMessageable(
-                state=state,
-                id=reference.channel_id,
-            )
-        )
-        self.guild = state._get_guild(reference.guild_id) or (
-            reference.guild_id and Object(reference.guild_id)
-        )
-        self.original_message = state._get_message(self.id) or (
-            self.id and self.channel.get_partial_message(self.id)
+                state=state, id=reference.channel_id
+            ).get_partial_message(self.id)
         )
         self.content: str = data["content"]
         self.embeds: list[Embed] = [Embed.from_dict(a) for a in data["embeds"]]
@@ -802,28 +949,60 @@ class ForwardedMessage:
         self.mentions: list[User] = [
             state.create_user(data=user) for user in data["mentions"]
         ]
-        self.role_mentions: list[Role] = []
-        if isinstance(self.guild, Guild) and data.get("mention_roles"):
-            for role_id in map(int, data["mention_roles"]):
-                role = self.guild.get_role(role_id)
-                if role is not None:
-                    self.role_mentions.append(role)
+        self.role_mention_ids: list[int] = [
+            int(role_id) for role_id in data.get("mention_roles", [])
+        ]
 
         self.type: MessageType = try_enum(MessageType, data["type"])
-        self._edited_timestamp: datetime.datetime | None = utils.parse_time(
+        self._edited_timestamp: dt.datetime | None = utils.parse_time(
             data["edited_timestamp"]
         )
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def role_mentions(self) -> list[Role]:
+        """The cached roles that were originally mentioned."""
+        guild_id = self._reference.guild_id
+        if guild_id is None:
+            return []
+        roles = self._state._guild_bucket("roles", guild_id)
+        return [
+            role
+            for role_id in self.role_mention_ids
+            if (role := roles.get_nowait(role_id)) is not None
+        ]
+
+    async def get_role_mentions(self) -> list[Role]:
+        """|coro|
+
+        Returns the cached roles that were originally mentioned.
+
+        Roles are looked up in the guild the original message belonged to,
+        so this is empty if the message was forwarded from another guild
+        or from a private channel.
+
+        Returns
+        -------
+        List[:class:`Role`]
+            The cached roles that were mentioned.
+        """
+        guild_id = self._reference.guild_id
+        if guild_id is None:
+            return []
+        roles = self._state._guild_bucket("roles", guild_id)
+        return [
+            role
+            for role_id in self.role_mention_ids
+            if (role := await roles.get(role_id)) is not None
+        ]
+
+    @property
+    def created_at(self) -> dt.datetime:
         """The original message's creation time in UTC."""
         return utils.snowflake_time(self.id)
 
     @property
-    def edited_at(self) -> datetime.datetime | None:
-        """An aware UTC datetime object containing the
-        edited time of the original message.
-        """
+    def edited_at(self) -> dt.datetime | None:
+        """An aware UTC datetime object containing the edited time of the original message."""
         return self._edited_timestamp
 
     def __repr__(self) -> str:
@@ -841,15 +1020,20 @@ class MessageSnapshot:
         The forwarded message, which includes a minimal subset of fields from the original message.
     """
 
+    __slots__ = (
+        "_state",
+        "message",
+    )
+
     def __init__(
         self,
         *,
         state: ConnectionState,
         reference: MessageReference,
         data: MessageSnapshotPayload,
-    ):
+    ) -> None:
         self._state: ConnectionState = state
-        self.message: ForwardedMessage | None
+        self.message: ForwardedMessage | None = None
         if fm := data.get("message"):
             self.message = ForwardedMessage(state=state, reference=reference, data=fm)
 
@@ -857,18 +1041,22 @@ class MessageSnapshot:
         return f"<MessageSnapshot message={self.message!r}>"
 
 
-def flatten_handlers(cls):
+def flatten_handlers(cls: type[_T]) -> type[_T]:
+    """Collect the ``_handle_*`` methods of a message class for fast updates."""
+    target = cast("Any", cls)
     prefix = len("_handle_")
     handlers = [
         (key[prefix:], value)
-        for key, value in cls.__dict__.items()
+        for key, value in target.__dict__.items()
         if key.startswith("_handle_") and key != "_handle_member"
     ]
 
     # store _handle_member last
-    handlers.append(("member", cls._handle_member))
-    cls._HANDLERS = handlers
-    cls._CACHED_SLOTS = [attr for attr in cls.__slots__ if attr.startswith("_cs_")]
+    handlers.append(("member", target._handle_member))
+    target._HANDLERS = handlers
+    target._CACHED_SLOTS = [
+        attr for attr in target.__slots__ if attr.startswith("_cs_")
+    ]
     return cls
 
 
@@ -883,9 +1071,9 @@ class MessagePin:
         state: ConnectionState,
         channel: MessageableChannel,
         data: MessagePinPayload,
-    ):
+    ) -> None:
         self._state: ConnectionState = state
-        self._pinned_at: datetime.datetime = utils.parse_time(data["pinned_at"])
+        self._pinned_at: dt.datetime = utils.parse_time(data["pinned_at"])
         self._message: Message = state.create_message(
             channel=channel, data=data["message"]
         )
@@ -896,7 +1084,7 @@ class MessagePin:
         return self._message
 
     @property
-    def pinned_at(self) -> datetime.datetime:
+    def pinned_at(self) -> dt.datetime:
         """An aware timestamp of when the message was pinned."""
         return self._pinned_at
 
@@ -923,14 +1111,14 @@ class Message(Hashable):
             Returns the message's hash.
 
     Attributes
-    -----------
+    ----------
     tts: :class:`bool`
         Specifies if the message was done with text-to-speech.
         This can only be accurately received in :func:`on_message` due to
         a discord limitation.
     type: :class:`MessageType`
         The type of message. In most cases this should not be checked, but it is helpful
-        in cases where it might be a system message for :attr:`system_content`.
+        in cases where it might be a system message for :meth:`get_system_content`.
     author: Union[:class:`Member`, :class:`abc.User`]
         A :class:`Member` that sent the message. If :attr:`channel` is a
         private channel or the user has the left the guild, then it is a :class:`User` instead.
@@ -941,9 +1129,9 @@ class Message(Hashable):
         This is not stored long term within Discord's servers and is only used ephemerally.
     embeds: List[:class:`Embed`]
         A list of embeds the message has.
-    channel: Union[:class:`TextChannel`, :class:`Thread`, :class:`DMChannel`, :class:`GroupChannel`, :class:`PartialMessageable`]
-        The :class:`TextChannel` or :class:`Thread` that the message was sent from.
-        Could be a :class:`DMChannel` or :class:`GroupChannel` if it's a private message.
+    channel: :class:`PartialMessageable`
+        A handle to the channel the message was sent from.
+        Use :meth:`PartialMessageable.get` to get the cached channel.
     reference: Optional[:class:`~discord.MessageReference`]
         The message that this message references. This is only applicable to messages of
         type :attr:`MessageType.pins_add`, crossposted messages created by a
@@ -963,18 +1151,18 @@ class Message(Hashable):
         A list of :class:`Member` that were mentioned. If the message is in a private message
         then the list will be of :class:`User` instead. For messages that are not of type
         :attr:`MessageType.default`\, this array can be used to aid in system messages.
-        For more information, see :attr:`system_content`.
+        For more information, see :meth:`get_system_content`.
 
         .. warning::
 
             The order of the mentions list is not in any particular order, so you should
             not rely on it. This is a Discord limitation, not one with the library.
-    channel_mentions: List[:class:`abc.GuildChannel`]
-        A list of :class:`abc.GuildChannel` that were mentioned. If the message is in a private message
-        then the list is always empty.
     role_mentions: List[:class:`Role`]
-        A list of :class:`Role` that were mentioned. If the message is in a private message
-        then the list is always empty.
+        A list of :class:`Role` that were mentioned, as cached when the message was received.
+        If the message is in a private message then the list is always empty.
+        Use :meth:`get_role_mentions` to look the roles up again.
+    role_mention_ids: List[:class:`int`]
+        A list of the IDs of the roles that were mentioned.
     id: :class:`int`
         The message ID.
     webhook_id: Optional[:class:`int`]
@@ -1017,8 +1205,10 @@ class Message(Hashable):
         A list of components in the message.
 
         .. versionadded:: 2.0
-    guild: Optional[:class:`Guild`]
-        The guild that the message belongs to, if applicable.
+    guild_id: Optional[:class:`int`]
+        The ID of the guild that the message belongs to, if applicable.
+    channel_id: :class:`int`
+        The ID of the channel the message was sent in.
     interaction: Optional[:class:`MessageInteraction`]
         The interaction associated with the message, if applicable.
 
@@ -1041,6 +1231,10 @@ class Message(Hashable):
         The call information associated with this message, if applicable.
 
         .. versionadded:: 2.6
+    shared_client_theme: Optional[:class:`SharedClientTheme`]
+        The client theme shared via this message, if applicable.
+
+        .. versionadded:: 3.0
     snapshots: Optional[List[:class:`MessageSnapshot`]]
         The snapshots attached to this message, if applicable.
 
@@ -1048,49 +1242,51 @@ class Message(Hashable):
     """
 
     __slots__ = (
-        "_state",
-        "_raw_data",
-        "_edited_timestamp",
+        "_channel_type",
         "_cs_channel_mentions",
-        "_cs_raw_mentions",
         "_cs_clean_content",
         "_cs_raw_channel_mentions",
+        "_cs_raw_mentions",
         "_cs_raw_role_mentions",
         "_cs_system_content",
-        "tts",
-        "content",
-        "channel",
-        "webhook_id",
-        "mention_everyone",
-        "embeds",
-        "id",
-        "mentions",
-        "author",
+        "_edited_timestamp",
+        "_interaction",
+        "_poll",
+        "_raw_data",
+        "_state",
+        "activity",
+        "application",
         "attachments",
+        "author",
+        "call",
+        "channel_id",
+        "components",
+        "content",
+        "embeds",
+        "flags",
+        "guild_id",
+        "id",
+        "interaction_metadata",
+        "mention_everyone",
+        "mentions",
         "nonce",
         "pinned",
-        "role_mentions",
-        "type",
-        "flags",
         "reactions",
         "reference",
-        "application",
-        "activity",
-        "stickers",
-        "components",
-        "guild",
-        "_interaction",
-        "interaction_metadata",
-        "thread",
-        "_poll",
-        "call",
+        "role_mention_ids",
+        "role_mentions",
+        "shared_client_theme",
         "snapshots",
+        "stickers",
+        "thread",
+        "tts",
+        "type",
+        "webhook_id",
     )
 
     if TYPE_CHECKING:
         _HANDLERS: ClassVar[list[tuple[str, Callable[..., None]]]]
         _CACHED_SLOTS: ClassVar[list[str]]
-        guild: Guild | None
         reference: MessageReference | None
         mentions: list[User | Member]
         author: User | Member
@@ -1102,11 +1298,19 @@ class Message(Hashable):
         state: ConnectionState,
         channel: MessageableChannel,
         data: MessagePayload,
-    ):
+    ) -> None:
         self._state: ConnectionState = state
         self._raw_data: MessagePayload = data
         self.id: int = int(data["id"])
+        self.channel_id: int = channel.id
+        self._channel_type: ChannelType | None = getattr(channel, "type", None)
+        guild_id = getattr(channel, "guild_id", None)
+        if guild_id is None:
+            guild_id = utils._get_as_snowflake(data, "guild_id")
+        self.guild_id: int | None = guild_id
         self.webhook_id: int | None = utils._get_as_snowflake(data, "webhook_id")
+        self.role_mention_ids: list[int] = []
+        self.role_mentions = []
         self.reactions: list[Reaction] = [
             Reaction(message=self, data=d) for d in data.get("reactions", [])
         ]
@@ -1116,8 +1320,7 @@ class Message(Hashable):
         self.embeds: list[Embed] = [Embed.from_dict(a) for a in data["embeds"]]
         self.application: MessageApplicationPayload | None = data.get("application")
         self.activity: MessageActivityPayload | None = data.get("activity")
-        self.channel: MessageableChannel = channel
-        self._edited_timestamp: datetime.datetime | None = utils.parse_time(
+        self._edited_timestamp: dt.datetime | None = utils.parse_time(
             data["edited_timestamp"]
         )
         self.type: MessageType = try_enum(MessageType, data["type"])
@@ -1134,23 +1337,15 @@ class Message(Hashable):
             _component_factory(d, state=state) for d in data.get("components", [])
         ]
 
-        try:
-            # if the channel doesn't have a guild attribute, we handle that
-            self.guild = channel.guild  # type: ignore
-        except AttributeError:
-            self.guild = state._get_guild(utils._get_as_snowflake(data, "guild_id"))
+        raw = cast("dict[str, Any]", data)
 
-        try:
-            ref = data["message_reference"]
-        except KeyError:
-            self.reference = None
-        else:
-            self.reference = ref = MessageReference.with_state(state, ref)
-            try:
+        self.reference: MessageReference | None
+        if "message_reference" in data:
+            self.reference = ref = MessageReference.with_state(
+                state, data["message_reference"]
+            )
+            if "referenced_message" in data:
                 resolved = data["referenced_message"]
-            except KeyError:
-                pass
-            else:
                 if resolved is None:
                     ref.resolved = DeletedReferencedMessage(ref)
                 else:
@@ -1158,22 +1353,26 @@ class Message(Hashable):
                     if ref.channel_id == channel.id:
                         chan = channel
                     else:
-                        chan, _ = state._get_guild_channel(
-                            resolved, guild_id=self.guild.id
+                        chan = PartialMessageable(
+                            state=state, id=int(resolved["channel_id"])
                         )
 
                     # the channel will be the correct type here
-                    ref.resolved = self.__class__(channel=chan, data=resolved, state=state)  # type: ignore
+                    ref.resolved = self.__class__(
+                        channel=chan, data=resolved, state=state
+                    )
+        else:
+            self.reference = None
 
         self.snapshots: list[MessageSnapshot]
         try:
             self.snapshots = [
                 MessageSnapshot(
                     state=state,
-                    reference=self.reference,
+                    reference=cast("MessageReference", self.reference),
                     data=ms,
                 )
-                for ms in data["message_snapshots"]
+                for ms in raw["message_snapshots"]
             ]
         except KeyError:
             self.snapshots = []
@@ -1182,32 +1381,39 @@ class Message(Hashable):
 
         self._interaction: MessageInteraction | None
         try:
-            self._interaction = MessageInteraction(
-                data=data["interaction"], state=state
-            )
+            self._interaction = MessageInteraction(data=raw["interaction"], state=state)
         except KeyError:
             self._interaction = None
+        self.interaction_metadata: InteractionMetadata | None
         try:
             self.interaction_metadata = InteractionMetadata(
-                data=data["interaction_metadata"], state=state
+                data=raw["interaction_metadata"], state=state
             )
         except KeyError:
             self.interaction_metadata = None
 
         self._poll: Poll | None
         try:
-            self._poll = Poll.from_dict(data["poll"], self)
-            self._state.store_poll(self._poll, self.id)
+            self._poll = Poll.from_dict(
+                raw["poll"],
+                PartialMessage(
+                    channel=self._partial_channel(), id=self.id, guild_id=self.guild_id
+                ),
+            )
         except KeyError:
             self._poll = None
 
-        self.thread: Thread | None
-        try:
-            self.thread = Thread(
-                guild=self.guild, state=self._state, data=data["thread"]
+        self.thread: Thread | None = None
+        if thread_data := data.get("thread"):
+            thread_guild_id = self.guild_id or utils._get_as_snowflake(
+                thread_data, "guild_id"
             )
-        except KeyError:
-            self.thread = None
+            if thread_guild_id is not None:
+                self.thread = Thread(
+                    guild=PartialGuild(state=state, id=thread_guild_id),
+                    state=self._state,
+                    data=thread_data,
+                )
 
         self.call: MessageCall | None
         try:
@@ -1215,11 +1421,13 @@ class Message(Hashable):
         except KeyError:
             self.call = None
 
+        self.shared_client_theme: SharedClientTheme | None = None
+        if theme := data.get("shared_client_theme"):
+            self.shared_client_theme = SharedClientTheme.from_dict(theme)
+
         for handler in ("author", "member", "mentions", "mention_roles"):
-            try:
-                getattr(self, f"_handle_{handler}")(data[handler])
-            except KeyError:
-                continue
+            with contextlib.suppress(KeyError):
+                getattr(self, f"_handle_{handler}")(raw[handler])
 
     def __repr__(self) -> str:
         name = self.__class__.__name__
@@ -1228,7 +1436,12 @@ class Message(Hashable):
             f" author={self.author!r} flags={self.flags!r}>"
         )
 
-    def _try_patch(self, data, key, transform=None) -> None:
+    def _try_patch(
+        self,
+        data: Mapping[str, Any],
+        key: str,
+        transform: Callable[[Any], Any] | None = None,
+    ) -> None:
         try:
             value = data[key]
         except KeyError:
@@ -1239,7 +1452,12 @@ class Message(Hashable):
             else:
                 setattr(self, key, transform(value))
 
-    def _add_reaction(self, data, emoji, user_id) -> Reaction:
+    def _add_reaction(
+        self,
+        data: ReactionPayload | ReactionActionEvent,
+        emoji: EmojiInputType,
+        user_id: int | None,
+    ) -> Reaction:
         reaction = utils.find(lambda r: r.emoji == emoji, self.reactions)
         is_me = data["me"] = user_id == self._state.self_id
 
@@ -1254,7 +1472,10 @@ class Message(Hashable):
         return reaction
 
     def _remove_reaction(
-        self, data: ReactionPayload, emoji: EmojiInputType, user_id: int
+        self,
+        data: ReactionPayload | ReactionActionEvent,
+        emoji: EmojiInputType,
+        user_id: int,
     ) -> Reaction:
         reaction = utils.find(lambda r: r.emoji == emoji, self.reactions)
 
@@ -1274,17 +1495,15 @@ class Message(Hashable):
 
         return reaction
 
-    def _clear_emoji(self, emoji) -> Reaction | None:
+    def _clear_emoji(self, emoji: EmojiInputType | Reaction) -> Reaction | None:
         to_check = str(emoji)
         for index, reaction in enumerate(self.reactions):
             if str(reaction.emoji) == to_check:
-                break
-        else:
-            # didn't find anything so just return
-            return
+                del self.reactions[index]
+                return reaction
 
-        del self.reactions[index]
-        return reaction
+        # didn't find anything so just return
+        return None
 
     def _handle_edited_timestamp(self, value: str) -> None:
         self._edited_timestamp = utils.parse_time(value)
@@ -1322,16 +1541,19 @@ class Message(Hashable):
     def _handle_nonce(self, value: str | int) -> None:
         self.nonce = value
 
+    def _handle_shared_client_theme(self, value: SharedClientThemePayload) -> None:
+        self.shared_client_theme = SharedClientTheme.from_dict(value) if value else None
+
     def _handle_poll(self, value: PollPayload) -> None:
-        self._poll = Poll.from_dict(value, self)
-        self._state.store_poll(self._poll, self.id)
+        self._poll = Poll.from_dict(
+            value,
+            PartialMessage(
+                channel=self._partial_channel(), id=self.id, guild_id=self.guild_id
+            ),
+        )
 
     def _handle_author(self, author: UserPayload) -> None:
-        self.author = self._state.store_user(author)
-        if isinstance(self.guild, Guild):
-            found = self.guild.get_member(self.author.id)
-            if found is not None:
-                self.author = found
+        self.author = self._state.create_user(author)
 
     def _handle_member(self, member: MemberPayload) -> None:
         # The gateway now gives us full Member objects sometimes with the following keys
@@ -1343,47 +1565,37 @@ class Message(Hashable):
         author = self.author
         try:
             # Update member reference
-            author._update_from_message(member)  # type: ignore
+            cast("Any", author)._update_from_message(member)
         except AttributeError:
             # It's a user here
             # TODO: consider adding to cache here
-            self.author = Member._from_message(message=self, data=member)
+            if self.guild_id is not None:
+                self.author = Member._from_message(message=self, data=member)
 
     def _handle_mentions(self, mentions: list[UserWithMemberPayload]) -> None:
-        self.mentions = r = []
+        r: list[User | Member] = []
+        self.mentions = r
         guild = self.guild
         state = self._state
-        if not isinstance(guild, Guild):
-            self.mentions = [state.store_user(m) for m in mentions]
+        if guild is None:
+            self.mentions = [state.create_user(m) for m in mentions]
             return
 
-        for mention in filter(None, mentions):
-            id_search = int(mention["id"])
-            member = guild.get_member(id_search)
-            if member is not None:
-                r.append(member)
-            else:
-                r.append(Member._try_upgrade(data=mention, guild=guild, state=state))
+        r.extend(
+            Member._try_upgrade(data=mention, guild=guild, state=state)
+            for mention in filter(None, mentions)
+        )
 
     def _handle_mention_roles(self, role_mentions: list[int]) -> None:
+        self.role_mention_ids = [int(role_id) for role_id in role_mentions]
         self.role_mentions = []
-        if isinstance(self.guild, Guild):
-            for role_id in map(int, role_mentions):
-                role = self.guild.get_role(role_id)
-                if role is not None:
-                    self.role_mentions.append(role)
 
-    def _handle_components(self, components: list[ComponentPayload]):
+    def _handle_components(self, components: list[ComponentPayload]) -> None:
         self.components = [_component_factory(d, state=self._state) for d in components]
-
-    def _rebind_cached_references(
-        self, new_guild: Guild, new_channel: TextChannel | Thread
-    ) -> None:
-        self.guild = new_guild
-        self.channel = new_channel
 
     @property
     def interaction(self) -> MessageInteraction | None:
+        """The interaction the message is a response to, if any."""
         utils.warn_deprecated(
             "interaction",
             "interaction_metadata",
@@ -1404,8 +1616,7 @@ class Message(Hashable):
 
     @utils.cached_slot_property("_cs_raw_mentions")
     def raw_mentions(self) -> list[int]:
-        """A property that returns an array of user IDs matched with
-        the syntax of ``<@user_id>`` in the message content.
+        """A property that returns an array of user IDs matched with the syntax of ``<@user_id>`` in the message content.
 
         This allows you to receive the user IDs of mentioned users
         even in a private message context.
@@ -1414,34 +1625,84 @@ class Message(Hashable):
 
     @utils.cached_slot_property("_cs_raw_channel_mentions")
     def raw_channel_mentions(self) -> list[int]:
-        """A property that returns an array of channel IDs matched with
-        the syntax of ``<#channel_id>`` in the message content.
-        """
+        """A property that returns an array of channel IDs matched with the syntax of ``<#channel_id>`` in the message content."""
         return [int(x) for x in re.findall(r"<#([0-9]{15,20})>", self.content)]
 
     @utils.cached_slot_property("_cs_raw_role_mentions")
     def raw_role_mentions(self) -> list[int]:
-        """A property that returns an array of role IDs matched with
-        the syntax of ``<@&role_id>`` in the message content.
-        """
+        """A property that returns an array of role IDs matched with the syntax of ``<@&role_id>`` in the message content."""
         return [int(x) for x in re.findall(r"<@&([0-9]{15,20})>", self.content)]
 
     @utils.cached_slot_property("_cs_channel_mentions")
     def channel_mentions(self) -> list[GuildChannel]:
-        if self.guild is None:
+        """A list of :class:`abc.GuildChannel` that were mentioned.
+
+        If the message is in a private message then the list is always empty.
+
+        This reads the in-memory cache, use :meth:`get_channel_mentions` with a remote cache backend.
+        """
+        if self.guild_id is None:
             return []
-        it = filter(None, map(self.guild.get_channel, self.raw_channel_mentions))
-        return utils._unique(it)
+        channels = self._state._guild_bucket("channels", self.guild_id)
+        found = [
+            channel
+            for channel_id in self.raw_channel_mentions
+            if (channel := channels.get_nowait(channel_id)) is not None
+        ]
+        return utils._unique(found)
+
+    async def get_channel_mentions(self) -> list[GuildChannel]:
+        """|coro|
+
+        Returns the cached channels mentioned in the message content with the
+        syntax of ``<#channel_id>``.
+
+        Returns
+        -------
+        List[:class:`abc.GuildChannel`]
+            The cached channels that were mentioned, without duplicates.
+        """
+        if self.guild_id is None:
+            return []
+        channels = self._state._guild_bucket("channels", self.guild_id)
+        found = [
+            channel
+            for channel_id in self.raw_channel_mentions
+            if (channel := await channels.get(channel_id)) is not None
+        ]
+        return utils._unique(found)
+
+    async def get_role_mentions(self) -> list[Role]:
+        """|coro|
+
+        Returns the cached roles mentioned in the message.
+
+        Returns
+        -------
+        List[:class:`Role`]
+            The cached roles that were mentioned.
+        """
+        if self.guild_id is None:
+            return []
+        roles = self._state._guild_bucket("roles", self.guild_id)
+        return [
+            role
+            for role_id in self.role_mention_ids
+            if (role := await roles.get(role_id)) is not None
+        ]
 
     @utils.cached_slot_property("_cs_clean_content")
     def clean_content(self) -> str:
-        """A property that returns the content in a "cleaned up"
-        manner. This basically means that mentions are transformed
+        """A property that returns the content in a "cleaned up" manner.
+
+        This basically means that mentions are transformed
         into the way the client shows it. e.g. ``<#id>`` will transform
         into ``#name``.
 
         This will also transform @everyone and @here mentions into
         non-mentions.
+
+        This reads the in-memory cache, use :meth:`get_clean_content` with a remote cache backend.
 
         .. note::
 
@@ -1449,10 +1710,27 @@ class Message(Hashable):
             or remove markdown then use :func:`utils.escape_markdown` or :func:`utils.remove_markdown`
             respectively, along with this function.
         """
+        return self._clean_content(self.channel_mentions, self.role_mentions)
 
+    async def get_clean_content(self) -> str:
+        """|coro|
+
+        Returns the content in a "cleaned up"
+        manner, like :attr:`clean_content`, looking the mentioned channels and
+        roles up through the asynchronous cache API.
+
+        Returns
+        -------
+        :class:`str`
+            The cleaned up content.
+        """
+        return self._clean_content(
+            await self.get_channel_mentions(), await self.get_role_mentions()
+        )
+
+    def _clean_content(self, channels: list[GuildChannel], roles: list[Role]) -> str:
         transformations = {
-            re.escape(f"<#{channel.id}>"): f"#{channel.name}"
-            for channel in self.channel_mentions
+            re.escape(f"<#{channel.id}>"): f"#{channel.name}" for channel in channels
         }
 
         mention_transforms = {
@@ -1469,14 +1747,13 @@ class Message(Hashable):
         transformations.update(mention_transforms)
         transformations.update(second_mention_transforms)
 
-        if self.guild is not None:
+        if self.guild_id is not None:
             role_transforms = {
-                re.escape(f"<@&{role.id}>"): f"@{role.name}"
-                for role in self.role_mentions
+                re.escape(f"<@&{role.id}>"): f"@{role.name}" for role in roles
             }
             transformations.update(role_transforms)
 
-        def repl(obj):
+        def repl(obj: re.Match[str]) -> str:
             return transformations.get(re.escape(obj.group(0)), "")
 
         pattern = re.compile("|".join(transformations.keys()))
@@ -1484,15 +1761,13 @@ class Message(Hashable):
         return escape_mentions(result)
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """The message's creation time in UTC."""
         return utils.snowflake_time(self.id)
 
     @property
-    def edited_at(self) -> datetime.datetime | None:
-        """An aware UTC datetime object containing the
-        edited time of the message.
-        """
+    def edited_at(self) -> dt.datetime | None:
+        """An aware UTC datetime object containing the edited time of the message."""
         return self._edited_timestamp
 
     @property
@@ -1502,8 +1777,83 @@ class Message(Hashable):
         return f"https://discord.com/channels/{guild_id}/{self.channel.id}/{self.id}"
 
     @property
+    def channel(self) -> MessageableChannel | PartialMessageable:
+        """The channel the message was sent in.
+
+        This is the cached channel when it is available in an in-process cache,
+        otherwise a :class:`PartialMessageable` handle.
+        Use :meth:`get_channel` to look the cached channel up with any cache backend.
+        """
+        return cached_channel(self._state, self.channel_id) or self._partial_channel()
+
+    @property
+    def guild(self) -> Guild | PartialGuild | None:
+        """The guild that the message belongs to, if applicable.
+
+        This is the cached guild when it is available in an in-process cache,
+        otherwise a :class:`PartialGuild` handle.
+        Use :meth:`get_guild` to look the cached guild up with any cache backend.
+        """
+        if self.guild_id is None:
+            return None
+        return cached_guild(self._state, self.guild_id) or PartialGuild(
+            state=self._state, id=self.guild_id
+        )
+
+    def _partial_channel(self) -> PartialMessageable:
+        return PartialMessageable(
+            state=self._state, id=self.channel_id, type=self._channel_type
+        )
+
+    async def get_channel(self) -> MessageableChannel | None:
+        """|coro|
+
+        Returns the cached channel the message was sent in.
+
+        Returns
+        -------
+        Optional[Union[:class:`TextChannel`, :class:`VoiceChannel`, :class:`StageChannel`, :class:`DMChannel`, :class:`GroupChannel`, :class:`Thread`]]
+            The channel, or ``None`` if it is not cached.
+        """
+        return await self._partial_channel().get()
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the cached guild that the message belongs to.
+
+        Returns
+        -------
+        Optional[:class:`Guild`]
+            The guild, or ``None`` if it is not cached or the message is not in a guild.
+        """
+        return await self._state._get_guild(self.guild_id)
+
+    @property
     def poll(self) -> Poll | None:
-        return self._state._polls.get(self.id)
+        """The cached poll of this message, if any.
+
+        This reads the in-process cache, use :meth:`get_poll` with a remote
+        cache backend.
+
+        Raises
+        ------
+        SyncCacheAccessError
+            The cache backend is not the in-process one.
+        """
+        return self._state._polls.get_nowait(self.id)
+
+    async def get_poll(self) -> Poll | None:
+        """|coro|
+
+        Returns the cached poll of this message.
+
+        Returns
+        -------
+        Optional[:class:`Poll`]
+            The poll, or ``None`` if it is not cached.
+        """
+        return await self._state.get_poll(self.id)
 
     def is_system(self) -> bool:
         """Whether the message is a system message.
@@ -1521,16 +1871,38 @@ class Message(Hashable):
         )
 
     @utils.cached_slot_property("_cs_system_content")
-    def system_content(self) -> str:
-        r"""A property that returns the content that is rendered
-        regardless of the :attr:`Message.type`.
+    def system_content(self) -> str | None:
+        r"""A property that returns the content that is rendered regardless of the :attr:`Message.type`.
 
         In the case of :attr:`MessageType.default` and :attr:`MessageType.reply`\,
         this just returns the regular :attr:`Message.content`, and forwarded messages
         will display the original message's content from :attr:`Message.snapshots`. Otherwise, this
         returns an English message denoting the contents of the system message.
-        """
 
+        This reads the in-memory cache, use :meth:`get_system_content` with a remote cache backend.
+        """
+        guild_name = None
+        if self.guild_id is not None:
+            guild = self._state._guilds.get_nowait(self.guild_id)
+            guild_name = guild.name if guild is not None else None
+        return self._system_content(guild_name)
+
+    async def get_system_content(self) -> str | None:
+        r"""|coro|
+
+        Returns the content that is rendered regardless of the :attr:`Message.type`,
+        like :attr:`system_content`, looking the guild up through the asynchronous cache API.
+
+        Returns
+        -------
+        Optional[:class:`str`]
+            The rendered content, or ``None`` for message types without one.
+        """
+        guild = await self.get_guild()
+        guild_name = guild.name if guild is not None else None
+        return self._system_content(guild_name)
+
+    def _system_content(self, guild_name: str | None) -> str | None:
         if self.type is MessageType.default:
             if self.snapshots:
                 return self.snapshots[0].message and self.snapshots[0].message.content
@@ -1539,10 +1911,7 @@ class Message(Hashable):
         if self.type is MessageType.recipient_add:
             if self.channel.type is ChannelType.group:
                 return f"{self.author.name} added {self.mentions[0].name} to the group."
-            else:
-                return (
-                    f"{self.author.name} added {self.mentions[0].name} to the thread."
-                )
+            return f"{self.author.name} added {self.mentions[0].name} to the thread."
 
         if self.type is MessageType.recipient_remove:
             if self.channel.type is ChannelType.group:
@@ -1550,11 +1919,9 @@ class Message(Hashable):
                     f"{self.author.name} removed {self.mentions[0].name} from the"
                     " group."
                 )
-            else:
-                return (
-                    f"{self.author.name} removed {self.mentions[0].name} from the"
-                    " thread."
-                )
+            return (
+                f"{self.author.name} removed {self.mentions[0].name} from the thread."
+            )
 
         if self.type is MessageType.channel_name_change:
             return f"{self.author.name} changed the channel name: **{self.content}**"
@@ -1588,54 +1955,50 @@ class Message(Hashable):
         if self.type is MessageType.premium_guild_subscription:
             if not self.content:
                 return f"{self.author.name} just boosted the server!"
-            else:
-                return (
-                    f"{self.author.name} just boosted the server **{self.content}**"
-                    " times!"
-                )
+            return (
+                f"{self.author.name} just boosted the server **{self.content}** times!"
+            )
 
         if self.type is MessageType.premium_guild_tier_1:
             if not self.content:
                 return (
-                    f"{self.author.name} just boosted the server! {self.guild} has"
+                    f"{self.author.name} just boosted the server! {guild_name} has"
                     " achieved **Level 1!**"
                 )
-            else:
-                return (
-                    f"{self.author.name} just boosted the server **{self.content}**"
-                    f" times! {self.guild} has achieved **Level 1!**"
-                )
+            return (
+                f"{self.author.name} just boosted the server **{self.content}**"
+                f" times! {guild_name} has achieved **Level 1!**"
+            )
 
         if self.type is MessageType.premium_guild_tier_2:
             if not self.content:
                 return (
-                    f"{self.author.name} just boosted the server! {self.guild} has"
+                    f"{self.author.name} just boosted the server! {guild_name} has"
                     " achieved **Level 2!**"
                 )
-            else:
-                return (
-                    f"{self.author.name} just boosted the server **{self.content}**"
-                    f" times! {self.guild} has achieved **Level 2!**"
-                )
+            return (
+                f"{self.author.name} just boosted the server **{self.content}**"
+                f" times! {guild_name} has achieved **Level 2!**"
+            )
 
         if self.type is MessageType.premium_guild_tier_3:
             if not self.content:
                 return (
-                    f"{self.author.name} just boosted the server! {self.guild} has"
+                    f"{self.author.name} just boosted the server! {guild_name} has"
                     " achieved **Level 3!**"
                 )
-            else:
-                return (
-                    f"{self.author.name} just boosted the server **{self.content}**"
-                    f" times! {self.guild} has achieved **Level 3!**"
-                )
+            return (
+                f"{self.author.name} just boosted the server **{self.content}**"
+                f" times! {guild_name} has achieved **Level 3!**"
+            )
 
         if self.type is MessageType.channel_follow_add:
             return f"{self.author.name} has added {self.content} to this channel"
 
         if self.type is MessageType.guild_stream:
             # the author will be a Member
-            return f"{self.author.name} is live! Now streaming {self.author.activity.name}"  # type: ignore
+            activity_name = cast("Any", self.author).activity.name
+            return f"{self.author.name} is live! Now streaming {activity_name}"
 
         if self.type is MessageType.guild_discovery_disqualified:
             return (
@@ -1678,13 +2041,15 @@ class Message(Hashable):
                 return "Sorry, we couldn't load the first message in this thread"
 
             # the resolved message for the reference will be a Message
-            return self.reference.resolved.content  # type: ignore
+            return cast("Message", self.reference.resolved).content
 
         if self.type is MessageType.guild_invite_reminder:
             return (
                 "Wondering who to invite?\nStart by inviting anyone who can help you"
                 " build the server!"
             )
+
+        return None
 
     async def delete(
         self, *, delay: float | None = None, reason: str | None = None
@@ -1725,30 +2090,13 @@ class Message(Hashable):
         else:
             await del_func
 
-    @overload
-    async def edit(
-        self,
-        *,
-        content: str | None = ...,
-        embed: Embed | None = ...,
-        embeds: list[Embed] = ...,
-        file: File | None = ...,
-        files: list[File] | None = ...,
-        attachments: list[Attachment] = ...,
-        suppress: bool = ...,
-        suppress_embeds: bool = ...,
-        delete_after: float | None = ...,
-        allowed_mentions: AllowedMentions | None = ...,
-        view: BaseView | None = ...,
-    ) -> Message: ...
-
     async def edit(
         self,
         content: str | None = MISSING,
         embed: Embed | None = MISSING,
         embeds: list[Embed] = MISSING,
-        file: Sequence[File] = MISSING,
-        files: list[Sequence[File]] = MISSING,
+        file: File | None = MISSING,
+        files: list[File] | None = MISSING,
         attachments: list[Attachment] = MISSING,
         suppress: bool = MISSING,
         suppress_embeds: bool = MISSING,
@@ -1830,7 +2178,6 @@ class Message(Hashable):
             specified both ``file`` and ``files``, or either``file``
             or ``files`` were of the wrong type.
         """
-
         payload: dict[str, Any] = {}
         if content is not MISSING:
             payload["content"] = str(content) if content is not None else None
@@ -1886,13 +2233,14 @@ class Message(Hashable):
             if file is not MISSING:
                 if not isinstance(file, File):
                     raise InvalidArgument("file parameter must be of type File")
-                files = [file]
+                upload = [file]
             else:
-                if len(files) > 10:
+                upload = cast("list[File]", files)
+                if len(upload) > 10:
                     raise InvalidArgument(
                         "files parameter must be a list of up to 10 elements"
                     )
-                elif not all(isinstance(file, File) for file in files):
+                if not all(isinstance(f, File) for f in upload):  # pyright: ignore[reportUnnecessaryIsInstance]
                     raise InvalidArgument("files parameter must be a list of File")
 
             if "attachments" not in payload:
@@ -1902,17 +2250,17 @@ class Message(Hashable):
                 data = await self._state.http.edit_files(
                     self.channel.id,
                     self.id,
-                    files=files,
+                    files=upload,
                     **payload,
                 )
             finally:
-                for f in files:
+                for f in upload:
                     f.close()
         else:
             data = await self._state.http.edit_message(
                 self.channel.id, self.id, **payload
             )
-        message = Message(state=self._state, channel=self.channel, data=data)
+        message = await self._state._create_message(channel=self.channel, data=data)
 
         if view and not view.is_finished():
             view.message = message
@@ -1942,7 +2290,6 @@ class Message(Hashable):
         HTTPException
             Publishing the message failed.
         """
-
         await self._state.http.publish_message(self.channel.id, self.id)
 
     async def pin(self, *, reason: str | None = None) -> None:
@@ -1970,7 +2317,6 @@ class Message(Hashable):
             Pinning the message failed, probably due to the channel
             having more than 50 pinned messages.
         """
-
         await self._state.http.pin_message(self.channel.id, self.id, reason=reason)
         self.pinned = True
 
@@ -1998,7 +2344,6 @@ class Message(Hashable):
         HTTPException
             Unpinning the message failed.
         """
-
         await self._state.http.unpin_message(self.channel.id, self.id, reason=reason)
         self.pinned = False
 
@@ -2029,7 +2374,6 @@ class Message(Hashable):
         InvalidArgument
             The emoji parameter is invalid.
         """
-
         emoji = convert_emoji_reaction(emoji)
         await self._state.http.add_reaction(self.channel.id, self.id, emoji)
 
@@ -2066,7 +2410,6 @@ class Message(Hashable):
         InvalidArgument
             The emoji parameter is invalid.
         """
-
         emoji = convert_emoji_reaction(emoji)
 
         if member.id == self._state.self_id:
@@ -2103,7 +2446,6 @@ class Message(Hashable):
         InvalidArgument
             The emoji parameter is invalid.
         """
-
         emoji = convert_emoji_reaction(emoji)
         await self._state.http.clear_single_reaction(self.channel.id, self.id, emoji)
 
@@ -2170,7 +2512,7 @@ class Message(Hashable):
             raise InvalidArgument("This message does not have guild info attached.")
 
         default_auto_archive_duration: ThreadArchiveDuration = getattr(
-            self.channel, "default_auto_archive_duration", 1440
+            await self.get_channel(), "default_auto_archive_duration", 1440
         )
 
         data = await self._state.http.start_thread_with_message(
@@ -2185,7 +2527,7 @@ class Message(Hashable):
         self.thread = Thread(guild=self.guild, state=self._state, data=data)
         return self.thread
 
-    async def reply(self, content: str | None = None, **kwargs) -> Message:
+    async def reply(self, content: str | None = None, **kwargs: Any) -> Message:
         """|coro|
 
         A shortcut method to :meth:`.abc.Messageable.send` to reply to the
@@ -2208,11 +2550,10 @@ class Message(Hashable):
             The ``files`` list is not of the appropriate size, or
             you specified both ``file`` and ``files``.
         """
-
         return await self.channel.send(content, reference=self.to_reference(), **kwargs)
 
     async def forward_to(
-        self, channel: MessageableChannel | PartialMessageableChannel, **kwargs
+        self, channel: MessageableChannel | PartialMessageableChannel, **kwargs: Any
     ) -> Message:
         """|coro|
 
@@ -2241,7 +2582,6 @@ class Message(Hashable):
             The ``files`` list is not of the appropriate size, or
             you specified both ``file`` and ``files``.
         """
-
         return await channel.send(
             reference=self.to_reference(type=MessageReferenceType.forward), **kwargs
         )
@@ -2265,17 +2605,34 @@ class Message(Hashable):
         HTTPException
             Ending this poll failed.
         """
-
         data = await self._state.http.expire_poll(
             self.channel.id,
             self.id,
         )
-        message = Message(state=self._state, channel=self.channel, data=data)
+        return await self._state._create_message(channel=self.channel, data=data)
 
-        return message
+    def search_replies(self, **filters: Any) -> MessageSearchIterator:
+        """Retrieves an :class:`.AsyncIterator` of the messages replying to this message.
+
+        This is :meth:`Guild.search_messages` with ``replied_to_messages`` set to this message.
+
+        .. versionadded:: 3.0
+
+        Raises
+        ------
+        ValueError
+            This message is not in a guild.
+        """
+        guild = self.guild
+        if guild is None:
+            raise ValueError("only messages of a guild can be searched")
+        return guild.search_messages(replied_to_messages=[self], **filters)
 
     def to_reference(
-        self, *, fail_if_not_exists: bool = True, type: MessageReferenceType = None
+        self,
+        *,
+        fail_if_not_exists: bool = True,
+        type: MessageReferenceType | None = None,
     ) -> MessageReference:
         """Creates a :class:`~discord.MessageReference` from the current message.
 
@@ -2299,27 +2656,57 @@ class Message(Hashable):
         :class:`~discord.MessageReference`
             The reference to this message.
         """
-
         return MessageReference.from_message(
-            self, fail_if_not_exists=fail_if_not_exists, type=type
+            self,
+            fail_if_not_exists=fail_if_not_exists,
+            type=cast("MessageReferenceType", type),
         )
 
     def to_message_reference_dict(
-        self, type: MessageReferenceType = None
+        self, type: MessageReferenceType | None = None
     ) -> MessageReferencePayload:
-        data: MessageReferencePayload = {
-            "message_id": self.id,
-            "channel_id": self.channel.id,
-            "type": type and type.value,
-        }
+        """Convert this message to a reference payload."""
+        data = cast(
+            "MessageReferencePayload",
+            {
+                "message_id": self.id,
+                "channel_id": self.channel.id,
+                "type": type and type.value,
+            },
+        )
 
         if self.guild is not None:
             data["guild_id"] = self.guild.id
 
         return data
 
+    def get_view(self) -> BaseView:
+        """Gets the view attached to this message.
+
+        If a view is being tracked for this message, it is returned. Otherwise a new
+        view is built from the components of the message: a :class:`~discord.ui.DesignerView`
+        if the message uses components v2, a :class:`~discord.ui.View` otherwise. That view
+        is not registered to listen for interactions.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        :class:`~discord.ui.BaseView`
+            The view attached to this message.
+        """
+        view = self._state.get_message_view(self.id)
+        if view is not None:
+            return view
+        from .ui import DesignerView, View
+
+        if self.flags.is_components_v2:
+            return DesignerView.from_message(self, store=False)
+        return View.from_message(self, store=False)
+
     def get_component(self, id: str | int) -> Component | None:
         """Gets a component from this message. Roughly equal to `utils.get(message.components, ...)`.
+
         If an :class:`int` is provided, the component will be retrieved by ``id``, otherwise by  ``custom_id``.
         This method will also search nested components.
 
@@ -2339,15 +2726,15 @@ class Message(Hashable):
         for i in self.components:
             if getattr(i, attr, None) == id:
                 return i
-            elif hasattr(i, "get_component"):
-                if component := i.get_component(id):
-                    return component
+            if hasattr(i, "get_component") and (
+                component := cast("Any", i).get_component(id)
+            ):
+                return component
         return None
 
 
 class PartialMessage(Hashable):
-    """Represents a partial message to aid with working messages when only
-    a message and channel ID are present.
+    """Represents a partial message to aid with working messages when only a message and channel ID are present.
 
     There are two ways to construct this class. The first one is through
     the constructor itself, and the second is via the following:
@@ -2385,9 +2772,9 @@ class PartialMessage(Hashable):
         The message ID.
     """
 
-    __slots__ = ("channel", "id", "_cs_guild", "_state")
+    __slots__ = ("_cs_guild", "_guild_id", "_state", "channel", "id")
 
-    jump_url: str = Message.jump_url  # type: ignore
+    jump_url: str = cast("str", Message.jump_url)
     delete = Message.delete
     publish = Message.publish
     pin = Message.pin
@@ -2401,7 +2788,13 @@ class PartialMessage(Hashable):
     to_reference = Message.to_reference
     to_message_reference_dict = Message.to_message_reference_dict
 
-    def __init__(self, *, channel: PartialMessageableChannel, id: int):
+    def __init__(
+        self,
+        *,
+        channel: PartialMessageableChannel,
+        id: int,
+        guild_id: int | None = None,
+    ) -> None:
         if channel.type not in (
             ChannelType.text,
             ChannelType.voice,
@@ -2420,32 +2813,70 @@ class PartialMessage(Hashable):
         self.channel: PartialMessageableChannel = channel
         self._state: ConnectionState = channel._state
         self.id: int = id
+        self._guild_id: int | None = guild_id
 
-    def _update(self, data) -> None:
+    def _update(self, data: object) -> None:
         # This is used for duck typing purposes.
         # Just do nothing with the data.
         pass
 
     # Also needed for duck typing purposes
     # n.b. not exposed
-    pinned = property(None, lambda x, y: None)
+    pinned = property(None, lambda _x, _y: None)
 
     def __repr__(self) -> str:
         return f"<PartialMessage id={self.id} channel={self.channel!r}>"
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """The partial message's creation time in UTC."""
         return utils.snowflake_time(self.id)
 
     @property
     def poll(self) -> Poll | None:
-        return self._state._polls.get(self.id)
+        """The cached poll of this message, if any.
+
+        This reads the in-process cache, use :meth:`get_poll` with a remote
+        cache backend.
+
+        Raises
+        ------
+        SyncCacheAccessError
+            The cache backend is not the in-process one.
+        """
+        return self._state._polls.get_nowait(self.id)
+
+    async def get_poll(self) -> Poll | None:
+        """|coro|
+
+        Returns the cached poll of this message.
+
+        Returns
+        -------
+        Optional[:class:`Poll`]
+            The poll, or ``None`` if it is not cached.
+        """
+        return await self._state.get_poll(self.id)
+
+    async def get(self) -> Message | None:
+        """|coro|
+
+        Returns the cached message.
+
+        Returns
+        -------
+        Optional[:class:`Message`]
+            The message, or ``None`` if it is not cached.
+        """
+        return await self._state._get_message(self.id)
 
     @utils.cached_slot_property("_cs_guild")
-    def guild(self) -> Guild | None:
-        """The guild that the partial message belongs to, if applicable."""
-        return getattr(self.channel, "guild", None)
+    def guild(self) -> PartialGuild | None:
+        """A handle to the guild that the partial message belongs to, if applicable."""
+        guild_id = getattr(self.channel, "guild_id", None) or self._guild_id
+        if guild_id is None:
+            return None
+        return PartialGuild(state=self._state, id=guild_id)
 
     async def fetch(self) -> Message:
         """|coro|
@@ -2466,9 +2897,10 @@ class PartialMessage(Hashable):
         HTTPException
             Retrieving the message failed.
         """
-
         data = await self._state.http.get_message(self.channel.id, self.id)
-        return self._state.create_message(channel=self.channel, data=data)
+        return await self._state._cache_fetched(
+            await self._state._create_message(channel=self.channel, data=data)
+        )
 
     async def edit(self, **fields: Any) -> Message | None:
         """|coro|
@@ -2527,7 +2959,6 @@ class PartialMessage(Hashable):
             Tried to suppress a message without permissions or
             edited a message's content or embed that isn't yours.
         """
-
         content = fields.pop("content", MISSING)
         if content is not MISSING:
             fields["content"] = str(content) if content is not None else None
@@ -2574,23 +3005,18 @@ class PartialMessage(Hashable):
                 flags.is_components_v2 = True
 
         fields["flags"] = flags.value
-        if fields:
-            data = await self._state.http.edit_message(
-                self.channel.id, self.id, **fields
-            )
+        data = await self._state.http.edit_message(self.channel.id, self.id, **fields)
 
         if delete_after is not None:
             await self.delete(delay=delete_after)
 
-        if fields:
-            # data isn't unbound
-            msg = self._state.create_message(channel=self.channel, data=data)  # type: ignore
-            if view and not view.is_finished():
-                view.message = msg
-                view._refresh(msg.components)
-                if view.is_dispatchable():
-                    self._state.store_view(view, self.id)
-            return msg
+        msg = await self._state._create_message(channel=self.channel, data=data)
+        if view and not view.is_finished():
+            view.message = msg
+            view._refresh(msg.components)
+            if view.is_dispatchable():
+                self._state.store_view(view, self.id)
+        return msg
 
     async def end_poll(self) -> Message:
         """|coro|
@@ -2611,11 +3037,8 @@ class PartialMessage(Hashable):
         HTTPException
             Ending this poll failed.
         """
-
         data = await self._state.http.expire_poll(
             self.channel.id,
             self.id,
         )
-        message = self._state.create_message(channel=self.channel, data=data)
-
-        return message
+        return await self._state._create_message(channel=self.channel, data=data)

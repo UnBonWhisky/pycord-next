@@ -25,25 +25,34 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import struct
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 
-from ..types import snowflake
 from .errors import SinkException
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+    from ..member import Member
+    from ..object import Object
+    from ..types import snowflake
+    from ..user import User
     from ..voice import VoiceClient
+    from ..voice.packets import VoiceData
+
+    F = TypeVar("F", bound=Callable[..., Any])
 
 __all__ = (
-    "Filters",
-    "Sink",
     "AudioData",
+    "Filters",
     "RawData",
+    "Sink",
 )
 
 
@@ -53,7 +62,7 @@ else:
     CREATE_NO_WINDOW = 0x08000000
 
 
-default_filters = {
+default_filters: dict[str, Any] = {
     "time": 0,
     "users": [],
     "max_size": 0,
@@ -67,34 +76,58 @@ class Filters:
 
     Parameters
     ----------
-    container
-        Container of all Filters.
+    users
+        The users to record, every user is recorded if empty.
+    time
+        The number of seconds after which the recording stops, ``0``
+        for no limit.
+    max_size
+        The maximum size of the recording, ``0`` for no limit.
     """
 
-    def __init__(self, **kwargs):
-        self.filtered_users = kwargs.get("users", default_filters["users"])
-        self.seconds = kwargs.get("time", default_filters["time"])
-        self.max_size = kwargs.get("max_size", default_filters["max_size"])
-        self.finished = False
+    vc: VoiceClient | None
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.filtered_users: list[Any] = kwargs.get("users", default_filters["users"])
+        self.seconds: float = kwargs.get("time", default_filters["time"])
+        self.max_size: int = kwargs.get("max_size", default_filters["max_size"])
+        self.finished: bool = False
 
     @staticmethod
-    def container(func):  # Contains all filters
-        def _filter(self, data, user):
+    def container(func: F) -> F:
+        """Wrap a ``write`` method so that it only receives filtered data.
+
+        Parameters
+        ----------
+        func
+            The ``write`` method to wrap.
+
+        Returns
+        -------
+        The wrapped method, which ignores data from users that are not
+        part of the filter.
+        """
+
+        def _filter(self: Filters, data: Any, user: Any) -> Any:
             if not self.filtered_users or user in self.filtered_users:
                 return func(self, data, user)
+            return None
 
-        return _filter
+        return cast("F", _filter)
 
-    def init(self):
+    def init(self, *args: Any, **kwargs: Any) -> None:
+        """Start the time limit of the filter, if any."""
         if self.seconds != 0:
             thread = threading.Thread(target=self.wait_and_stop)
             thread.start()
 
-    def wait_and_stop(self):
+    def wait_and_stop(self) -> None:
+        """Wait for the time limit to elapse then stop the recording."""
         time.sleep(self.seconds)
         if self.finished:
             return
-        self.vc.stop_recording()
+        if self.vc is not None:
+            self.vc.stop_recording()
 
 
 class RawData:
@@ -103,7 +136,7 @@ class RawData:
     .. versionadded:: 2.0
     """
 
-    def __init__(self, data, client):
+    def __init__(self, data: bytes, client: VoiceClient) -> None:
         self.data = bytearray(data)
         self.client = client
 
@@ -126,9 +159,9 @@ class RawData:
         self.decrypted_data = getattr(self.client, f"_decrypt_{self.client.mode}")(
             self.header, self.data
         )
-        self.decoded_data = None
+        self.decoded_data: bytes | None = None
 
-        self.user_id = None
+        self.user_id: int | None = None
         self.receive_time = time.perf_counter()
 
 
@@ -136,14 +169,24 @@ class AudioData:
     """Handles data that's been completely decrypted and decoded and is ready to be saved to file.
 
     .. versionadded:: 2.0
+
+    Parameters
+    ----------
+    file
+        The binary file the audio is written to.
     """
 
-    def __init__(self, file):
-        self.file = file
-        self.finished = False
+    def __init__(self, file: IO[bytes]) -> None:
+        self.file: IO[bytes] = file
+        self.finished: bool = False
 
-    def write(self, data):
+    def write(self, data: bytes) -> None:
         """Writes audio data.
+
+        Parameters
+        ----------
+        data: :class:`bytes`
+            The audio data to write.
 
         Raises
         ------
@@ -152,12 +195,10 @@ class AudioData:
         """
         if self.finished:
             raise SinkException("The AudioData is already finished writing.")
-        try:
+        with contextlib.suppress(ValueError):
             self.file.write(data)
-        except ValueError:
-            pass
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Finishes and cleans up the audio data.
 
         Raises
@@ -170,8 +211,13 @@ class AudioData:
         self.file.seek(0)
         self.finished = True
 
-    def on_format(self, encoding):
+    def on_format(self, encoding: str) -> None:
         """Called when audio data is formatted.
+
+        Parameters
+        ----------
+        encoding: :class:`str`
+            The encoding the audio data was formatted to.
 
         Raises
         ------
@@ -202,6 +248,11 @@ class Sink(Filters):
 
     .. versionadded:: 2.0
 
+    Parameters
+    ----------
+    filters: dict[:class:`str`, Any] | None
+        The filters of the sink, see :class:`Filters`.
+
     Raises
     ------
     ClientException
@@ -210,41 +261,89 @@ class Sink(Filters):
         Audio may only be formatted after recording is finished.
     """
 
-    def __init__(self, *, filters=None):
+    __sink_listeners__: ClassVar[list[tuple[str, str]]] = []
+
+    def __init__(self, *, filters: dict[str, Any] | None = None) -> None:
         if filters is None:
             filters = default_filters
-        self.filters = filters
+        self.filters: dict[str, Any] = filters
         Filters.__init__(self, **self.filters)
         self.vc: VoiceClient | None = None
-        self.audio_data = {}
+        self.audio_data: dict[User | Member | Object | None, AudioData] = {}
 
     @property
     def client(self) -> VoiceClient | None:
+        """The voice client this sink is recording from, if any."""
         return self.vc
 
-    def init(self, vc: VoiceClient):  # called under listen
+    @property
+    def recording(self) -> bool:
+        """Whether the voice client is currently recording."""
+        return self.vc is not None and bool(self.vc.is_recording())
+
+    def is_opus(self) -> bool:
+        """Whether this sink accepts raw opus packets instead of decoded PCM."""
+        return False
+
+    def walk_children(self) -> Iterator[Sink]:
+        """Yields child sinks. Base implementation yields nothing."""
+        return
+        yield  # make it a generator
+
+    def init(self, vc: VoiceClient) -> None:  # called under listen
+        """Attach the sink to a voice client when recording starts.
+
+        Parameters
+        ----------
+        vc: :class:`VoiceClient`
+            The voice client the sink records from.
+        """
         self.vc = vc
         super().init()
 
     @Filters.container
-    def write(self, data, user):
+    def write(
+        self, data: VoiceData | bytes, user: User | Member | Object | None
+    ) -> None:
+        """Write the audio of a user to the sink.
+
+        Parameters
+        ----------
+        data: :class:`VoiceData` | :class:`bytes`
+            The audio data to write.
+        user: :class:`User` | :class:`Member` | :class:`Object` | None
+            The user the audio comes from.
+        """
+        pcm_data = data if isinstance(data, (bytes, bytearray)) else data.pcm
+
         if user not in self.audio_data:
             file = io.BytesIO()
             self.audio_data.update({user: AudioData(file)})
 
-        file = self.audio_data[user]
-        file.write(data)
+        self.audio_data[user].write(pcm_data)
 
-    def cleanup(self):
+    def format_audio(self, audio: AudioData) -> None:
+        """Format the recorded audio, implemented by the sink subclasses.
+
+        Parameters
+        ----------
+        audio: :class:`AudioData`
+            The audio data to format.
+        """
+        raise NotImplementedError
+
+    def cleanup(self) -> None:
+        """Finish the recording and format the audio of every user."""
         self.finished = True
         for file in self.audio_data.values():
             file.cleanup()
             self.format_audio(file)
 
-    def get_all_audio(self):
+    def get_all_audio(self) -> list[IO[bytes]]:
         """Gets all audio files."""
         return [x.file for x in self.audio_data.values()]
 
-    def get_user_audio(self, user: snowflake.Snowflake):
+    def get_user_audio(self, user: snowflake.Snowflake) -> str:
         """Gets the audio file(s) of one specific user."""
-        return os.path.realpath(self.audio_data.pop(user))
+        audio_data = cast("dict[Any, Any]", self.audio_data)
+        return os.path.realpath(audio_data.pop(user))

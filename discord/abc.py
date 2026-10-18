@@ -26,16 +26,16 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import time
-from collections.abc import Callable, Iterable, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
     Protocol,
     TypeAlias,
     TypeVar,
-    Union,
+    cast,
     overload,
     runtime_checkable,
 )
@@ -49,32 +49,33 @@ from .flags import ChannelFlags, MessageFlags
 from .invite import Invite
 from .iterators import HistoryIterator, MessagePinIterator
 from .mentions import AllowedMentions
-from .object import Object
 from .partial_emoji import PartialEmoji, _EmojiTag
 from .permissions import PermissionOverwrite, Permissions
 from .role import Role
-from .scheduled_events import ScheduledEvent
-from .sticker import GuildSticker, StickerItem
 from .utils import warn_deprecated
 
 __all__ = (
+    "Connectable",
+    "GuildChannel",
+    "Mentionable",
+    "Messageable",
+    "PrivateChannel",
     "Snowflake",
     "User",
-    "PrivateChannel",
-    "GuildChannel",
-    "Messageable",
-    "Connectable",
-    "Mentionable",
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Sequence
     from datetime import datetime
+
+    from typing_extensions import Self
 
     from .asset import Asset
     from .channel import (
         CategoryChannel,
         DMChannel,
         GroupChannel,
+        PartialGuildChannel,
         PartialMessageable,
         StageChannel,
         TextChannel,
@@ -83,16 +84,32 @@ if TYPE_CHECKING:
     from .client import Client
     from .embeds import Embed
     from .enums import InviteTarget
-    from .guild import Guild
+    from .guild import Guild, GuildChannel as GuildChannelType, PartialGuild
+    from .iterators import MessageSearchIterator
     from .member import Member
     from .message import Message, MessageReference, PartialMessage
+    from .object import Object
     from .poll import Poll
+    from .scheduled_events import ScheduledEvent
+    from .shared_client_theme import SharedClientTheme
     from .state import ConnectionState
+    from .sticker import GuildSticker, StickerItem
     from .threads import Thread
-    from .types.channel import Channel as ChannelPayload
-    from .types.channel import GuildChannel as GuildChannelPayload
-    from .types.channel import OverwriteType
-    from .types.channel import PermissionOverwrite as PermissionOverwritePayload
+    from .types.channel import (
+        Channel as ChannelPayload,
+        GuildChannel as GuildChannelPayload,
+        OverwriteType,
+        PermissionOverwrite as PermissionOverwritePayload,
+    )
+    from .types.embed import Embed as EmbedData
+    from .types.guild import ChannelPositionUpdate
+    from .types.invite import InviteTargetType
+    from .types.message import (
+        AllowedMentions as AllowedMentionsPayload,
+        MessageReference as MessageReferencePayload,
+        SharedClientTheme as SharedClientThemePayload,
+    )
+    from .types.poll import Poll as PollPayload
     from .ui.view import BaseView
     from .user import ClientUser
 
@@ -105,23 +122,27 @@ if TYPE_CHECKING:
         | PartialMessageable
     )
     MessageableChannel: TypeAlias = PartialMessageableChannel | GroupChannel
-    SnowflakeTime = Union["Snowflake", datetime]
+    SnowflakeTime: TypeAlias = "Snowflake | datetime"
 
-    from .voice import VoiceClient, VoiceProtocol
+    from .voice import VoiceProtocol
 
-    T = TypeVar("T", bound=VoiceProtocol)
+    T = TypeVar("T", bound=VoiceProtocol[Any])
 
 MISSING = utils.MISSING
 
 
 async def _single_delete_strategy(
     messages: Iterable[Message], *, reason: str | None = None
-):
+) -> None:
     for m in messages:
         await m.delete(reason=reason)
 
 
-async def _purge_messages_helper(
+def _always_true(_: object) -> bool:
+    return True
+
+
+async def purge_messages_helper(
     channel: TextChannel | StageChannel | Thread | VoiceChannel,
     *,
     limit: int | None = 100,
@@ -133,8 +154,9 @@ async def _purge_messages_helper(
     bulk: bool = True,
     reason: str | None = None,
 ) -> list[Message]:
+    """Purge the messages of a channel matching ``check``."""
     if check is MISSING:
-        check = lambda m: True
+        check = _always_true
 
     iterator = channel.history(
         limit=limit,
@@ -279,12 +301,12 @@ class PrivateChannel(Snowflake, Protocol):
 
 
 class _Overwrites:
-    __slots__ = ("id", "allow", "deny", "type")
+    __slots__ = ("allow", "deny", "id", "type")
 
     ROLE = 0
     MEMBER = 1
 
-    def __init__(self, data: PermissionOverwritePayload):
+    def __init__(self, data: PermissionOverwritePayload) -> None:
         self.id: int = int(data["id"])
         self.allow: int = int(data.get("allow", 0))
         self.deny: int = int(data.get("deny", 0))
@@ -308,6 +330,13 @@ class _Overwrites:
 GCH = TypeVar("GCH", bound="GuildChannel")
 
 
+def cached_message(state: ConnectionState, message_id: int | None) -> Message | None:
+    messages = state._messages
+    if messages is None or message_id is None:
+        return None
+    return messages.get_nowait(message_id)
+
+
 class GuildChannel:
     """An ABC that details the common operations on a Discord guild channel.
 
@@ -325,8 +354,8 @@ class GuildChannel:
     ----------
     name: :class:`str`
         The channel name.
-    guild: :class:`~discord.Guild`
-        The guild the channel belongs to.
+    guild_id: :class:`int`
+        The ID of the guild the channel belongs to.
     position: :class:`int`
         The position in the channel list. This is a number that starts at 0.
         e.g. the top channel is position 0.
@@ -336,8 +365,7 @@ class GuildChannel:
 
     id: int
     name: str
-    guild: Guild
-    type: ChannelType
+    guild_id: int
     position: int
     category_id: int | None
     flags: ChannelFlags
@@ -347,12 +375,47 @@ class GuildChannel:
     if TYPE_CHECKING:
 
         def __init__(
-            self, *, state: ConnectionState, guild: Guild, data: dict[str, Any]
-        ): ...
+            self,
+            *,
+            state: ConnectionState,
+            guild: Guild | PartialGuild,
+            data: Any,
+        ) -> None: ...
+
+        @property
+        def type(self) -> ChannelType:
+            """The channel's Discord type."""
+            ...
+
+    @property
+    def guild(self) -> Guild | PartialGuild:
+        """The guild the channel belongs to.
+
+        This is the cached :class:`~discord.Guild` with the in-process cache,
+        or a :class:`~discord.PartialGuild` handle if it is not cached or the
+        cache backend is remote. Use :meth:`PartialGuild.get` to get the cached guild.
+        """
+        from .guild import PartialGuild
+
+        state = self._state
+        if state.cache.supports_sync:
+            guild = state._guilds.get_nowait(self.guild_id)
+            if guild is not None:
+                return guild
+        return PartialGuild(state=state, id=self.guild_id)
+
+    async def _get_cached_channels(self) -> list[GuildChannelType]:
+        return await self._state._guild_bucket("channels", self.guild_id).values()
+
+    async def _get_cached_channel(self, channel_id: int | None) -> GuildChannel | None:
+        if channel_id is None:
+            return None
+        return await self._state._guild_bucket("channels", self.guild_id).get(
+            channel_id
+        )
 
     def __str__(self) -> str:
-        flags = getattr(self, "flags", None)
-        if flags is not None and getattr(flags, "obfuscated", False):
+        if self.obfuscated:
             return f"Obfuscated Channel ({self.id})"
 
         return self.name
@@ -361,7 +424,24 @@ class GuildChannel:
     def _sorting_bucket(self) -> int:
         raise NotImplementedError
 
-    def _update(self, guild: Guild, data: dict[str, Any]) -> None:
+    @property
+    def obfuscated(self) -> bool:
+        """Whether the channel's metadata has been obfuscated.
+
+        Discord obfuscates channels the client cannot view, and only sends them over
+        the gateway. Other fields of an obfuscated channel, such as :attr:`name`, must
+        not be relied on; only :attr:`id`, :attr:`type`, :attr:`position` and
+        :attr:`category_id` are kept. When access is regained, a channel update
+        replaces the obfuscated data.
+
+        This is a shortcut for :attr:`ChannelFlags.channel_obfuscated`.
+
+        .. versionadded:: 3.0
+        """
+        flags = getattr(self, "flags", None)
+        return flags is not None and flags.channel_obfuscated
+
+    def _update(self, guild: Guild | PartialGuild, data: Any) -> None:
         raise NotImplementedError
 
     async def _move(
@@ -378,7 +458,7 @@ class GuildChannel:
         http = self._state.http
         bucket = self._sorting_bucket
         channels: list[GuildChannel] = [
-            c for c in self.guild.channels if c._sorting_bucket == bucket
+            c for c in await self._get_cached_channels() if c._sorting_bucket == bucket
         ]
 
         channels.sort(key=lambda c: c.position)
@@ -397,9 +477,9 @@ class GuildChannel:
             # add ourselves at our designated position
             channels.insert(index, self)
 
-        payload = []
+        payload: list[ChannelPositionUpdate] = []
         for index, c in enumerate(channels):
-            d: dict[str, Any] = {"id": c.id, "position": index}
+            d: ChannelPositionUpdate = {"id": c.id, "position": index}
             if parent_id is not MISSING and c.id == self.id:
                 d.update(parent_id=parent_id, lock_permissions=lock_permissions)
             payload.append(d)
@@ -416,29 +496,21 @@ class GuildChannel:
         else:
             parent_id = parent and parent.id
 
-        try:
+        with contextlib.suppress(KeyError):
             options["rate_limit_per_user"] = options.pop("slowmode_delay")
-        except KeyError:
-            pass
 
-        try:
+        with contextlib.suppress(KeyError):
             options["default_thread_rate_limit_per_user"] = options.pop(
                 "default_thread_slowmode_delay"
             )
-        except KeyError:
-            pass
 
-        try:
+        with contextlib.suppress(KeyError):
             options["flags"] = options.pop("flags").value
-        except KeyError:
-            pass
 
-        try:
+        with contextlib.suppress(KeyError):
             options["available_tags"] = [
                 tag.to_dict() for tag in options.pop("available_tags")
             ]
-        except KeyError:
-            pass
 
         try:
             rtc_region = options.pop("rtc_region")
@@ -461,7 +533,7 @@ class GuildChannel:
         except KeyError:
             if parent_id is not MISSING:
                 if lock_permissions:
-                    category = self.guild.get_channel(parent_id)
+                    category = await self._get_cached_channel(parent_id)
                     if category:
                         options["permission_overwrites"] = [
                             c._asdict() for c in category._overwrites
@@ -470,7 +542,7 @@ class GuildChannel:
             elif lock_permissions and self.category_id is not None:
                 # if we're syncing permissions on a pre-existing channel category without changing it
                 # we need to update the permissions to point to the pre-existing category
-                category = self.guild.get_channel(self.category_id)
+                category = await self._get_cached_channel(self.category_id)
                 if category:
                     options["permission_overwrites"] = [
                         c._asdict() for c in category._overwrites
@@ -485,7 +557,7 @@ class GuildChannel:
 
         overwrites = options.get("overwrites")
         if overwrites is not None:
-            perms = []
+            perms: list[dict[str, Any]] = []
             for target, perm in overwrites.items():
                 if not isinstance(perm, PermissionOverwrite):
                     raise InvalidArgument(
@@ -549,6 +621,7 @@ class GuildChannel:
             return await self._state.http.edit_channel(
                 self.id, reason=reason, **options
             )
+        return None
 
     def _fill_overwrites(self, data: GuildChannelPayload) -> None:
         self._overwrites = []
@@ -575,22 +648,52 @@ class GuildChannel:
         if tmp:
             tmp[everyone_index], tmp[0] = tmp[0], tmp[everyone_index]
 
-    @property
-    def changed_roles(self) -> list[Role]:
-        """Returns a list of roles that have been overridden from
-        their default values in the :attr:`~discord.Guild.roles` attribute.
-        """
-        ret = []
-        g = self.guild
+    def _changed_roles_with(self, resolve: Callable[[int], Role | None]) -> list[Role]:
+        ret: list[Role] = []
         for overwrite in filter(lambda o: o.is_role(), self._overwrites):
-            role = g.get_role(overwrite.id)
+            role = resolve(overwrite.id)
             if role is None:
                 continue
 
             role = copy.copy(role)
-            role.permissions.handle_overwrite(overwrite.allow, overwrite.deny)
+            permissions = role.permissions
+            permissions.handle_overwrite(overwrite.allow, overwrite.deny)
+            role._permissions = permissions.value
             ret.append(role)
         return ret
+
+    @property
+    def changed_roles(self) -> list[Role]:
+        """Returns a list of roles that have been overridden from their default values.
+
+        This is the list of roles of the :attr:`~discord.Guild.roles` attribute that have
+        an overwrite in this channel.
+
+        This reads the cache synchronously and raises
+        :class:`~discord.SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_changed_roles` there.
+        """
+        return self._changed_roles_with(
+            self._state._guild_bucket("roles", self.guild_id).get_nowait
+        )
+
+    async def get_changed_roles(self) -> list[Role]:
+        """|coro|
+
+        Returns a list of roles that have been overridden from
+        their default values in the guild's roles.
+
+        Returns
+        -------
+        List[:class:`~discord.Role`]
+            The cached roles that have an overwrite in this channel, with the
+            overwrite applied to their permissions.
+        """
+        role_ids = [o.id for o in self._overwrites if o.is_role()]
+        found = await self._state._guild_bucket("roles", self.guild_id).get_many(
+            role_ids
+        )
+        return self._changed_roles_with(found.get)
 
     @property
     def mention(self) -> str:
@@ -624,13 +727,13 @@ class GuildChannel:
         :class:`~discord.PermissionOverwrite`
             The permission overwrites for this object.
         """
-
+        predicate: Callable[[_Overwrites], bool]
         if isinstance(obj, User):
-            predicate = lambda p: p.is_member()
-        elif isinstance(obj, Role):
-            predicate = lambda p: p.is_role()
+            predicate = _Overwrites.is_member
+        elif isinstance(obj, Role):  # pyright: ignore[reportUnnecessaryIsInstance]
+            predicate = _Overwrites.is_role
         else:
-            predicate = lambda p: True
+            predicate = _always_true
 
         for overwrite in filter(predicate, self._overwrites):
             if overwrite.id == obj.id:
@@ -640,33 +743,18 @@ class GuildChannel:
 
         return PermissionOverwrite()
 
-    @property
-    def overwrites(self) -> dict[Role | Member, PermissionOverwrite]:
-        """Returns all of the channel's overwrites.
-
-        This is returned as a dictionary where the key contains the target which
-        can be either a :class:`~discord.Role` or a :class:`~discord.Member` and the value is the
-        overwrite as a :class:`~discord.PermissionOverwrite`.
-
-        Returns
-        -------
-        Dict[Union[:class:`~discord.Role`, :class:`~discord.Member`], :class:`~discord.PermissionOverwrite`]
-            The channel's permission overwrites.
-        """
-        ret = {}
+    def _overwrites_with(
+        self, resolve: Callable[[_Overwrites], Role | Member | None]
+    ) -> dict[Role | Member, PermissionOverwrite]:
+        ret: dict[Role | Member, PermissionOverwrite] = {}
         for ow in self._overwrites:
             allow = Permissions(ow.allow)
             deny = Permissions(ow.deny)
             overwrite = PermissionOverwrite.from_pair(allow, deny)
-            target = None
-
-            if ow.is_role():
-                target = self.guild.get_role(ow.id)
-            elif ow.is_member():
-                target = self.guild.get_member(ow.id)
+            target = resolve(ow)
 
             # TODO: There is potential data loss here in the non-chunked
-            # case, i.e. target is None because get_member returned nothing.
+            # case, i.e. target is None because the member is not cached.
             # This can be fixed with a slight breaking change to the return type,
             # i.e. adding discord.Object to the list of it
             # However, for now this is an acceptable compromise.
@@ -675,94 +763,187 @@ class GuildChannel:
         return ret
 
     @property
-    def category(self) -> CategoryChannel | None:
+    def overwrites(self) -> dict[Role | Member, PermissionOverwrite]:
+        """Returns all of the channel's overwrites.
+
+        This is returned as a dictionary where the key contains the target which
+        can be either a :class:`~discord.Role` or a :class:`~discord.Member` and the value is the
+        overwrite as a :class:`~discord.PermissionOverwrite`.
+
+        This reads the cache synchronously and raises
+        :class:`~discord.SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_overwrites` there.
+
+        Returns
+        -------
+        Dict[Union[:class:`~discord.Role`, :class:`~discord.Member`], :class:`~discord.PermissionOverwrite`]
+            The channel's permission overwrites.
+        """
+        return self._overwrites_with(
+            lambda ow: self._state._guild_bucket(
+                "roles" if ow.is_role() else "members", self.guild_id
+            ).get_nowait(ow.id)
+        )
+
+    async def get_overwrites(self) -> dict[Role | Member, PermissionOverwrite]:
+        """|coro|
+
+        Returns all of the channel's overwrites.
+
+        This is returned as a dictionary where the key contains the target which
+        can be either a :class:`~discord.Role` or a :class:`~discord.Member` and the value is the
+        overwrite as a :class:`~discord.PermissionOverwrite`.
+
+        Targets that are not cached are left out.
+
+        Returns
+        -------
+        Dict[Union[:class:`~discord.Role`, :class:`~discord.Member`], :class:`~discord.PermissionOverwrite`]
+            The channel's permission overwrites.
+        """
+        found: dict[bool, dict[int, Role | Member]] = {}
+        for kind, is_role in (("roles", True), ("members", False)):
+            ids = [o.id for o in self._overwrites if o.is_role() is is_role]
+            found[is_role] = await self._state._guild_bucket(
+                kind, self.guild_id
+            ).get_many(ids)
+        return self._overwrites_with(lambda ow: found[ow.is_role()].get(ow.id))
+
+    @property
+    def category(self) -> CategoryChannel | PartialGuildChannel | None:
         """The category this channel belongs to.
 
         If there is no category then this is ``None``.
+
+        With the in-process cache this is the cached category, or ``None`` if it is
+        not cached. With a remote cache backend this is a :class:`~discord.PartialGuildChannel`
+        handle, use :meth:`get_category` to get the cached category.
         """
-        return self.guild.get_channel(self.category_id)  # type: ignore
+        if self.category_id is None:
+            return None
+
+        state = self._state
+        if state.cache.supports_sync:
+            return state._guild_bucket("channels", self.guild_id).get_nowait(
+                self.category_id
+            )
+
+        from .channel import PartialGuildChannel
+
+        return PartialGuildChannel(
+            state=state,
+            id=self.category_id,
+            guild_id=self.guild_id,
+            type=ChannelType.category,
+        )
+
+    async def get_category(self) -> CategoryChannel | None:
+        """|coro|
+
+        Returns the category this channel belongs to.
+
+        If there is no category then this is ``None``.
+
+        Returns
+        -------
+        Optional[:class:`~discord.CategoryChannel`]
+            The cached category, or ``None`` if there is none or it is not cached.
+        """
+        return cast(
+            "CategoryChannel | None",
+            await self._get_cached_channel(self.category_id),
+        )
 
     @property
     def permissions_synced(self) -> bool:
-        """Whether the permissions for this channel are synced with the
-        category it belongs to.
+        """Whether the permissions for this channel are synced with its category.
 
         If there is no category then this is ``False``.
+
+        This reads the cache synchronously and raises
+        :class:`~discord.SyncCacheAccessError` with a remote cache backend,
+        use :meth:`is_permissions_synced` there.
 
         .. versionadded:: 1.3
         """
         if self.category_id is None:
             return False
 
-        category = self.guild.get_channel(self.category_id)
+        category = self._state._guild_bucket("channels", self.guild_id).get_nowait(
+            self.category_id
+        )
         return bool(category and category.overwrites == self.overwrites)
 
-    def permissions_for(self, obj: Member | Role, /) -> Permissions:
-        """Handles permission resolution for the :class:`~discord.Member`
-        or :class:`~discord.Role`.
+    async def is_permissions_synced(self) -> bool:
+        """|coro|
 
-        This function takes into consideration the following cases:
+        Whether the permissions for this channel are synced with the
+        category it belongs to.
 
-        - Guild owner
-        - Guild roles
-        - Channel overrides
-        - Member overrides
+        If there is no category then this is ``False``.
 
-        If a :class:`~discord.Role` is passed, then it checks the permissions
-        someone with that role would have, which is essentially:
-
-        - The default role permissions
-        - The permissions of the role used as a parameter
-        - The default role permission overwrites
-        - The permission overwrites of the role used as a parameter
-
-        .. versionchanged:: 2.0
-            The object passed in can now be a role object.
-
-        Parameters
-        ----------
-        obj: Union[:class:`~discord.Member`, :class:`~discord.Role`]
-            The object to resolve permissions for. This could be either
-            a member or a role. If it's a role then member overwrites
-            are not computed.
+        .. versionadded:: 3.0
 
         Returns
         -------
-        :class:`~discord.Permissions`
-            The resolved permissions for the member or role.
+        :class:`bool`
+            Whether the overwrites of this channel equal those of its category.
         """
+        if self.category_id is None:
+            return False
 
-        # The current cases can be explained as:
-        # Guild owner get all permissions -- no questions asked. Otherwise...
-        # The @everyone role gets the first application.
-        # After that, the applied roles that the user has in the channel
-        # (or otherwise) are then OR'd together.
-        # After the role permissions are resolved, the member permissions
-        # have to take into effect.
-        # After all that is done, you have to do the following:
+        category = await self._get_cached_channel(self.category_id)
+        return bool(
+            category and await category.get_overwrites() == await self.get_overwrites()
+        )
 
-        # If manage permissions is True, then all permissions are set to True.
+    async def get_members(self) -> list[Member]:
+        """|coro|
 
-        # The operation first takes into consideration the denied
-        # and then the allowed.
+        Returns the cached members that can see this channel.
 
-        if self.guild.owner_id == obj.id:
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        List[:class:`~discord.Member`]
+            The members whose resolved permissions include :attr:`~discord.Permissions.read_messages`.
+        """
+        return [
+            member
+            for member in await self._state._guild_bucket(
+                "members", self.guild_id
+            ).values()
+            if (await self.get_permissions_for(member)).read_messages
+        ]
+
+    @staticmethod
+    def _role_base_permissions(
+        role: Role, owner_id: int | None, default: Role | None
+    ) -> Permissions:
+        if owner_id == role.id:
             return Permissions.all()
 
-        default = self.guild.default_role
         base = Permissions(default.permissions.value if default else 0)
+        base.value |= role._permissions
+        return base
+
+    def _resolve_permissions(
+        self, obj: Member | Role, base: Permissions
+    ) -> Permissions:
+        guild_id = self.guild_id
+
+        # Guild-wide Administrator -> True for everything
+        # Bypass all channel-specific overrides
+        if base.administrator:
+            return Permissions.all()
 
         # Handle the role case first
         if isinstance(obj, Role):
-            base.value |= obj._permissions
-
-            if base.administrator:
-                return Permissions.all()
-
             # Apply @everyone allow/deny first since it's special
             try:
                 maybe_everyone = self._overwrites[0]
-                if maybe_everyone.id == self.guild.id:
+                if maybe_everyone.id == guild_id:
                     base.handle_overwrite(
                         allow=maybe_everyone.allow, deny=maybe_everyone.deny
                     )
@@ -779,23 +960,11 @@ class GuildChannel:
             return base
 
         roles = obj._roles
-        get_role = self.guild.get_role
-
-        # Apply guild roles that the member has.
-        for role_id in roles:
-            role = get_role(role_id)
-            if role is not None:
-                base.value |= role._permissions
-
-        # Guild-wide Administrator -> True for everything
-        # Bypass all channel-specific overrides
-        if base.administrator:
-            return Permissions.all()
 
         # Apply @everyone allow/deny first since it's special
         try:
             maybe_everyone = self._overwrites[0]
-            if maybe_everyone.id == self.guild.id:
+            if maybe_everyone.id == guild_id:
                 base.handle_overwrite(
                     allow=maybe_everyone.allow, deny=maybe_everyone.deny
                 )
@@ -822,6 +991,12 @@ class GuildChannel:
                 base.handle_overwrite(allow=overwrite.allow, deny=overwrite.deny)
                 break
 
+        # timed out members only keep viewing the channel and its history
+        if obj.timed_out:
+            base.value &= Permissions(
+                view_channel=True, read_message_history=True
+            ).value
+
         # if you can't send a message in a channel then you can't have certain
         # permissions as well
         if not base.send_messages:
@@ -836,6 +1011,119 @@ class GuildChannel:
             base.value &= ~denied.value
 
         return base
+
+    def permissions_for(self, obj: Member | Role, /) -> Permissions:
+        """Handles permission resolution for a :class:`~discord.Member` or :class:`~discord.Role`.
+
+        This function takes into consideration the following cases:
+
+        - Guild owner
+        - Guild roles
+        - Channel overrides
+        - Member overrides
+        - Timed out members
+
+        If a :class:`~discord.Role` is passed, then it checks the permissions
+        someone with that role would have, which is essentially:
+
+        - The default role permissions
+        - The permissions of the role used as a parameter
+        - The default role permission overwrites
+        - The permission overwrites of the role used as a parameter
+
+        This reads the cache synchronously and raises
+        :class:`~discord.SyncCacheAccessError` with a remote cache backend,
+        use :meth:`get_permissions_for` there.
+
+        .. versionchanged:: 2.0
+            The object passed in can now be a role object.
+
+        .. versionchanged:: 3.0
+            Timed out members only keep :attr:`~discord.Permissions.view_channel`
+            and :attr:`~discord.Permissions.read_message_history`.
+
+        Parameters
+        ----------
+        obj: Union[:class:`~discord.Member`, :class:`~discord.Role`]
+            The object to resolve permissions for. This could be either
+            a member or a role. If it's a role then member overwrites
+            are not computed.
+
+        Returns
+        -------
+        :class:`~discord.Permissions`
+            The resolved permissions for the member or role.
+        """
+        # The current cases can be explained as:
+        # Guild owner get all permissions -- no questions asked. Otherwise...
+        # The @everyone role gets the first application.
+        # After that, the applied roles that the user has in the channel
+        # (or otherwise) are then OR'd together.
+        # After the role permissions are resolved, the member permissions
+        # have to take into effect.
+        # After all that is done, you have to do the following:
+
+        # If manage permissions is True, then all permissions are set to True.
+
+        # The operation first takes into consideration the denied
+        # and then the allowed.
+
+        if isinstance(obj, Role):
+            state = self._state
+            guild = state._guilds.get_nowait(self.guild_id)
+            default = state._guild_bucket("roles", self.guild_id).get_nowait(
+                self.guild_id
+            )
+            base = self._role_base_permissions(
+                obj, guild.owner_id if guild is not None else None, default
+            )
+        else:
+            base = obj.guild_permissions
+
+        return self._resolve_permissions(obj, base)
+
+    async def get_permissions_for(self, obj: Member | Role, /) -> Permissions:
+        """|coro|
+
+        Handles permission resolution for the :class:`~discord.Member`
+        or :class:`~discord.Role`, reading the cache through its asynchronous API.
+
+        It follows the same rules as :meth:`permissions_for`: the guild owner and
+        administrators have every permission, then the permissions of the default
+        role and of the roles are combined, the overwrites of the default role, of
+        the roles and of the member are applied in that order, timed out members only
+        keep :attr:`~discord.Permissions.view_channel` and
+        :attr:`~discord.Permissions.read_message_history`, and the permissions that
+        make no sense without :attr:`~discord.Permissions.send_messages` or
+        :attr:`~discord.Permissions.read_messages` are removed.
+
+        .. versionadded:: 3.0
+
+        Parameters
+        ----------
+        obj: Union[:class:`~discord.Member`, :class:`~discord.Role`]
+            The object to resolve permissions for. This could be either
+            a member or a role. If it's a role then member overwrites
+            are not computed.
+
+        Returns
+        -------
+        :class:`~discord.Permissions`
+            The resolved permissions for the member or role.
+        """
+        if isinstance(obj, Role):
+            state = self._state
+            guild = await state._guilds.get(self.guild_id)
+            default = await state._guild_bucket("roles", self.guild_id).get(
+                self.guild_id
+            )
+            base = self._role_base_permissions(
+                obj, guild.owner_id if guild is not None else None, default
+            )
+        else:
+            base = await obj.get_guild_permissions()
+
+        return self._resolve_permissions(obj, base)
 
     async def delete(self, *, reason: str | None = None) -> None:
         """|coro|
@@ -880,8 +1168,13 @@ class GuildChannel:
     ) -> None: ...
 
     async def set_permissions(
-        self, target, *, overwrite=MISSING, reason=None, **permissions
-    ):
+        self,
+        target: Snowflake,
+        *,
+        overwrite: Any = MISSING,
+        reason: str | None = None,
+        **permissions: bool,
+    ) -> None:
         r"""|coro|
 
         Sets the channel specific permission overwrites for a target in the
@@ -906,12 +1199,12 @@ class GuildChannel:
             This method *replaces* the old overwrites with the ones given.
 
         Examples
-        ----------
-
+        --------
         Setting allow and deny: ::
 
-            await message.channel.set_permissions(message.author, read_messages=True,
-                                                                  send_messages=False)
+            await message.channel.set_permissions(
+                message.author, read_messages=True, send_messages=False
+            )
 
         Deleting overwrites ::
 
@@ -925,7 +1218,7 @@ class GuildChannel:
             await channel.set_permissions(member, overwrite=overwrite)
 
         Parameters
-        -----------
+        ----------
         target: Union[:class:`~discord.Member`, :class:`~discord.Role`]
             The member or role to overwrite permissions for.
         overwrite: Optional[:class:`~discord.PermissionOverwrite`]
@@ -938,7 +1231,7 @@ class GuildChannel:
             The reason for doing this action. Shows up on the audit log.
 
         Raises
-        -------
+        ------
         ~discord.Forbidden
             You do not have permissions to edit channel specific permissions.
         ~discord.HTTPException
@@ -949,7 +1242,6 @@ class GuildChannel:
             The overwrite parameter invalid or the target type was not
             :class:`~discord.Role` or :class:`~discord.Member`.
         """
-
         http = self._state.http
 
         if isinstance(target, User):
@@ -965,7 +1257,9 @@ class GuildChannel:
             try:
                 overwrite = PermissionOverwrite(**permissions)
             except (ValueError, TypeError):
-                raise InvalidArgument("Invalid permissions given to keyword arguments.")
+                raise InvalidArgument(
+                    "Invalid permissions given to keyword arguments."
+                ) from None
         elif len(permissions) > 0:
             raise InvalidArgument("Cannot mix overwrite and keyword arguments.")
 
@@ -982,12 +1276,12 @@ class GuildChannel:
             raise InvalidArgument("Invalid overwrite type provided.")
 
     async def _clone_impl(
-        self: GCH,
+        self,
         base_attrs: dict[str, Any],
         *,
         name: str | None = None,
         reason: str | None = None,
-    ) -> GCH:
+    ) -> Self:
         base_attrs["permission_overwrites"] = [x._asdict() for x in self._overwrites]
         base_attrs["parent_id"] = self.category_id
         base_attrs["name"] = name or self.name
@@ -999,12 +1293,12 @@ class GuildChannel:
         obj = cls(state=self._state, guild=self.guild, data=data)
 
         # temporarily add it to the cache
-        self.guild._channels[obj.id] = obj  # type: ignore
+        await self._state._add_channel(guild_id, obj)
         return obj
 
     async def clone(
-        self: GCH, *, name: str | None = None, reason: str | None = None
-    ) -> GCH:
+        self, *, name: str | None = None, reason: str | None = None
+    ) -> Self:
         """|coro|
 
         Clones this channel. This creates a channel with the same properties
@@ -1081,7 +1375,7 @@ class GuildChannel:
         reason: str = MISSING,
     ) -> None: ...
 
-    async def move(self, **kwargs) -> None:
+    async def move(self, **kwargs: Any) -> None:
         """|coro|
 
         A rich interface to help move a channel relative to other channels.
@@ -1139,7 +1433,6 @@ class GuildChannel:
         HTTPException
             Moving the channel failed.
         """
-
         if not kwargs:
             return
 
@@ -1152,30 +1445,28 @@ class GuildChannel:
             )
 
         bucket = self._sorting_bucket
-        parent_id = kwargs.get("category", MISSING)
+        parent_id: Any = kwargs.get("category", MISSING)
         channels: list[GuildChannel]
         if parent_id not in (MISSING, None):
             parent_id = parent_id.id
             channels = [
                 ch
-                for ch in self.guild.channels
+                for ch in await self._get_cached_channels()
                 if ch._sorting_bucket == bucket and ch.category_id == parent_id
             ]
         else:
             channels = [
                 ch
-                for ch in self.guild.channels
+                for ch in await self._get_cached_channels()
                 if ch._sorting_bucket == bucket and ch.category_id == self.category_id
             ]
 
         channels.sort(key=lambda c: (c.position, c.id))
 
-        try:
+        with contextlib.suppress(ValueError):
             # Try to remove ourselves from the channel list
-            channels.remove(self)
-        except ValueError:
             # If we're not there then it's probably due to not being in the category
-            pass
+            channels.remove(self)
 
         index = None
         if beginning:
@@ -1193,11 +1484,11 @@ class GuildChannel:
             raise InvalidArgument("Could not resolve appropriate move position")
 
         channels.insert(max((index + offset), 0), self)
-        payload = []
+        payload: list[ChannelPositionUpdate] = []
         lock_permissions = kwargs.get("sync_permissions", False)
         reason = kwargs.get("reason")
         for index, channel in enumerate(channels):
-            d = {"id": channel.id, "position": index}
+            d: ChannelPositionUpdate = {"id": channel.id, "position": index}
             if parent_id is not MISSING and channel.id == self.id:
                 d.update(parent_id=parent_id, lock_permissions=lock_permissions)
             payload.append(d)
@@ -1220,6 +1511,7 @@ class GuildChannel:
         target_application_id: int | None = None,
         roles: list[Role | Object] | None = None,
         target_users_file: File | None = None,
+        target_user_ids: Sequence[int] | None = None,
     ) -> Invite:
         """|coro|
 
@@ -1285,6 +1577,12 @@ class GuildChannel:
 
             .. versionadded:: 2.8
 
+        target_user_ids: Optional[Sequence[:class:`int`]]
+            The IDs of the users able to see and accept this invite, up to 1000. Unlike
+            ``target_users_file`` no CSV file is needed. Mutually exclusive with ``target_users_file``.
+
+            .. versionadded:: 3.0
+
         Returns
         -------
         :class:`~discord.Invite`
@@ -1298,7 +1596,6 @@ class GuildChannel:
         ~discord.NotFound
             The channel that was passed is a category or an invalid channel.
         """
-
         data = await self._state.http.create_invite(
             self.id,
             reason=reason,
@@ -1306,11 +1603,16 @@ class GuildChannel:
             max_uses=max_uses,
             temporary=temporary,
             unique=unique,
-            target_type=target_type.value if target_type else None,
+            target_type=cast("InviteTargetType", target_type.value)
+            if target_type
+            else None,
             target_user_id=target_user.id if target_user else None,
             target_application_id=target_application_id,
             roles=[str(r.id) for r in roles] if roles else None,
             target_users_file=target_users_file,
+            target_user_ids=list(target_user_ids)
+            if target_user_ids is not None
+            else None,
         )
         invite = Invite.from_incomplete(data=data, state=self._state)
 
@@ -1337,7 +1639,6 @@ class GuildChannel:
         ~discord.HTTPException
             An error occurred while fetching the information.
         """
-
         state = self._state
         data = await state.http.invites_from_channel(self.id)
         guild = self.guild
@@ -1345,6 +1646,15 @@ class GuildChannel:
             Invite(state=state, data=invite, channel=self, guild=guild)
             for invite in data
         ]
+
+    def search_messages(self, **filters: Any) -> MessageSearchIterator:
+        """Retrieves an :class:`.AsyncIterator` of the messages of this channel matching a search.
+
+        This is :meth:`Guild.search_messages` with ``channels`` set to this channel.
+
+        .. versionadded:: 3.0
+        """
+        return self.guild.search_messages(channels=[self], **filters)
 
 
 class Messageable:
@@ -1379,17 +1689,18 @@ class Messageable:
         embed: Embed = ...,
         file: File = ...,
         stickers: Sequence[GuildSticker | StickerItem] = ...,
-        delete_after: float = ...,
+        delete_after: float | None = ...,
         nonce: int | str = ...,
         enforce_nonce: bool = ...,
-        allowed_mentions: AllowedMentions = ...,
-        reference: Message | MessageReference | PartialMessage = ...,
-        mention_author: bool = ...,
+        allowed_mentions: AllowedMentions | None = ...,
+        reference: Message | MessageReference | PartialMessage | None = ...,
+        mention_author: bool | None = ...,
         view: BaseView = ...,
         poll: Poll = ...,
         suppress: bool = ...,
         suppress_embeds: bool = ...,
         silent: bool = ...,
+        shared_client_theme: SharedClientTheme = ...,
     ) -> Message: ...
 
     @overload
@@ -1401,17 +1712,18 @@ class Messageable:
         embed: Embed = ...,
         files: list[File] = ...,
         stickers: Sequence[GuildSticker | StickerItem] = ...,
-        delete_after: float = ...,
+        delete_after: float | None = ...,
         nonce: int | str = ...,
         enforce_nonce: bool = ...,
-        allowed_mentions: AllowedMentions = ...,
-        reference: Message | MessageReference | PartialMessage = ...,
-        mention_author: bool = ...,
+        allowed_mentions: AllowedMentions | None = ...,
+        reference: Message | MessageReference | PartialMessage | None = ...,
+        mention_author: bool | None = ...,
         view: BaseView = ...,
         poll: Poll = ...,
         suppress: bool = ...,
         suppress_embeds: bool = ...,
         silent: bool = ...,
+        shared_client_theme: SharedClientTheme = ...,
     ) -> Message: ...
 
     @overload
@@ -1423,17 +1735,18 @@ class Messageable:
         embeds: list[Embed] = ...,
         file: File = ...,
         stickers: Sequence[GuildSticker | StickerItem] = ...,
-        delete_after: float = ...,
+        delete_after: float | None = ...,
         nonce: int | str = ...,
         enforce_nonce: bool = ...,
-        allowed_mentions: AllowedMentions = ...,
-        reference: Message | MessageReference | PartialMessage = ...,
-        mention_author: bool = ...,
+        allowed_mentions: AllowedMentions | None = ...,
+        reference: Message | MessageReference | PartialMessage | None = ...,
+        mention_author: bool | None = ...,
         view: BaseView = ...,
         poll: Poll = ...,
         suppress: bool = ...,
         suppress_embeds: bool = ...,
         silent: bool = ...,
+        shared_client_theme: SharedClientTheme = ...,
     ) -> Message: ...
 
     @overload
@@ -1445,41 +1758,43 @@ class Messageable:
         embeds: list[Embed] = ...,
         files: list[File] = ...,
         stickers: Sequence[GuildSticker | StickerItem] = ...,
-        delete_after: float = ...,
+        delete_after: float | None = ...,
         nonce: int | str = ...,
         enforce_nonce: bool = ...,
-        allowed_mentions: AllowedMentions = ...,
-        reference: Message | MessageReference | PartialMessage = ...,
-        mention_author: bool = ...,
+        allowed_mentions: AllowedMentions | None = ...,
+        reference: Message | MessageReference | PartialMessage | None = ...,
+        mention_author: bool | None = ...,
         view: BaseView = ...,
         poll: Poll = ...,
         suppress: bool = ...,
         suppress_embeds: bool = ...,
         silent: bool = ...,
+        shared_client_theme: SharedClientTheme = ...,
     ) -> Message: ...
 
     async def send(
         self,
-        content=None,
+        content: Any = None,
         *,
-        tts=None,
-        embed=None,
-        embeds=None,
-        file=None,
-        files=None,
-        stickers=None,
-        delete_after=None,
-        nonce=None,
-        enforce_nonce=None,
-        allowed_mentions=None,
-        reference=None,
-        mention_author=None,
-        view=None,
-        poll=None,
-        suppress=None,
-        suppress_embeds=None,
-        silent=None,
-    ):
+        tts: bool | None = None,
+        embed: Embed | None = None,
+        embeds: list[Embed] | None = None,
+        file: File | None = None,
+        files: list[File] | None = None,
+        stickers: Sequence[GuildSticker | StickerItem] | None = None,
+        delete_after: float | None = None,
+        nonce: int | str | None = None,
+        enforce_nonce: bool | None = None,
+        allowed_mentions: AllowedMentions | None = None,
+        reference: Message | MessageReference | PartialMessage | None = None,
+        mention_author: bool | None = None,
+        view: BaseView | None = None,
+        poll: Poll | None = None,
+        suppress: bool | None = None,
+        suppress_embeds: bool | None = None,
+        silent: bool | None = None,
+        shared_client_theme: SharedClientTheme | None = None,
+    ) -> Message:
         """|coro|
 
         Sends a message to the destination with the content given.
@@ -1570,6 +1885,11 @@ class Messageable:
             The poll to send.
 
             .. versionadded:: 2.6
+        shared_client_theme: :class:`SharedClientTheme`
+            The client theme to share via the message. It cannot be combined with
+            a view using components v2.
+
+            .. versionadded:: 3.0
 
         Returns
         -------
@@ -1589,25 +1909,26 @@ class Messageable:
             or the ``reference`` object is not a :class:`~discord.Message`,
             :class:`~discord.MessageReference` or :class:`~discord.PartialMessage`.
         """
-
         channel = await self._get_channel()
         state = self._state
-        content = str(content) if content is not None else None
+        text = str(content) if content is not None else None
 
         if embed is not None and embeds is not None:
             raise InvalidArgument(
                 "cannot pass both embed and embeds parameter to send()"
             )
 
+        embed_payload: EmbedData | None = None
+        embeds_payload: list[EmbedData] | None = None
         if embed is not None:
-            embed = embed.to_dict()
+            embed_payload = embed.to_dict()
 
         elif embeds is not None:
             if len(embeds) > 10:
                 raise InvalidArgument(
                     "embeds parameter must be a list of up to 10 elements"
                 )
-            embeds = [embed.to_dict() for embed in embeds]
+            embeds_payload = [e.to_dict() for e in embeds]
 
         if suppress is not None:
             warn_deprecated("suppress", "suppress_embeds", "2.8")
@@ -1619,23 +1940,25 @@ class Messageable:
             suppress_notifications=bool(silent),
         )
 
+        sticker_ids: list[int] | None = None
         if stickers is not None:
-            stickers = [sticker.id for sticker in stickers]
+            sticker_ids = [sticker.id for sticker in stickers]
 
+        mentions_payload: AllowedMentionsPayload | None
         if allowed_mentions is None:
-            allowed_mentions = (
+            mentions_payload = (
                 state.allowed_mentions and state.allowed_mentions.to_dict()
             )
         elif state.allowed_mentions is not None:
-            allowed_mentions = state.allowed_mentions.merge(allowed_mentions).to_dict()
+            mentions_payload = state.allowed_mentions.merge(allowed_mentions).to_dict()
         else:
-            allowed_mentions = allowed_mentions.to_dict()
+            mentions_payload = allowed_mentions.to_dict()
 
         if mention_author is not None:
-            allowed_mentions = allowed_mentions or AllowedMentions().to_dict()
-            allowed_mentions["replied_user"] = bool(mention_author)
+            mentions_payload = mentions_payload or AllowedMentions().to_dict()
+            mentions_payload["replied_user"] = bool(mention_author)
 
-        _reference = None
+        _reference: MessageReferencePayload | None = None
         if reference is not None:
             try:
                 _reference = reference.to_message_reference_dict()
@@ -1666,18 +1989,27 @@ class Messageable:
                     raise TypeError(
                         "cannot send embeds or content with a view using v2 component logic"
                     )
+                if shared_client_theme is not None:
+                    raise TypeError(
+                        "cannot send a shared client theme with a view using v2 component logic"
+                    )
                 flags.is_components_v2 = True
         else:
             components = None
 
+        theme_payload: SharedClientThemePayload | None = None
+        if shared_client_theme is not None:
+            theme_payload = shared_client_theme.to_dict()
+
+        poll_payload: PollPayload | None = None
         if poll:
-            poll = poll.to_dict()
+            poll_payload = poll.to_dict()
 
         if file is not None and files is not None:
             raise InvalidArgument("cannot pass both file and files parameter to send()")
 
         if file is not None:
-            if not isinstance(file, File):
+            if not isinstance(file, File):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise InvalidArgument("file parameter must be File")
             files = [file]
         elif files is not None:
@@ -1685,7 +2017,7 @@ class Messageable:
                 raise InvalidArgument(
                     "files parameter must be a list of up to 10 elements"
                 )
-            elif not all(isinstance(file, File) for file in files):
+            if not all(isinstance(f, File) for f in files):  # pyright: ignore[reportUnnecessaryIsInstance]
                 raise InvalidArgument("files parameter must be a list of File")
 
         if files is not None:
@@ -1696,18 +2028,19 @@ class Messageable:
                 data = await state.http.send_files(
                     channel.id,
                     files=files,
-                    content=content,
-                    tts=tts,
-                    embed=embed,
-                    embeds=embeds,
+                    content=text,
+                    tts=bool(tts),
+                    embed=embed_payload,
+                    embeds=embeds_payload,
                     nonce=nonce,
                     enforce_nonce=enforce_nonce,
-                    allowed_mentions=allowed_mentions,
+                    allowed_mentions=mentions_payload,
                     message_reference=_reference,
-                    stickers=stickers,
+                    stickers=sticker_ids,
                     components=components,
                     flags=flags.value,
-                    poll=poll,
+                    poll=poll_payload,
+                    shared_client_theme=theme_payload,
                 )
             finally:
                 for f in files:
@@ -1715,21 +2048,22 @@ class Messageable:
         else:
             data = await state.http.send_message(
                 channel.id,
-                content,
-                tts=tts,
-                embed=embed,
-                embeds=embeds,
+                text,
+                tts=bool(tts),
+                embed=embed_payload,
+                embeds=embeds_payload,
                 nonce=nonce,
                 enforce_nonce=enforce_nonce,
-                allowed_mentions=allowed_mentions,
+                allowed_mentions=mentions_payload,
                 message_reference=_reference,
-                stickers=stickers,
+                stickers=sticker_ids,
                 components=components,
                 flags=flags.value,
-                poll=poll,
+                poll=poll_payload,
+                shared_client_theme=theme_payload,
             )
 
-        ret = state.create_message(channel=channel, data=data)
+        ret = await state._create_message(channel=channel, data=data)
         if view:
             if view.is_dispatchable():
                 state.store_view(view, ret.id)
@@ -1747,7 +2081,6 @@ class Messageable:
 
         *Typing* indicator will go away after 10 seconds, or after a message is sent.
         """
-
         channel = await self._get_channel()
         await self._state.http.send_typing(channel.id)
 
@@ -1767,7 +2100,7 @@ class Messageable:
                 # simulate something heavy
                 await asyncio.sleep(10)
 
-            await channel.send('done!')
+            await channel.send("done!")
         """
         return Typing(self)
 
@@ -1795,10 +2128,11 @@ class Messageable:
         ~discord.HTTPException
             Retrieving the message failed.
         """
-
         channel = await self._get_channel()
         data = await self._state.http.get_message(channel.id, id)
-        return self._state.create_message(channel=channel, data=data)
+        return await self._state._cache_fetched(
+            await self._state._create_message(channel=channel, data=data)
+        )
 
     def pins(
         self,
@@ -1838,7 +2172,6 @@ class Messageable:
 
         Examples
         --------
-
         Usage ::
 
             counter = 0
@@ -1859,8 +2192,65 @@ class Messageable:
             before=before,
         )
 
-    def can_send(self, *objects) -> bool:
+    def _send_permissions(
+        self, objects: tuple[Any, ...]
+    ) -> tuple[Any, list[str]] | None:
+        mapping = {
+            "Message": "send_messages",
+            "Embed": "embed_links",
+            "File": "attach_files",
+            "GuildEmoji": "use_external_emojis",
+            "GuildSticker": "use_external_stickers",
+        }
+        no_permissions = ("DMChannel", "GroupChannel")
+        if type(self).__name__ in no_permissions:
+            return None
+
+        channel: Any
+        if hasattr(self, "permissions_for"):
+            channel = cast("Any", self)
+        elif hasattr(self, "channel") and type(
+            cast("Any", self).channel
+        ).__name__ not in (no_permissions):
+            channel = cast("Any", self).channel
+        else:
+            return None  # Permissions don't exist for User DMs
+
+        required: list[str] = []
+        for obj in (None, *objects):  # Makes sure we check for send_messages first
+            try:
+                if obj is None:
+                    permission = mapping["Message"]
+                else:
+                    permission = (
+                        mapping.get(type(obj).__name__) or mapping[obj.__name__]
+                    )
+
+                    if type(obj).__name__ == "GuildEmoji":
+                        if (
+                            obj._to_partial().is_unicode_emoji()
+                            or obj.guild_id == channel.guild.id
+                        ):
+                            continue
+                    elif (
+                        type(obj).__name__ == "GuildSticker"
+                        and obj.guild_id == channel.guild.id
+                    ):
+                        continue
+
+            except (KeyError, AttributeError):
+                raise TypeError(f"The object {obj} is of an invalid type.") from None
+
+            required.append(permission)
+
+        return channel, required
+
+    def can_send(self, *objects: Any) -> bool:
         """Returns a :class:`bool` indicating whether you have the permissions to send the object(s).
+
+        This reads the cache synchronously and raises
+        :class:`~discord.SyncCacheAccessError` with a remote cache backend,
+        use :meth:`check_can_send` there.
 
         Returns
         -------
@@ -1872,52 +2262,54 @@ class Messageable:
         TypeError
             An invalid type has been passed.
         """
-        mapping = {
-            "Message": "send_messages",
-            "Embed": "embed_links",
-            "File": "attach_files",
-            "GuildEmoji": "use_external_emojis",
-            "GuildSticker": "use_external_stickers",
-        }
-        # Can't use channel = await self._get_channel() since its async
-        if hasattr(self, "permissions_for"):
-            channel = self
-        elif hasattr(self, "channel") and type(self.channel).__name__ not in (
-            "DMChannel",
-            "GroupChannel",
-        ):
-            channel = self.channel
-        else:
-            return True  # Permissions don't exist for User DMs
+        plan = self._send_permissions(objects)
+        if plan is None:
+            return True
 
-        objects = (None,) + objects  # Makes sure we check for send_messages first
+        channel, required = plan
+        self_id = self._state.self_id
+        me = (
+            self._state._guild_bucket("members", channel.guild.id).get_nowait(self_id)
+            if self_id is not None
+            else None
+        )
+        if me is None:
+            raise ClientException("The bot's member is not cached.")
 
-        for obj in objects:
-            try:
-                if obj is None:
-                    permission = mapping["Message"]
-                else:
-                    permission = (
-                        mapping.get(type(obj).__name__) or mapping[obj.__name__]
-                    )
+        permissions = channel.permissions_for(me)
+        return all(getattr(permissions, permission) for permission in required)
 
-                if type(obj).__name__ == "GuildEmoji":
-                    if (
-                        obj._to_partial().is_unicode_emoji
-                        or obj.guild_id == channel.guild.id
-                    ):
-                        continue
-                elif type(obj).__name__ == "GuildSticker":
-                    if obj.guild_id == channel.guild.id:
-                        continue
+    async def check_can_send(self, *objects: Any) -> bool:
+        """|coro|
 
-            except (KeyError, AttributeError):
-                raise TypeError(f"The object {obj} is of an invalid type.")
+        Returns a :class:`bool` indicating whether you have the permissions to send the object(s),
+        reading the cache through its asynchronous API.
 
-            if not getattr(channel.permissions_for(channel.guild.me), permission):
-                return False
+        .. versionadded:: 3.0
 
-        return True
+        Returns
+        -------
+        :class:`bool`
+            Indicates whether you have the permissions to send the object(s).
+
+        Raises
+        ------
+        TypeError
+            An invalid type has been passed.
+        ClientException
+            The bot's member is not cached.
+        """
+        plan = self._send_permissions(objects)
+        if plan is None:
+            return True
+
+        channel, required = plan
+        me = await self._state._get_member(channel.guild.id, self._state.self_id)
+        if me is None:
+            raise ClientException("The bot's member is not cached.")
+
+        permissions = await channel.get_permissions_for(me)
+        return all(getattr(permissions, permission) for permission in required)
 
     def history(
         self,
@@ -1970,7 +2362,6 @@ class Messageable:
 
         Examples
         --------
-
         Usage ::
 
             counter = 0
@@ -1996,8 +2387,7 @@ class Messageable:
 
 
 class Connectable(Protocol):
-    """An ABC that details the common operations on a channel that can
-    connect to a voice server.
+    """An ABC that details the common operations on a channel that can connect to a voice server.
 
     The following implement this ABC:
 
@@ -2060,7 +2450,6 @@ class Connectable(Protocol):
         ~discord.opus.OpusNotLoaded
             The opus library has not been loaded.
         """
-
         # import directly from _types so if the user does not have davey
         # it won't error here
         from .voice._types import VoiceProtocol
@@ -2080,7 +2469,7 @@ class Connectable(Protocol):
         client = state._get_client()
         voice = cls(client, self)
 
-        if not isinstance(voice, VoiceProtocol):
+        if not isinstance(voice, VoiceProtocol):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise TypeError("Type must meet VoiceProtocol abstract base class.")
 
         state._add_voice_client(key_id, voice)
@@ -2088,16 +2477,15 @@ class Connectable(Protocol):
         try:
             await voice.connect(timeout=timeout, reconnect=reconnect)
         except asyncio.TimeoutError:
-            try:
+            # we don't care if disconnect failed because connection failed
+            with contextlib.suppress(Exception):
                 await voice.disconnect(force=True)
-            except Exception:
-                # we don't care if disconnect failed because connection failed
-                pass
             raise  # re-raise
 
         return voice
 
 
 class Mentionable:
+    """An ABC that details the common operations on a mentionable model."""
+
     # TODO: documentation, methods if needed
-    pass

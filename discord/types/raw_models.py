@@ -25,16 +25,25 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
+from typing import Any
+
 from typing_extensions import NotRequired, TypedDict
 
+from .activity import PartialPresenceUpdate
 from .automod import AutoModAction, AutoModTriggerType
-from .emoji import PartialEmoji
-from .member import Member
+from .emoji import Emoji, PartialEmoji
+from .integration import (
+    IntegrationAccount,
+    IntegrationApplication,
+    IntegrationExpireBehavior,
+)
+from .member import Member, MemberWithUser
+from .role import Role
 from .snowflake import Snowflake
+from .soundboard import SoundboardSound
+from .sticker import GuildSticker
 from .threads import Thread, ThreadMember
 from .user import User
-from .voice import VoiceServerUpdate as VoiceServerUpdateEvent
-from .voice import VoiceState as VoiceStateEvent
 
 
 class _MessageEventOptional(TypedDict, total=False):
@@ -62,12 +71,14 @@ class _ReactionEventOptional(TypedDict, total=False):
 
 class ReactionActionEvent(_ReactionEventOptional):
     member: NotRequired[Member]
+    me: NotRequired[bool]
     user_id: Snowflake
     channel_id: Snowflake
     message_id: Snowflake
     emoji: PartialEmoji
+    message_author_id: NotRequired[Snowflake]
     burst: bool
-    burst_colors: list
+    burst_colors: NotRequired[list[str]]
     type: int
 
 
@@ -77,12 +88,9 @@ class ReactionClearEvent(_ReactionEventOptional):
 
 
 class ReactionClearEmojiEvent(_ReactionEventOptional):
-    channel_id: int
-    message_id: int
+    channel_id: Snowflake
+    message_id: Snowflake
     emoji: PartialEmoji
-    burst: bool
-    burst_colors: list
-    type: int
 
 
 class IntegrationDeleteEvent(TypedDict):
@@ -94,11 +102,11 @@ class IntegrationDeleteEvent(TypedDict):
 ThreadUpdateEvent = Thread
 
 
-class ThreadDeleteEvent(TypedDict, total=False):
-    thread_id: Snowflake
-    thread_type: int
+class ThreadDeleteEvent(TypedDict):
+    id: Snowflake
     guild_id: Snowflake
     parent_id: Snowflake
+    type: int
 
 
 class TypingEvent(TypedDict):
@@ -109,9 +117,14 @@ class TypingEvent(TypedDict):
     timestamp: int
 
 
-class ScheduledEventSubscription(TypedDict, total=False):
-    event_id: Snowflake
+class ScheduledEventSubscription(TypedDict):
+    guild_scheduled_event_id: Snowflake
     user_id: Snowflake
+    guild_id: Snowflake
+
+
+class SoundboardSoundDeleteEvent(TypedDict):
+    sound_id: Snowflake
     guild_id: Snowflake
 
 
@@ -119,8 +132,8 @@ class AutoModActionExecutionEvent(TypedDict):
     channel_id: NotRequired[Snowflake]
     message_id: NotRequired[Snowflake]
     alert_system_message_id: NotRequired[Snowflake]
-    matched_keyword: NotRequired[str]
-    matched_content: NotRequired[str]
+    matched_keyword: str | None
+    matched_content: str | None
     guild_id: Snowflake
     action: AutoModAction
     rule_id: Snowflake
@@ -137,7 +150,24 @@ class MemberRemoveEvent(TypedDict):
 class VoiceChannelStatusUpdateEvent(TypedDict):
     id: Snowflake
     guild_id: Snowflake
-    status: NotRequired[str]
+    status: str | None
+
+
+class VoiceChannelStartTimeUpdateEvent(TypedDict):
+    id: Snowflake
+    guild_id: Snowflake
+    voice_start_time: NotRequired[int | None]
+
+
+class ChannelInfoChannel(TypedDict):
+    id: Snowflake
+    status: NotRequired[str | None]
+    voice_start_time: NotRequired[int | None]
+
+
+class ChannelInfoEvent(TypedDict):
+    guild_id: Snowflake
+    channels: list[ChannelInfoChannel]
 
 
 class ThreadMembersUpdateEvent(TypedDict):
@@ -150,13 +180,13 @@ class ThreadMembersUpdateEvent(TypedDict):
 
 class AuditLogEntryEvent(TypedDict):
     id: Snowflake
-    user_id: NotRequired[Snowflake]
+    user_id: Snowflake | None
     guild_id: Snowflake
-    target_id: NotRequired[Snowflake]
+    target_id: str | None
     action_type: int
-    changes: NotRequired[list[dict]]
+    changes: NotRequired[list[dict[str, Any]]]
     reason: NotRequired[str]
-    options: NotRequired[dict]
+    options: NotRequired[dict[str, Any]]
 
 
 class MessagePollVoteEvent(TypedDict):
@@ -165,3 +195,112 @@ class MessagePollVoteEvent(TypedDict):
     channel_id: Snowflake
     message_id: Snowflake
     answer_id: int
+
+
+class ChannelPinsUpdateEvent(TypedDict):
+    guild_id: NotRequired[Snowflake]
+    channel_id: Snowflake
+    last_pin_timestamp: NotRequired[str | None]
+
+
+class GuildBanEvent(TypedDict):
+    guild_id: Snowflake
+    user: User
+
+
+GuildBanAddEvent = GuildBanEvent
+GuildBanRemoveEvent = GuildBanEvent
+
+
+class GuildEmojisUpdateEvent(TypedDict):
+    guild_id: Snowflake
+    emojis: list[Emoji]
+
+
+class GuildStickersUpdateEvent(TypedDict):
+    guild_id: Snowflake
+    stickers: list[GuildSticker]
+
+
+class GuildIntegrationsUpdateEvent(TypedDict):
+    guild_id: Snowflake
+
+
+class GuildMemberAddEvent(MemberWithUser):
+    guild_id: Snowflake
+
+
+class GuildMembersChunkEvent(TypedDict):
+    guild_id: Snowflake
+    members: list[MemberWithUser]
+    chunk_index: int
+    chunk_count: int
+    not_found: NotRequired[list[Snowflake]]
+    presences: NotRequired[list[PartialPresenceUpdate]]
+    nonce: NotRequired[str]
+
+
+class GuildRoleEvent(TypedDict):
+    guild_id: Snowflake
+    role: Role
+
+
+GuildRoleCreateEvent = GuildRoleEvent
+GuildRoleUpdateEvent = GuildRoleEvent
+
+
+class GuildRoleDeleteEvent(TypedDict):
+    guild_id: Snowflake
+    role_id: Snowflake
+
+
+class IntegrationEvent(TypedDict):
+    guild_id: Snowflake
+    id: Snowflake
+    name: str
+    type: str
+    enabled: bool
+    syncing: NotRequired[bool]
+    role_id: NotRequired[Snowflake]
+    enable_emoticons: NotRequired[bool]
+    expire_behavior: NotRequired[IntegrationExpireBehavior]
+    expire_grace_period: NotRequired[int]
+    account: IntegrationAccount
+    synced_at: NotRequired[str]
+    subscriber_count: NotRequired[int]
+    revoked: NotRequired[bool]
+    application: NotRequired[IntegrationApplication]
+    scopes: NotRequired[list[str]]
+
+
+IntegrationCreateEvent = IntegrationEvent
+IntegrationUpdateEvent = IntegrationEvent
+
+
+class SoundboardSoundsEvent(TypedDict):
+    soundboard_sounds: list[SoundboardSound]
+    guild_id: Snowflake
+
+
+SoundboardSoundsUpdateEvent = SoundboardSoundsEvent
+
+
+class ThreadListSyncEvent(TypedDict):
+    guild_id: Snowflake
+    channel_ids: NotRequired[list[Snowflake]]
+    threads: list[Thread]
+    members: list[ThreadMember]
+
+
+class ThreadMemberUpdateEvent(TypedDict):
+    id: Snowflake
+    user_id: Snowflake
+    join_timestamp: str
+    flags: int
+    member: NotRequired[Member]
+    guild_id: Snowflake
+
+
+class WebhooksUpdateEvent(TypedDict):
+    guild_id: Snowflake
+    channel_id: Snowflake

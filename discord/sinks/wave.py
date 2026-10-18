@@ -22,9 +22,14 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-import wave
+from __future__ import annotations
 
-from .core import Filters, Sink, default_filters
+import wave
+from io import BytesIO
+from typing import Any
+
+from ..opus import Decoder as OpusDecoder
+from .core import AudioData, Filters, Sink, default_filters
 from .errors import WaveSinkError
 
 
@@ -32,19 +37,24 @@ class WaveSink(Sink):
     """A special sink for .wav(wave) files.
 
     .. versionadded:: 2.0
+
+    Parameters
+    ----------
+    filters: dict[:class:`str`, Any] | None
+        The filters of the sink, see :class:`~discord.sinks.Filters`.
     """
 
-    def __init__(self, *, filters=None):
+    def __init__(self, *, filters: dict[str, Any] | None = None) -> None:
         if filters is None:
             filters = default_filters
         self.filters = filters
         Filters.__init__(self, **self.filters)
 
-        self.encoding = "wav"
+        self.encoding: str = "wav"
         self.vc = None
         self.audio_data = {}
 
-    def format_audio(self, audio):
+    def format_audio(self, audio: AudioData) -> None:
         """Formats the recorded audio.
 
         Raises
@@ -54,16 +64,20 @@ class WaveSink(Sink):
         WaveSinkError
             Formatting the audio failed.
         """
-        if self.vc.recording:
+        if self.recording:
             raise WaveSinkError(
                 "Audio may only be formatted after recording is finished."
             )
-        data = audio.file
 
+        audio.file.seek(0)
+        pcm_data = audio.file.read()
+
+        data = BytesIO()
         with wave.open(data, "wb") as f:
-            f.setnchannels(self.vc.decoder.CHANNELS)
-            f.setsampwidth(self.vc.decoder.SAMPLE_SIZE // self.vc.decoder.CHANNELS)
-            f.setframerate(self.vc.decoder.SAMPLING_RATE)
-
+            f.setnchannels(OpusDecoder.CHANNELS)
+            f.setsampwidth(OpusDecoder.SAMPLE_SIZE // OpusDecoder.CHANNELS)
+            f.setframerate(OpusDecoder.SAMPLING_RATE)
+            f.writeframes(pcm_data)
         data.seek(0)
+        audio.file = data
         audio.on_format(self.encoding)

@@ -70,6 +70,26 @@ For a Debian-based system, the following command will get these dependencies:
 
 Remember to check your permissions!
 
+Optional extras
+~~~~~~~~~~~~~~~
+
+Besides ``speed`` and ``voice``, Pycord Next has extras for the remote cache and the gateway. Combine them
+with commas, e.g. ``py-cord[redis,zstd]``.
+
+==============  ====================================================================================
+Extra           What it adds
+==============  ====================================================================================
+``speed``       Faster JSON and DNS, see above.
+``voice``       Voice support, see above.
+``redis``       Redis as the cache backend (:doc:`caching`) and the Redis Streams gateway (:doc:`gateway`).
+``memcached``   Memcached as the cache backend (:doc:`caching`).
+``zstd``        Zstandard gateway compression, ``gateway_compression="zstd-stream"`` (:doc:`gateway`).
+==============  ====================================================================================
+
+.. code-block:: shell
+
+    $ python3 -m pip install -U "py-cord[redis,memcached,zstd,voice,speed]"
+
 Virtual Environments
 ~~~~~~~~~~~~~~~~~~~~
 

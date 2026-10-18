@@ -27,3 +27,8 @@ Application Info
 
 .. autoclass:: TeamMember()
     :members:
+
+.. attributetable:: IntegrationTypesConfig
+
+.. autoclass:: IntegrationTypesConfig()
+    :members:

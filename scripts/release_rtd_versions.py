@@ -22,6 +22,8 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -80,10 +82,7 @@ def determine_docs_version(version: str) -> tuple[str, bool]:
     minor = match.group("minor")
     suffix = match.group("suffix") or ""
     hidden = bool(suffix)
-    if hidden:
-        docs_version = f"v{major}.{minor}.x"
-    else:
-        docs_version = f"v{version}"
+    docs_version = f"v{major}.{minor}.x" if hidden else f"v{version}"
     return docs_version, hidden
 
 

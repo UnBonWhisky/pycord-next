@@ -25,24 +25,28 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, cast, overload
+
+from typing_extensions import ParamSpec, TypeVar
 
 import discord.abc
+from discord.channel import PartialMessageable
+from discord.errors import CheckFailure
+from discord.guild import Guild
 from discord.interactions import Interaction, InteractionMessage, InteractionResponse
 from discord.webhook.async_ import Webhook
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from typing import ParamSpec
-
-    import discord
 
     from .. import AllowedMentions, Bot
+    from ..abc import MessageableChannel
     from ..client import ClientUser
     from ..cog import Cog
     from ..embeds import Embed
     from ..file import File
-    from ..guild import Guild
+    from ..guild import PartialGuild
     from ..interactions import InteractionChannel
     from ..member import Member
     from ..message import Message
@@ -51,22 +55,152 @@ if TYPE_CHECKING:
     from ..state import ConnectionState
     from ..ui import BaseView
     from ..user import User
-    from ..voice import VoiceClient
+    from ..voice import VoiceProtocol
     from ..webhook import WebhookMessage
     from .core import ApplicationCommand, Option
 
-T = TypeVar("T")
-CogT = TypeVar("CogT", bound="Cog")
+T = TypeVar("T", default=Any)
+CogT = TypeVar("CogT", bound="Cog", default=Any)
+P = ParamSpec("P", default=...)
 
-if TYPE_CHECKING:
-    P = ParamSpec("P")
-else:
-    P = TypeVar("P")
+# The attributes of the contexts that are set when a command is invoked.
+_UNSET: Any = None
 
-__all__ = ("ApplicationContext", "AutocompleteContext")
+__all__ = ("ApplicationContext", "AutocompleteContext", "BaseContext")
 
 
-class ApplicationContext(discord.abc.Messageable):
+class BaseContext(discord.abc.Messageable, ABC):
+    """The base class of the contexts commands are invoked with.
+
+    It holds the members that do not depend on whether the command was
+    invoked from an interaction or from a message. This is subclassed by
+    :class:`.ApplicationContext` and :class:`~discord.ext.commands.Context`.
+
+    .. versionadded:: 3.0
+
+    Attributes
+    ----------
+    bot: :class:`.Bot`
+        The bot that the command belongs to.
+    command: Optional[Union[:class:`.ApplicationCommand`, :class:`~discord.ext.commands.Command`]]
+        The command that this context belongs to.
+    """
+
+    if TYPE_CHECKING:
+        bot: Any
+        command: Any
+
+    @property
+    @abstractmethod
+    def guild(self) -> Guild | PartialGuild | None:
+        """Returns the guild associated with this context's command.
+
+        This is the cached guild with the in-process cache and a
+        :class:`PartialGuild` handle when it is not cached or the cache backend
+        is not the in-process one. Use :meth:`get_guild` to get the cached guild
+        with any cache backend.
+        """
+
+    async def get_guild(self) -> Guild | None:
+        """|coro|
+
+        Returns the cached guild associated with this context's command.
+
+        Returns
+        -------
+        Optional[:class:`Guild`]
+            The guild, or ``None`` if it is not cached or the context is not in a guild.
+        """
+        guild = self.guild
+        if guild is None or isinstance(guild, Guild):
+            return guild
+        return await guild.get()
+
+    @property
+    @abstractmethod
+    def channel(self) -> InteractionChannel | MessageableChannel | None:
+        """Returns the channel associated with this context's command."""
+
+    @abstractmethod
+    async def get_channel(self) -> MessageableChannel | None:
+        """|coro|
+
+        Returns the cached channel associated with this context's command.
+
+        Returns
+        -------
+        Optional[:class:`.abc.Messageable`]
+            The channel, or ``None`` if it is not cached.
+        """
+
+    @property
+    @abstractmethod
+    def author(self) -> Member | User:
+        """Returns the user that invoked this context's command."""
+
+    @property
+    def cog(self) -> Cog | None:
+        """Returns the cog associated with this context's command.
+
+        ``None`` if it does not exist.
+        """
+        if self.command is None:
+            return None
+
+        return self.command.cog
+
+    def _check_failure(self, message: str) -> CheckFailure:
+        return CheckFailure(message)
+
+    @property
+    def me(self) -> Member | ClientUser:
+        """Union[:class:`.Member`, :class:`.ClientUser`]: Similar to :attr:`.Guild.me` except it may return the :class:`.ClientUser` in private message message contexts, when :meth:`Intents.guilds` is absent, or when the guild or the member is not available in the in-process cache.
+
+        Use :meth:`get_me` to read the cached member with any cache backend.
+        """
+        guild = self.guild
+        if isinstance(guild, Guild) and guild._state.cache.supports_sync:
+            me = guild.me
+            if me is not None:  # pyright: ignore[reportUnnecessaryComparison]
+                return me
+
+        return cast("ClientUser", self.bot.user)
+
+    async def get_me(self) -> Member | ClientUser:
+        """|coro|
+
+        Similar to :attr:`me`, using the asynchronous cache accessors so that it works
+        with every cache backend.
+
+        Returns
+        -------
+        Union[:class:`.Member`, :class:`.ClientUser`]
+            The cached member of the client user in the guild of this context, or the
+            :class:`.ClientUser` when there is none.
+        """
+        guild = self.guild
+        if guild is not None:
+            state = self.bot._connection
+            if state.self_id is not None:
+                me = await state._guild_bucket("members", guild.id).get(state.self_id)
+                if me is not None:
+                    return cast("Member", me)
+
+        return cast("ClientUser", self.bot.user)
+
+    @property
+    def voice_client(self) -> VoiceProtocol[Any] | None:
+        r"""A shortcut to :attr:`.Guild.voice_client`\, if applicable."""
+        guild = self.guild
+        if guild is None:
+            return None
+        return cast(
+            "VoiceProtocol[Any] | None",
+            self.bot._connection._get_voice_client(guild.id),
+        )
+
+
+class ApplicationContext(BaseContext):
     """Represents a Discord application command interaction context.
 
     This class is not created manually and is instead passed to application
@@ -82,19 +216,20 @@ class ApplicationContext(discord.abc.Messageable):
         The interaction object that invoked the command.
     """
 
-    def __init__(self, bot: Bot, interaction: Interaction):
+    def __init__(self, bot: Bot, interaction: Interaction) -> None:
         self.bot = bot
         self.interaction = interaction
 
         # below attributes will be set after initialization
-        self.focused: Option = None  # type: ignore
-        self.value: str = None  # type: ignore
-        self.options: dict = None  # type: ignore
+        self.focused: Option = _UNSET
+        self.value: str = _UNSET
+        self.options: dict[str, Any] = _UNSET
+        self.command_failed: bool = False
 
         self._state: ConnectionState = self.interaction._state
 
-    async def _get_channel(self) -> InteractionChannel | None:
-        return self.interaction.channel
+    async def _get_channel(self) -> MessageableChannel:
+        return cast("MessageableChannel", self.interaction.channel)
 
     async def invoke(
         self,
@@ -118,7 +253,7 @@ class ApplicationContext(discord.abc.Messageable):
             using this function.
 
         Parameters
-        -----------
+        ----------
         command: :class:`.ApplicationCommand`
             The command that is going to be called.
         \*args
@@ -127,7 +262,7 @@ class ApplicationContext(discord.abc.Messageable):
             The keyword arguments to use.
 
         Raises
-        -------
+        ------
         TypeError
             The command argument to invoke is missing.
         """
@@ -144,21 +279,40 @@ class ApplicationContext(discord.abc.Messageable):
 
     @property
     def channel(self) -> InteractionChannel | None:
-        """Union[:class:`abc.GuildChannel`, :class:`PartialMessageable`, :class:`Thread`]:
-        Returns the channel associated with this context's command. Shorthand for :attr:`.Interaction.channel`.
+        """Union[:class:`abc.GuildChannel`, :class:`PartialMessageable`, :class:`Thread`]: Returns the channel associated with this context's command.
+
+        Shorthand for :attr:`.Interaction.channel`.
         """
         return self.interaction.channel
+
+    async def get_channel(self) -> MessageableChannel | None:
+        """|coro|
+
+        Returns the channel associated with this context's command.
+
+        Returns
+        -------
+        Optional[Union[:class:`abc.GuildChannel`, :class:`Thread`, :class:`DMChannel`, :class:`GroupChannel`]]
+            The channel of the interaction payload, or the cached channel when the payload
+            has none, ``None`` if it is not cached.
+        """
+        channel = self.interaction.channel
+        if isinstance(channel, PartialMessageable):
+            return await channel.get()
+        return cast("MessageableChannel | None", channel)
 
     @property
     def channel_id(self) -> int | None:
         """Returns the ID of the channel associated with this context's command.
+
         Shorthand for :attr:`.Interaction.channel_id`.
         """
         return self.interaction.channel_id
 
     @property
-    def guild(self) -> Guild | None:
+    def guild(self) -> Guild | PartialGuild | None:
         """Returns the guild associated with this context's command.
+
         Shorthand for :attr:`.Interaction.guild`.
         """
         return self.interaction.guild
@@ -166,6 +320,7 @@ class ApplicationContext(discord.abc.Messageable):
     @property
     def guild_id(self) -> int | None:
         """Returns the ID of the guild associated with this context's command.
+
         Shorthand for :attr:`.Interaction.guild_id`.
         """
         return self.interaction.guild_id
@@ -173,6 +328,7 @@ class ApplicationContext(discord.abc.Messageable):
     @property
     def locale(self) -> str | None:
         """Returns the locale of the guild associated with this context's command.
+
         Shorthand for :attr:`.Interaction.locale`.
         """
         return self.interaction.locale
@@ -180,29 +336,23 @@ class ApplicationContext(discord.abc.Messageable):
     @property
     def guild_locale(self) -> str | None:
         """Returns the locale of the guild associated with this context's command.
+
         Shorthand for :attr:`.Interaction.guild_locale`.
         """
         return self.interaction.guild_locale
 
     @property
     def app_permissions(self) -> Permissions:
-        return self.interaction.app_permissions
+        """Returns the permissions of the application in the channel of this context's command.
 
-    @property
-    def me(self) -> Member | ClientUser | None:
-        """Union[:class:`.Member`, :class:`.ClientUser`]:
-        Similar to :attr:`.Guild.me` except it may return the :class:`.ClientUser` in private message
-        message contexts, or when :meth:`Intents.guilds` is absent.
+        Shorthand for :attr:`.Interaction.app_permissions`.
         """
-        return (
-            self.interaction.guild.me
-            if self.interaction.guild is not None
-            else self.bot.user
-        )
+        return self.interaction.app_permissions
 
     @property
     def message(self) -> Message | None:
         """Returns the message sent with this context's command.
+
         Shorthand for :attr:`.Interaction.message`, if applicable.
         """
         return self.interaction.message
@@ -210,25 +360,23 @@ class ApplicationContext(discord.abc.Messageable):
     @property
     def user(self) -> Member | User:
         """Returns the user that sent this context's command.
+
         Shorthand for :attr:`.Interaction.user`.
         """
-        return self.interaction.user  # type: ignore # command user will never be None
-
-    author: Member | User = user
+        return cast("Member | User", self.interaction.user)
 
     @property
-    def voice_client(self) -> VoiceClient | None:
-        """Returns the voice client associated with this context's command.
-        Shorthand for :attr:`Interaction.guild.voice_client<~discord.Guild.voice_client>`, if applicable.
-        """
-        if self.interaction.guild is None:
-            return None
+    def author(self) -> Member | User:
+        """Returns the user that sent this context's command.
 
-        return self.interaction.guild.voice_client
+        An alias of :attr:`user`.
+        """
+        return self.user
 
     @property
     def response(self) -> InteractionResponse:
         """Returns the response object associated with this context's command.
+
         Shorthand for :attr:`.Interaction.response`.
         """
         return self.interaction.response
@@ -244,7 +392,10 @@ class ApplicationContext(discord.abc.Messageable):
             was processed, if applicable. Returns ``None`` if the command has not yet been invoked,
             or if there are no options defined for that command.
         """
-        return self.interaction.data.get("options", None)
+        data = cast("dict[str, Any] | None", self.interaction.data)
+        if data is None:
+            return None
+        return data.get("options", None)
 
     @property
     def unselected_options(self) -> list[Option] | None:
@@ -256,21 +407,22 @@ class ApplicationContext(discord.abc.Messageable):
             A list of Option objects (if any) that were not selected by the user when the command was processed.
             Returns ``None`` if there are no options defined for that command.
         """
-        if self.command.options is not None:  # type: ignore
-            if self.selected_options:
+        options: list[Option] | None = getattr(self.command, "options", None)
+        if options is not None:
+            if selected_options := self.selected_options:
                 return [
                     option
-                    for option in self.command.options  # type: ignore
+                    for option in options
                     if option.to_dict()["name"]
-                    not in [opt["name"] for opt in self.selected_options]
+                    not in [opt["name"] for opt in selected_options]
                 ]
-            else:
-                return self.command.options  # type: ignore
+            return options
         return None
 
     @property
     def attachment_size_limit(self) -> int:
         """Returns the attachment size limit associated with this context's interaction.
+
         Shorthand for :attr:`.Interaction.attachment_size_limit`.
         """
         return self.interaction.attachment_size_limit
@@ -278,6 +430,7 @@ class ApplicationContext(discord.abc.Messageable):
     @property
     @discord.utils.copy_doc(InteractionResponse.send_modal)
     def send_modal(self) -> Callable[..., Awaitable[Interaction]]:
+        """Alias of :meth:`.InteractionResponse.send_modal`."""
         return self.interaction.response.send_modal
 
     @overload
@@ -315,34 +468,36 @@ class ApplicationContext(discord.abc.Messageable):
     ) -> Interaction | WebhookMessage: ...
 
     @discord.utils.copy_doc(Interaction.respond)
-    async def respond(self, *args, **kwargs) -> Interaction | WebhookMessage:
+    async def respond(self, *args: Any, **kwargs: Any) -> Interaction | WebhookMessage:
+        """Alias of :meth:`.Interaction.respond`."""
         return await self.interaction.respond(*args, **kwargs)
 
     @property
     @discord.utils.copy_doc(InteractionResponse.send_message)
     def send_response(self) -> Callable[..., Awaitable[Interaction]]:
+        """Alias of :meth:`.InteractionResponse.send_message`."""
         if not self.interaction.response.is_done():
             return self.interaction.response.send_message
-        else:
-            raise RuntimeError(
-                "Interaction was already issued a response. Try using"
-                f" {type(self).__name__}.send_followup() instead."
-            )
+        raise RuntimeError(
+            "Interaction was already issued a response. Try using"
+            f" {type(self).__name__}.send_followup() instead."
+        )
 
     @property
     @discord.utils.copy_doc(Webhook.send)
     def send_followup(self) -> Callable[..., Awaitable[WebhookMessage]]:
+        """Alias of :meth:`.Webhook.send` on the followup webhook."""
         if self.interaction.response.is_done():
             return self.followup.send
-        else:
-            raise RuntimeError(
-                "Interaction was not yet issued a response. Try using"
-                f" {type(self).__name__}.respond() first."
-            )
+        raise RuntimeError(
+            "Interaction was not yet issued a response. Try using"
+            f" {type(self).__name__}.respond() first."
+        )
 
     @property
     @discord.utils.copy_doc(InteractionResponse.defer)
     def defer(self) -> Callable[..., Awaitable[None]]:
+        """Alias of :meth:`.InteractionResponse.defer`."""
         return self.interaction.response.defer
 
     @property
@@ -377,20 +532,12 @@ class ApplicationContext(discord.abc.Messageable):
     @property
     @discord.utils.copy_doc(Interaction.edit_original_response)
     def edit(self) -> Callable[..., Awaitable[InteractionMessage]]:
+        """Alias of :meth:`.Interaction.edit_original_response`."""
         return self.interaction.edit_original_response
-
-    @property
-    def cog(self) -> Cog | None:
-        """Returns the cog associated with this context's command.
-        ``None`` if it does not exist.
-        """
-        if self.command is None:
-            return None
-
-        return self.command.cog
 
     def is_guild_authorised(self) -> bool:
         """:class:`bool`: Checks if the invoked command is guild-installed.
+
         This is a shortcut for :meth:`Interaction.is_guild_authorised`.
 
         There is an alias for this called :meth:`.is_guild_authorized`.
@@ -401,6 +548,7 @@ class ApplicationContext(discord.abc.Messageable):
 
     def is_user_authorised(self) -> bool:
         """:class:`bool`: Checks if the invoked command is user-installed.
+
         This is a shortcut for :meth:`Interaction.is_user_authorised`.
 
         There is an alias for this called :meth:`.is_user_authorized`.
@@ -445,19 +593,20 @@ class AutocompleteContext:
         A name to value mapping of the options that the user has selected before this option.
     """
 
-    __slots__ = ("bot", "interaction", "focused", "value", "options")
+    __slots__ = ("bot", "focused", "interaction", "options", "value")
 
-    def __init__(self, bot: Bot, interaction: Interaction):
+    def __init__(self, bot: Bot, interaction: Interaction) -> None:
         self.bot = bot
         self.interaction = interaction
 
-        self.focused: Option = None  # type: ignore
-        self.value: str = None  # type: ignore
-        self.options: dict = None  # type: ignore
+        self.focused: Option = _UNSET
+        self.value: str = _UNSET
+        self.options: dict[str, Any] = _UNSET
 
     @property
     def cog(self) -> Cog | None:
         """Returns the cog associated with this context's command.
+
         ``None`` if it does not exist.
         """
         if self.command is None:

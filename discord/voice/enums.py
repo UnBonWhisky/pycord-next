@@ -29,6 +29,8 @@ from discord.enums import Enum
 
 
 class OpCodes(Enum):
+    """The opcodes of the voice gateway."""
+
     identify = 0
     select_protocol = 1
     ready = 2
@@ -59,15 +61,20 @@ class OpCodes(Enum):
     def __eq__(self, other: object) -> bool:
         if isinstance(other, int):
             return self.value == other
-        elif isinstance(other, self.__class__):
+        if isinstance(other, self.__class__):
             return self is other
         return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self.value)
 
     def __int__(self) -> int:
         return self.value
 
 
 class ConnectionFlowState(Enum):
+    """The states of the voice connection flow."""
+
     disconnected = 0
     set_guild_voice_state = 1
     got_voice_state_update = 2

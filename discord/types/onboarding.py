@@ -28,7 +28,7 @@ from typing import Literal, TypedDict
 
 from typing_extensions import NotRequired
 
-from .emoji import Emoji
+from .emoji import PartialEmoji
 from .snowflake import Snowflake, SnowflakeList
 
 PromptType = Literal[0, 1]
@@ -57,7 +57,7 @@ class PromptOption(TypedDict):
     id: Snowflake
     channel_ids: SnowflakeList
     role_ids: SnowflakeList
-    emoji: NotRequired[Emoji]
+    emoji: NotRequired[PartialEmoji]
     emoji_id: NotRequired[Snowflake]
     emoji_name: NotRequired[str]
     emoji_animated: NotRequired[bool]

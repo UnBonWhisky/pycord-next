@@ -11,6 +11,20 @@ The first thing to keep in mind is that breaking changes only apply to **publicl
 
     The examples below are non-exhaustive.
 
+Pycord Next (3.0)
+-----------------
+
+Version 3.0 is the release that collects the changes that would otherwise break later; the list is in
+:doc:`migrating_to_next`. From 3.0 on:
+
+- A breaking change is only made when it prevents a future breaking change (keyword-only parameters,
+  objects instead of tuples and dictionaries, enums instead of raw values, ``async`` where I/O may
+  happen).
+- **Additions never break**: a new class, method, parameter, event or endpoint is not a breaking change.
+  New options are keyword-only and take typed objects so that they can grow.
+- Every breaking change is listed with its reason in :doc:`changes` and, when code has to change, in
+  :doc:`migrating_to_next`.
+
 Examples of Breaking Changes
 ----------------------------
 

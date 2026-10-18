@@ -89,6 +89,26 @@ Message
 .. autoclass:: File
     :members:
 
+.. attributetable:: VoiceMessage
+
+.. autoclass:: VoiceMessage
+    :members:
+
+.. attributetable:: SharedClientTheme
+
+.. autoclass:: SharedClientTheme
+    :members:
+
+.. attributetable:: SearchAuthors
+
+.. autoclass:: SearchAuthors
+    :members:
+
+.. attributetable:: SearchHas
+
+.. autoclass:: SearchHas
+    :members:
+
 Embed
 ~~~~~
 
@@ -181,6 +201,11 @@ Flags
 .. autoclass:: AttachmentFlags()
     :members:
 
+.. attributetable:: LobbyMemberFlags
+
+.. autoclass:: LobbyMemberFlags()
+    :members:
+
 .. attributetable:: PublicUserFlags
 
 .. autoclass:: PublicUserFlags()
@@ -204,6 +229,11 @@ Flags
 .. attributetable:: RoleFlags
 
 .. autoclass:: RoleFlags()
+    :members:
+
+.. attributetable:: GatewayCapabilities
+
+.. autoclass:: GatewayCapabilities()
     :members:
 
 Colour
@@ -261,4 +291,23 @@ Application Role Connections
 .. attributetable:: ApplicationRoleConnectionMetadata
 
 .. autoclass:: ApplicationRoleConnectionMetadata
+    :members:
+
+Limits
+------
+
+.. attributetable:: ComponentLimits
+
+.. autoclass:: ComponentLimits()
+
+.. attributetable:: EmbedLimits
+
+.. autoclass:: EmbedLimits()
+
+Incidents
+---------
+
+.. attributetable:: IncidentsData
+
+.. autoclass:: IncidentsData()
     :members:

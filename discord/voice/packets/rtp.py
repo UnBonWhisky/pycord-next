@@ -26,13 +26,9 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import struct
-from collections import namedtuple
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple
 
 from .core import OPUS_SILENCE, Packet
-
-if TYPE_CHECKING:
-    from typing import Final
 
 MAX_UINT_32 = 0xFFFFFFFF
 MAX_UINT_16 = 0xFFFF
@@ -41,15 +37,44 @@ RTP_PACKET_TYPE_VOICE = 120
 
 
 def decode(data: bytes) -> Packet:
+    """Decode a raw RTP/RTCP datagram into a packet.
+
+    Parameters
+    ----------
+    data: :class:`bytes`
+        The raw datagram.
+
+    Returns
+    -------
+    :class:`Packet`
+        The decoded packet.
+
+    Raises
+    ------
+    ValueError
+        The datagram has an invalid header.
+    """
     if not data[0] >> 6 == 2:
         raise ValueError(f"Invalid packet header 0b{data[0]:0>8b}")
     return _rtcp_map.get(data[1], RTPPacket)(data)
 
 
 class FakePacket(Packet):
+    """A placeholder packet standing in for a lost packet.
+
+    Parameters
+    ----------
+    ssrc: :class:`int`
+        The SSRC of the stream the packet belongs to.
+    sequence: :class:`int`
+        The sequence number of the lost packet.
+    timestamp: :class:`int`
+        The timestamp of the lost packet.
+    """
+
     data = b""
-    decrypted_data: bytes = b""
-    extension_data: dict = {}
+    decrypted_data: bytes | None = b""
+    extension_data: ClassVar[dict[int, bytes]] = {}
 
     def __init__(
         self,
@@ -66,8 +91,18 @@ class FakePacket(Packet):
 
 
 class SilencePacket(Packet):
-    decrypted_data: Final = OPUS_SILENCE
-    extension_data: Final[dict[int, Any]] = {}
+    """A synthetic packet holding an opus silence frame.
+
+    Parameters
+    ----------
+    ssrc: :class:`int`
+        The SSRC of the stream the packet belongs to.
+    timestamp: :class:`int`
+        The timestamp of the packet.
+    """
+
+    decrypted_data: bytes | None = OPUS_SILENCE
+    extension_data: ClassVar[dict[int, Any]] = {}
     sequence: int = -1
 
     def __init__(self, ssrc: int, timestamp: int) -> None:
@@ -75,6 +110,7 @@ class SilencePacket(Packet):
         self.timestamp = timestamp
 
     def is_silence(self) -> bool:
+        """Always ``True``, this packet is a silence frame."""
         return True
 
 
@@ -90,7 +126,12 @@ class RTPPacket(Packet):
     """
 
     _hstruct = struct.Struct(">xxHII")
-    _ext_header = namedtuple("Extension", "profile length values")
+
+    class _ExtHeader(NamedTuple):
+        profile: bytes
+        length: int
+        values: tuple[int, ...] | list[int]
+
     _ext_magic = b"\xbe\xde"
 
     def __init__(self, data: bytes) -> None:
@@ -121,14 +162,14 @@ class RTPPacket(Packet):
         self._rtpsize: bool = False
 
         if self.cc:
-            fmt = ">%sI" % self.cc
+            fmt = f">{self.cc}I"
             offset = struct.calcsize(fmt) + 12
             self.csrcs = struct.unpack(fmt, data[12:offset])
             self.data = data[offset:]
+            self.header = data[:offset]
 
     def adjust_rtpsize(self) -> None:
         """Automatically adjusts this packet header and data based on the rtpsize format."""
-
         self._rtpsize = True
         self.nonce = self.data[-4:]
 
@@ -140,8 +181,7 @@ class RTPPacket(Packet):
         self.data = self.data[4:-4]
 
     def update_extended_header(self, data: bytes) -> int:
-        """Updates the extended header using ``data`` and returns the pd offset."""
-
+        """Update the extended header using ``data`` and return the payload offset."""
         if not self.extended:
             return 0
 
@@ -159,10 +199,10 @@ class RTPPacket(Packet):
 
         if len(data) >= 4 + total_ext_length:
             try:
-                values = struct.unpack(">%sI" % length, data[4 : 4 + total_ext_length])
-                self.extension = self._ext_header(profile, length, values)
+                values = struct.unpack(f">{length}I", data[4 : 4 + total_ext_length])
+                self.extension = self._ExtHeader(profile, length, values)
             except struct.error:
-                self.extension = self._ext_header(profile, 0, [])
+                self.extension = self._ExtHeader(profile, 0, [])
 
         offset = 4 + total_ext_length
 
@@ -170,6 +210,28 @@ class RTPPacket(Packet):
             offset -= 4
 
         return max(0, min(offset, len(data)))
+
+    def strip_padding(self, payload: bytes) -> bytes:
+        """Remove the RTP padding from a payload.
+
+        Parameters
+        ----------
+        payload: :class:`bytes`
+            The decrypted payload.
+
+        Returns
+        -------
+        :class:`bytes`
+            The payload without padding.
+        """
+        if not self.padding or not payload:
+            return payload
+
+        pad_len = payload[-1]
+        if 0 < pad_len <= len(payload):
+            return payload[:-pad_len]
+
+        return payload
 
     def _parse_bede_header(self, data: bytes, length: int) -> None:
         offset = 4
@@ -208,9 +270,17 @@ class RTPPacket(Packet):
 
 
 class RTCPPacket(Packet):
+    """Base class of the RTCP control packets.
+
+    Parameters
+    ----------
+    data: :class:`bytes`
+        The raw packet data.
+    """
+
     _header = struct.Struct(">BBH")
     _ssrc_fmt = struct.Struct(">I")
-    type = None
+    type: int | None = None
 
     def __init__(self, data: bytes) -> None:
         super().__init__(data)
@@ -219,13 +289,25 @@ class RTCPPacket(Packet):
 
         self.version: int = head >> 6
         self.padding: bool = bool(head & 0b00100000)
-        setattr(self, "report_count", head & 0b00011111)
+        self.report_count = head & 31
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} version={self.version} padding={self.padding} length={self.length}>"
 
     @classmethod
     def from_data(cls, data: bytes) -> Packet:
+        """Build the matching RTCP packet type from raw data.
+
+        Parameters
+        ----------
+        data: :class:`bytes`
+            The raw packet data.
+
+        Returns
+        -------
+        :class:`Packet`
+            The decoded packet.
+        """
         _, ptype, _ = cls._header.unpack_from(data)
         return _rtcp_map[ptype](data)
 
@@ -234,18 +316,34 @@ def _parse_low(x: int, bitlen: int = 32) -> float:
     return x / 2.0**bitlen
 
 
-def _to_low(x: float, bitlen: int = 32) -> int:
-    return int(x * 2.0**bitlen)
-
-
 class SenderReportPacket(RTCPPacket):
+    """An RTCP sender report packet.
+
+    Parameters
+    ----------
+    data: :class:`bytes`
+        The raw packet data.
+    """
+
     _info_fmt = struct.Struct(">5I")
     _report_fmt = struct.Struct(">IB3x4I")
     _24bit_int_fmt = struct.Struct(">4xI")
-    _info = namedtuple("RRSenderInfo", "ntp_ts rtp_ts packet_count octet_count")
-    _report = namedtuple(
-        "RReport", "ssrc perc_loss total_lost last_seq jitter lsr dlsr"
-    )
+
+    class _Info(NamedTuple):
+        ntp_ts: float
+        rtp_ts: int
+        packet_count: int
+        octet_count: int
+
+    class _Report(NamedTuple):
+        ssrc: int
+        perc_loss: int
+        total_lost: int
+        last_seq: int
+        jitter: int
+        lsr: int
+        dlsr: int
+
     type = 200
 
     if TYPE_CHECKING:
@@ -257,37 +355,49 @@ class SenderReportPacket(RTCPPacket):
         self.ssrc = self._ssrc_fmt.unpack_from(data, 4)[0]
         self.info = self._read_sender_info(data, 8)
 
-        _report = self._report
-        reports: list[_report] = []
+        reports: list[SenderReportPacket._Report] = []
         for x in range(self.report_count):
             offset = 28 + 24 * x
             reports.append(self._read_report(data, offset))
 
-        self.reports: tuple[_report, ...] = tuple(reports)
+        self.reports: tuple[SenderReportPacket._Report, ...] = tuple(reports)
         self.extension = None
         if len(data) > 28 + 24 * self.report_count:
             self.extension = data[28 + 24 * self.report_count :]
 
-    def _read_sender_info(self, data: bytes, offset: int) -> _info:
+    def _read_sender_info(self, data: bytes, offset: int) -> _Info:
         nhigh, nlow, rtp_ts, pcount, ocount = self._info_fmt.unpack_from(data, offset)
         ntotal = nhigh + _parse_low(nlow)
-        return self._info(ntotal, rtp_ts, pcount, ocount)
+        return self._Info(ntotal, rtp_ts, pcount, ocount)
 
-    def _read_report(self, data: bytes, offset: int) -> _report:
+    def _read_report(self, data: bytes, offset: int) -> _Report:
         ssrc, flost, seq, jit, lsr, dlsr = self._report_fmt.unpack_from(data, offset)
         clost = self._24bit_int_fmt.unpack_from(data, offset)[0] & 0xFFFFFF
-        return self._report(ssrc, flost, clost, seq, jit, lsr, dlsr)
+        return self._Report(ssrc, flost, clost, seq, jit, lsr, dlsr)
 
 
 class ReceiverReportPacket(RTCPPacket):
+    """An RTCP receiver report packet.
+
+    Parameters
+    ----------
+    data: :class:`bytes`
+        The raw packet data.
+    """
+
     _report_fmt = struct.Struct(">IB3x4I")
     _24bit_int_fmt = struct.Struct(">4xI")
-    _report = namedtuple(
-        "RReport", "ssrc perc_loss total_loss last_seq jitter lsr dlsr"
-    )
-    type = 201
 
-    reports: tuple[_report, ...]
+    class _Report(NamedTuple):
+        ssrc: int
+        perc_loss: int
+        total_loss: int
+        last_seq: int
+        jitter: int
+        lsr: int
+        dlsr: int
+
+    type = 201
 
     if TYPE_CHECKING:
         report_count: int
@@ -296,22 +406,21 @@ class ReceiverReportPacket(RTCPPacket):
         super().__init__(data)
         self.ssrc: int = self._ssrc_fmt.unpack_from(data, 4)[0]
 
-        _report = self._report
-        reports: list[_report] = []
+        reports: list[ReceiverReportPacket._Report] = []
         for x in range(self.report_count):
             offset = 8 + 24 * x
             reports.append(self._read_report(data, offset))
 
-        self.reports = tuple(reports)
+        self.reports: tuple[ReceiverReportPacket._Report, ...] = tuple(reports)
 
         self.extension: bytes | None = None
         if len(data) > 8 + 24 * self.report_count:
             self.extension = data[8 + 24 * self.report_count :]
 
-    def _read_report(self, data: bytes, offset: int) -> _report:
+    def _read_report(self, data: bytes, offset: int) -> _Report:
         ssrc, flost, seq, jit, lsr, dlsr = self._report_fmt.unpack_from(data, offset)
         clost = self._24bit_int_fmt.unpack_from(data, offset)[0] & 0xFFFFFF
-        return self._report(ssrc, flost, clost, seq, jit, lsr, dlsr)
+        return self._Report(ssrc, flost, clost, seq, jit, lsr, dlsr)
 
 
 _rtcp_map = {

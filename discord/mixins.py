@@ -23,6 +23,8 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 __all__ = (
     "EqualityComparable",
     "Hashable",
@@ -30,6 +32,14 @@ __all__ = (
 
 
 class EqualityComparable:
+    """A mixin that compares two models of the same type by their ID.
+
+    Attributes
+    ----------
+    id: :class:`int`
+        The ID used for the comparison.
+    """
+
     __slots__ = ()
 
     id: int
@@ -40,8 +50,18 @@ class EqualityComparable:
     def __ne__(self, other: object) -> bool:
         return not self.__eq__(other)
 
+    __hash__ = None  # pyright: ignore[reportAssignmentType]
+
 
 class Hashable(EqualityComparable):
+    """A mixin that compares and hashes two models of the same type by their ID.
+
+    Attributes
+    ----------
+    id: :class:`int`
+        The ID used for the comparison and the hash.
+    """
+
     __slots__ = ()
 
     def __hash__(self) -> int:

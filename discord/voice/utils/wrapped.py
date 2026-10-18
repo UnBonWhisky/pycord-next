@@ -23,10 +23,44 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 
 def gap_wrapped(a: int, b: int, *, wrap: int = 65536) -> int:
+    """Get the number of values between ``a`` and ``b`` on a wrapping counter.
+
+    Parameters
+    ----------
+    a: :class:`int`
+        The earlier value.
+    b: :class:`int`
+        The later value.
+    wrap: :class:`int`
+        The value at which the counter wraps around.
+
+    Returns
+    -------
+    :class:`int`
+        The number of skipped values between ``a`` and ``b``.
+    """
     return (b - (a + 1) + wrap) % wrap
 
 
 def add_wrapped(a: int, b: int, *, wrap: int = 65536) -> int:
+    """Add two values on a wrapping counter.
+
+    Parameters
+    ----------
+    a: :class:`int`
+        The first value.
+    b: :class:`int`
+        The second value.
+    wrap: :class:`int`
+        The value at which the counter wraps around.
+
+    Returns
+    -------
+    :class:`int`
+        The sum, wrapped around ``wrap``.
+    """
     return (a + b) % wrap

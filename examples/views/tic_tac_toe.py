@@ -64,7 +64,7 @@ class TicTacToe(discord.ui.View):
     # This is not required.
     children: list[TicTacToeButton]
     X = -1
-    O = 1
+    O = 1  # noqa: E741
     Tie = 2
 
     def __init__(self):
@@ -90,7 +90,7 @@ class TicTacToe(discord.ui.View):
             value = sum(across)
             if value == 3:
                 return self.O
-            elif value == -3:
+            if value == -3:
                 return self.X
 
         # Check vertical
@@ -98,20 +98,20 @@ class TicTacToe(discord.ui.View):
             value = self.board[0][line] + self.board[1][line] + self.board[2][line]
             if value == 3:
                 return self.O
-            elif value == -3:
+            if value == -3:
                 return self.X
 
         # Check diagonals
         diag = self.board[0][2] + self.board[1][1] + self.board[2][0]
         if diag == 3:
             return self.O
-        elif diag == -3:
+        if diag == -3:
             return self.X
 
         diag = self.board[0][0] + self.board[1][1] + self.board[2][2]
         if diag == -3:
             return self.X
-        elif diag == 3:
+        if diag == 3:
             return self.O
 
         # If we're here, we need to check if a tie has been reached.

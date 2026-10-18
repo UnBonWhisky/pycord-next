@@ -22,15 +22,18 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-from functools import cached_property
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from .asset import Asset
-from .types.collectibles import Collectibles as CollectiblesPayload
-from .types.collectibles import Nameplate as NameplatePayload
 
 if TYPE_CHECKING:
     from .state import ConnectionState
+    from .types.collectibles import (
+        Collectibles as CollectiblesPayload,
+        Nameplate as NameplatePayload,
+    )
 
 __all__ = (
     "Collectibles",
@@ -60,7 +63,12 @@ class Collectibles:
         The user's nameplate.
     """
 
-    def __init__(self, data: CollectiblesPayload, state: "ConnectionState") -> None:
+    __slots__ = (
+        "_state",
+        "nameplate",
+    )
+
+    def __init__(self, data: CollectiblesPayload, state: ConnectionState) -> None:
         if nameplate_data := data.get("nameplate"):
             self.nameplate = Nameplate(data=nameplate_data, state=state)
         else:
@@ -72,6 +80,9 @@ class Collectibles:
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Collectibles) and self.nameplate == other.nameplate
+
+    def __hash__(self) -> int:
+        return hash(self.nameplate)
 
 
 class Nameplate:
@@ -100,12 +111,20 @@ class Nameplate:
         The color palette of the nameplate.
     """
 
-    def __init__(self, data: NameplatePayload, state: "ConnectionState") -> None:
-        self.sku_id: int = data["sku_id"]
+    __slots__ = (
+        "_asset",
+        "_label",
+        "_state",
+        "palette",
+        "sku_id",
+    )
+
+    def __init__(self, data: NameplatePayload, state: ConnectionState) -> None:
+        self.sku_id: int = int(data["sku_id"])
         self.palette: str = data["palette"]
         self._label: str = data["label"]
         self._asset: str = data["asset"]
-        self._state: "ConnectionState" = state
+        self._state: ConnectionState = state
 
     def __repr__(self) -> str:
         return f"<Nameplate sku_id={self.sku_id} palette={self.palette}>"
@@ -117,7 +136,10 @@ class Nameplate:
             and self.palette == other.palette
         )
 
-    @cached_property
+    def __hash__(self) -> int:
+        return hash((self.sku_id, self.palette))
+
+    @property
     def static_asset(self) -> Asset:
         """
         The static :class:`Asset` of this nameplate.
@@ -126,7 +148,7 @@ class Nameplate:
         """
         return Asset._from_collectible(self._state, self._asset)
 
-    @cached_property
+    @property
     def animated_asset(self) -> Asset:
         """
         The animated :class:`Asset` of this nameplate.

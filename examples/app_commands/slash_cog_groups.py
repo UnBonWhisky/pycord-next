@@ -1,3 +1,4 @@
+# A group declared inside one cog. See slash_multi_cog_groups.py for a group shared by several cogs.
 # This example requires the 'members' privileged intent to use the Member converter.
 
 import discord

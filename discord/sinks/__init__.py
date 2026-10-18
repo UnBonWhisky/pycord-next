@@ -1,12 +1,11 @@
-"""
-discord.sinks
-~~~~~~~~~~~~~
+"""A place to store all officially given voice sinks.
 
-A place to store all officially given voice sinks.
+Copyright (c) 2021-present Pycord Development
 
-:copyright: 2021-present Pycord Development
 :license: MIT, see LICENSE for more details.
 """
+
+from __future__ import annotations
 
 from .core import *
 from .errors import *

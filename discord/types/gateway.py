@@ -23,7 +23,15 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-from typing import TypedDict
+from __future__ import annotations
+
+from typing import Any, TypedDict
+
+from typing_extensions import NotRequired
+
+from .guild import UnavailableGuild
+from .snowflake import Snowflake
+from .user import User
 
 
 class SessionStartLimit(TypedDict):
@@ -40,3 +48,29 @@ class Gateway(TypedDict):
 class GatewayBot(Gateway):
     shards: int
     session_start_limit: SessionStartLimit
+
+
+class GatewayRateLimit(TypedDict):
+    opcode: int
+    retry_after: float
+    meta: NotRequired[dict[str, Any]]
+
+
+class ReadyApplication(TypedDict):
+    id: Snowflake
+    flags: int
+    flags_new: str
+
+
+class ReadyEvent(TypedDict):
+    v: int
+    user: User
+    guilds: list[UnavailableGuild]
+    session_id: str
+    resume_gateway_url: str
+    shard: NotRequired[list[int]]
+    application: ReadyApplication
+
+
+class ResumedEvent(TypedDict):
+    pass

@@ -410,6 +410,22 @@ Connection
                     WebSocket library. It can be :class:`bytes` to denote a binary
                     message or :class:`str` to denote a regular text message.
 
+.. function:: on_gateway_rate_limited(payload)
+
+    Called when Discord answers a gateway request with a ``RATE_LIMITED`` event, for example a
+    *Request Guild Members* sent too often.
+
+    A rate limited :meth:`Guild.query_members` or :meth:`Guild.chunk` raises
+    :exc:`GatewayRateLimited` instead of waiting for the timeout. See :ref:`the gateway guide <gateway_rate_limits>`
+    for details.
+
+    This does not require any intent.
+
+    .. versionadded:: 3.0
+
+    :param payload: The rate limit information (opcode, ``retry_after``, ``meta``, ``guild_id`` and ``nonce``).
+    :type payload: :class:`GatewayRateLimit`
+
 Guilds
 ------
 .. function:: on_guild_join(guild)
@@ -1391,6 +1407,85 @@ Typing
     :type payload: :class:`RawTypingEvent`
 
 
+Voice Receive
+-------------
+These events come from a connected :class:`~discord.voice.VoiceClient`. ``on_member_connect``,
+``on_member_disconnect`` and ``on_member_speaking_state_update`` are also dispatched to the client.
+``on_member_speaking_start``, ``on_member_speaking_stop`` and ``on_rtcp_packet`` are only produced
+while the voice client is receiving audio (:meth:`~discord.voice.VoiceClient.start_recording`)
+and are delivered to the listeners of the :class:`~discord.sinks.Sink` in use, not to the client.
+
+.. function:: on_member_connect(member)
+
+    Called when a member connects to the voice channel the client is in.
+
+    This requires :attr:`Intents.voice_states` and :attr:`Intents.members` to be enabled.
+
+    .. versionadded:: 3.0
+
+    :param member: The member that connected.
+    :type member: :class:`Member`
+
+.. function:: on_member_disconnect(member, ssrc)
+
+    Called when a member disconnects from the voice channel the client is in.
+
+    This requires :attr:`Intents.voice_states` and :attr:`Intents.members` to be enabled.
+
+    .. versionadded:: 3.0
+
+    :param member: The member that disconnected, or ``None`` if they could not be resolved.
+    :type member: Optional[:class:`Member`]
+    :param ssrc: The SSRC the member was using, or ``None`` if it was not known.
+    :type ssrc: Optional[:class:`int`]
+
+.. function:: on_member_speaking_state_update(member, ssrc, state)
+
+    Called when a member's speaking state changes, as reported by Discord's voice gateway.
+
+    This requires :attr:`Intents.voice_states` and :attr:`Intents.members` to be enabled.
+
+    .. versionadded:: 3.0
+
+    :param member: The member whose state changed, or ``None`` if they could not be resolved.
+    :type member: Optional[:class:`Member`]
+    :param ssrc: The SSRC of the member.
+    :type ssrc: :class:`int`
+    :param state: The new speaking state.
+    :type state: :class:`SpeakingState`
+
+.. function:: on_member_speaking_start(member)
+
+    Called when a member starts speaking, detected from the audio packets received.
+    This is only dispatched to the listeners of the sink while receiving voice.
+
+    .. versionadded:: 3.0
+
+    :param member: The member that started speaking.
+    :type member: Union[:class:`Member`, :class:`User`]
+
+.. function:: on_member_speaking_stop(member)
+
+    Called when a member stops speaking (no packet for a short delay) or leaves while speaking.
+    This is only dispatched to the listeners of the sink while receiving voice.
+
+    .. versionadded:: 3.0
+
+    :param member: The member that stopped speaking.
+    :type member: Union[:class:`Member`, :class:`User`]
+
+.. function:: on_rtcp_packet(packet, guild)
+
+    Called when an RTCP packet is received from the voice server.
+    This is only dispatched to the listeners of the sink while receiving voice.
+
+    .. versionadded:: 3.0
+
+    :param packet: The received RTCP packet.
+    :type packet: ``RTCPPacket``
+    :param guild: The guild of the voice client, if any.
+    :type guild: Optional[:class:`Guild`]
+
 Voice Channel Status Update
 ---------------------------
 .. function:: on_voice_channel_status_update(channel, before, after)
@@ -1414,6 +1509,28 @@ Voice Channel Status Update
 
     :param payload: The raw voice channel status update payload.
     :type payload: :class:`RawVoiceChannelStatusUpdateEvent`
+
+.. function:: on_voice_channel_start_time_update(channel, before, after)
+
+    Called when the start time of the voice session of a voice or stage channel is updated.
+
+    .. versionadded:: 3.0
+
+    :param channel: The channel where the voice channel start time update originated from.
+    :type channel: Union[:class:`VoiceChannel`, :class:`StageChannel`]
+    :param before: The old voice start time.
+    :type before: Optional[:class:`datetime.datetime`]
+    :param after: The new voice start time.
+    :type after: Optional[:class:`datetime.datetime`]
+
+.. function:: on_raw_voice_channel_start_time_update(payload)
+
+    Called when the start time of the voice session of a voice or stage channel is updated.
+
+    .. versionadded:: 3.0
+
+    :param payload: The raw voice channel start time update payload.
+    :type payload: :class:`RawVoiceChannelStartTimeUpdateEvent`
 
 Voice Channel Effects
 ---------------------

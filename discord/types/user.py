@@ -32,6 +32,12 @@ from .primary_guild import PrimaryGuild
 from .snowflake import Snowflake
 
 
+class DisplayNameStyles(TypedDict):
+    colors: list[int]
+    effect_id: int
+    font_id: int
+
+
 class PartialUser(TypedDict):
     id: Snowflake
     username: str
@@ -55,3 +61,4 @@ class User(PartialUser, total=False):
     public_flags: int
     primary_guild: PrimaryGuild
     collectibles: Collectibles
+    display_name_styles: DisplayNameStyles | None

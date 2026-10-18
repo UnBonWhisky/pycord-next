@@ -58,6 +58,11 @@ Users
     :members:
     :inherited-members:
 
+.. attributetable:: DisplayNameStyles
+
+.. autoclass:: DisplayNameStyles()
+    :members:
+
 .. attributetable:: User
 
 .. autoclass:: User()
@@ -187,6 +192,11 @@ Guild
 .. autoclass:: Template()
     :members:
 
+.. attributetable:: PartialGuild
+
+.. autoclass:: PartialGuild()
+    :members:
+
 AutoMod
 ~~~~~~~
 
@@ -261,6 +271,11 @@ Role
 .. autoclass:: GuildRoleCounts()
     :members:
 
+.. attributetable:: VoiceServerRegion
+
+.. autoclass:: VoiceServerRegion()
+    :members:
+
 Scheduled Event
 ~~~~~~~~~~~~~~~
 
@@ -270,6 +285,21 @@ Scheduled Event
     :members:
 
 .. autoclass:: ScheduledEventLocation()
+    :members:
+
+.. attributetable:: ScheduledEventEntityMetadata
+
+.. autoclass:: ScheduledEventEntityMetadata()
+    :members:
+
+.. attributetable:: ScheduledEventRecurrenceRule
+
+.. autoclass:: ScheduledEventRecurrenceRule()
+    :members:
+
+.. attributetable:: ScheduledEventNWeekday
+
+.. autoclass:: ScheduledEventNWeekday()
     :members:
 
 Welcome Screen
@@ -413,6 +443,11 @@ Interactions
 .. autoclass:: InteractionCallback()
     :members:
 
+.. attributetable:: InteractionCallbackActivityInstanceResource
+
+.. autoclass:: InteractionCallbackActivityInstanceResource()
+    :members:
+
 UI Components
 ------------------
 
@@ -545,6 +580,16 @@ Channels
 
     .. automethod:: typing
         :async-with:
+
+.. attributetable:: ForumTag
+
+.. autoclass:: ForumTag()
+    :members:
+
+.. attributetable:: PartialGuildChannel
+
+.. autoclass:: PartialGuildChannel()
+    :members:
 
 .. attributetable:: ForumChannel
 
@@ -721,6 +766,46 @@ Events
 .. autoclass:: RawVoiceChannelStatusUpdateEvent()
     :members:
 
+.. attributetable:: RawVoiceChannelStartTimeUpdateEvent
+
+.. autoclass:: RawVoiceChannelStartTimeUpdateEvent()
+    :members:
+
+.. attributetable:: RawMemberUpdateEvent
+
+.. autoclass:: RawMemberUpdateEvent()
+    :members:
+
+.. attributetable:: RawMessagePollVoteEvent
+
+.. autoclass:: RawMessagePollVoteEvent()
+    :members:
+
+.. attributetable:: RawSoundboardSoundDeleteEvent
+
+.. autoclass:: RawSoundboardSoundDeleteEvent()
+    :members:
+
+.. attributetable:: RawVoiceServerUpdateEvent
+
+.. autoclass:: RawVoiceServerUpdateEvent()
+    :members:
+
+.. attributetable:: RawVoiceStateUpdateEvent
+
+.. autoclass:: RawVoiceStateUpdateEvent()
+    :members:
+
+.. attributetable:: GatewayRateLimit
+
+.. autoclass:: GatewayRateLimit()
+    :members:
+
+.. attributetable:: ChannelInfo
+
+.. autoclass:: ChannelInfo()
+    :members:
+
 .. attributetable:: VoiceChannelEffectSendEvent
 
 .. autoclass:: VoiceChannelEffectSendEvent()
@@ -753,3 +838,27 @@ Collectibles
 
 .. autoclass:: Nameplate()
     :undoc-members:
+
+
+Lobbies
+-------
+
+.. attributetable:: Lobby
+
+.. autoclass:: Lobby()
+    :members:
+
+.. attributetable:: LobbyMember
+
+.. autoclass:: LobbyMember()
+    :members:
+
+.. attributetable:: LobbyMemberUpdate
+
+.. autoclass:: LobbyMemberUpdate
+    :members:
+
+.. attributetable:: LobbyInvite
+
+.. autoclass:: LobbyInvite()
+    :members:

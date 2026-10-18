@@ -24,22 +24,49 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from typing_extensions import Self
+from typing_extensions import override
 
-from ..components import RadioGroup as RadioGroupComponent
-from ..components import RadioGroupOption
+from ..components import RadioGroup as RadioGroupComponent, RadioGroupOption
 from ..enums import ComponentType
+from ..limits import ComponentLimits
 from ..utils import MISSING
+from ._fields import (
+    Field,
+    custom_id_checks,
+    list_of,
+    new_custom_id,
+    type_check,
+)
 from .item import ModalItem
 
 __all__ = ("RadioGroup",)
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from typing_extensions import Self
+
+    from ..components import Component
     from ..interactions import Interaction
     from ..types.components import RadioGroupComponent as RadioGroupComponentPayload
+
+
+def _check_option_count(_name: str, value: list[RadioGroupOption]) -> None:
+    if value and not (
+        ComponentLimits.RADIO_OPTIONS_MIN
+        <= len(value)
+        <= ComponentLimits.RADIO_OPTIONS_MAX
+    ):
+        raise ValueError(
+            f"you must provide between {ComponentLimits.RADIO_OPTIONS_MIN} and {ComponentLimits.RADIO_OPTIONS_MAX} options."
+        )
+
+
+def _check_single_default(_name: str, value: list[RadioGroupOption]) -> None:
+    if sum(1 for option in value if option.default) > 1:
+        raise ValueError("only 1 option can be set as default.")
 
 
 class RadioGroup(ModalItem):
@@ -55,6 +82,35 @@ class RadioGroup(ModalItem):
         "id",
     )
 
+    __component__ = RadioGroupComponent
+    __component_type__ = ComponentType.radio_group
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> RadioGroupComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    custom_id: Field[str] = Field(
+        "The custom id that gets received during an interaction.",
+        *custom_id_checks,
+        default=new_custom_id,
+    )
+    required: Field[bool] = Field(
+        "Whether an option selection is required or not. Defaults to ``True``",
+        type_check(bool),
+    )
+    options: Field[list[RadioGroupOption]] = Field(
+        "A list of options that can be selected in this group.",
+        list_of(RadioGroupOption),
+        _check_option_count,
+        _check_single_default,
+    )
+
     def __init__(
         self,
         *,
@@ -62,88 +118,18 @@ class RadioGroup(ModalItem):
         options: list[RadioGroupOption] | None = None,
         required: bool = True,
         id: int | None = None,
-    ):
+    ) -> None:
         super().__init__()
-        if custom_id is not None and not isinstance(custom_id, str):
-            raise TypeError(
-                f"expected custom_id to be str, not {custom_id.__class__.__name__}"
-            )
-        if not isinstance(required, bool):
-            raise TypeError(f"required must be bool not {required.__class__.__name__}")
-        custom_id = os.urandom(16).hex() if custom_id is None else custom_id
         self._selected_value: str | None = None
 
-        self._underlying: RadioGroupComponent = self._generate_underlying(
-            custom_id=custom_id,
-            options=[],
-            required=required,
-            id=id,
+        self._build_underlying(
+            custom_id=custom_id, options=options or [], required=required, id=id
         )
-        if options:
-            self.options = options
-
-    def _generate_underlying(
-        self,
-        custom_id: str | None = None,
-        options: list[RadioGroupOption] | None = None,
-        required: bool | None = None,
-        id: int | None = None,
-    ) -> RadioGroupComponent:
-        super()._generate_underlying(RadioGroupComponent)
-        return RadioGroupComponent._raw_construct(
-            type=ComponentType.radio_group,
-            custom_id=custom_id or self.custom_id,
-            options=options if options is not None else self.options,
-            required=required if required is not None else self.required,
-            id=id or self.id,
-        )
-
-    @property
-    def custom_id(self) -> str:
-        """The custom id that gets received during an interaction."""
-        return self.underlying.custom_id
-
-    @custom_id.setter
-    def custom_id(self, value: str):
-        if not isinstance(value, str):
-            raise TypeError(f"custom_id must be str not {value.__class__.__name__}")
-        if len(value) > 100:
-            raise ValueError("custom_id must be 100 characters or fewer")
-        self.underlying.custom_id = value
-
-    @property
-    def required(self) -> bool:
-        """Whether an option selection is required or not. Defaults to ``True``"""
-        return self.underlying.required
-
-    @required.setter
-    def required(self, value: bool):
-        if not isinstance(value, bool):
-            raise TypeError(f"required must be bool, not {value.__class__.__name__}")
-        self.underlying.required = bool(value)
 
     @property
     def value(self) -> str | None:
         """The value selected by the user. May return ``None`` if this radio group is optional or has not been sent yet."""
         return self._selected_value
-
-    @property
-    def options(self) -> list[RadioGroupOption]:
-        """A list of options that can be selected in this group."""
-        return self.underlying.options
-
-    @options.setter
-    def options(self, value: list[RadioGroupOption]):
-        if not isinstance(value, list):
-            raise TypeError("options must be a list of RadioGroupOption")
-        if not (2 <= len(value) <= 10) and len(value) != 0:
-            raise ValueError("you must provide between 2 and 10 options.")
-        if not all(isinstance(obj, RadioGroupOption) for obj in value):
-            raise TypeError("all list items must subclass RadioGroupOption")
-        if len([o for o in value if o.default]) > 1:
-            raise ValueError("only 1 option can be set as default.")
-
-        self.underlying.options = value
 
     def add_option(
         self,
@@ -177,7 +163,6 @@ class RadioGroup(ModalItem):
         ValueError
             The number of options exceeds 10.
         """
-
         option = RadioGroupOption(
             label=label,
             value=value,
@@ -200,25 +185,28 @@ class RadioGroup(ModalItem):
         ValueError
             The number of options exceeds 10.
         """
-
-        if len(self.underlying.options) >= 10:
-            raise ValueError("maximum number of options already provided")
+        if len(self.underlying.options) >= ComponentLimits.RADIO_OPTIONS_MAX:
+            raise ValueError(
+                f"maximum number of options already provided ({ComponentLimits.RADIO_OPTIONS_MAX})"
+            )
 
         self.underlying.options.append(option)
         return self
 
     def clear_options(self) -> Self:
         """Remove all options from the radio group."""
-
         self.underlying.options.clear()
         return self
 
+    @override
     def to_component_dict(self) -> RadioGroupComponentPayload:
         return self.underlying.to_dict()
 
-    def refresh_state(self, data) -> None:
+    @override
+    def refresh_state(self, data: Mapping[str, Any]) -> None:
         self._selected_value = data.get("value", None)
 
+    @override
     def refresh_from_modal(
         self, interaction: Interaction, data: RadioGroupComponentPayload
     ) -> None:

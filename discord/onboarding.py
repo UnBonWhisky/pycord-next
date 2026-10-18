@@ -25,22 +25,28 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from ._internal.cache_peek import cached_emoji
 from .enums import OnboardingMode, PromptType, try_enum
+from .object import Object
 from .partial_emoji import PartialEmoji
 from .utils import MISSING, generate_snowflake, get
 
 if TYPE_CHECKING:
-    from .abc import Snowflake
+    from .abc import GuildChannel, Snowflake
     from .channel import ForumChannel, TextChannel, VoiceChannel
-    from .emoji import GuildEmoji
-    from .guild import Guild
-    from .object import Object
-    from .partial_emoji import PartialEmoji
-    from .types.onboarding import Onboarding as OnboardingPayload
-    from .types.onboarding import OnboardingPrompt as OnboardingPromptPayload
-    from .types.onboarding import PromptOption as PromptOptionPayload
+    from .emoji import AppEmoji, GuildEmoji
+    from .guild import Guild, PartialGuild
+    from .role import Role
+    from .state import ConnectionState
+    from .types.emoji import PartialEmoji as EmojiPayload
+    from .types.onboarding import (
+        Onboarding as OnboardingPayload,
+        OnboardingPrompt as OnboardingPromptPayload,
+        PromptOption as PromptOptionPayload,
+    )
+    from .types.snowflake import Snowflake as SnowflakePayload
 
 __all__ = (
     "Onboarding",
@@ -56,7 +62,6 @@ class PromptOption:
 
     Attributes
     ----------
-
     id: :class:`int`
         The id of the prompt option.
     channels: List[:class:`Snowflake`]
@@ -77,61 +82,187 @@ class PromptOption:
         channels: list[Snowflake] | None = None,
         roles: list[Snowflake] | None = None,
         description: str | None = None,
-        emoji: GuildEmoji | PartialEmoji | None = None,
-        id: int | None = None,
-    ):
+        emoji: GuildEmoji | AppEmoji | PartialEmoji | None = None,
+        id: int | str | None = None,
+    ) -> None:
         # ID is required when making edits, but it can be any snowflake that isn't already used by another prompt during edits
         self.id: int = int(id) if id else generate_snowflake()
         self.title: str = title
-        self.channels: list[Snowflake] = channels or []
-        self.roles: list[Snowflake] = roles or []
+        self._channels: list[Snowflake] = channels or []
+        self._roles: list[Snowflake] = roles or []
         self.description: str | None = description or None
-        self.emoji: GuildEmoji | PartialEmoji | None = emoji
+        self._emoji: GuildEmoji | AppEmoji | PartialEmoji | None = emoji
+        self._state: ConnectionState | None = None
+        self._guild_id: int | None = None
 
-    def __repr__(self):
+    @property
+    def channels(self) -> list[Snowflake]:
+        """The channels assigned to the user when they select this option.
+
+        A channel that is in the in-process cache is the cached
+        :class:`~discord.abc.GuildChannel`, otherwise it is the :class:`Object`
+        (or the snowflake) it was built with. Use :meth:`get_channels` with any
+        cache backend.
+        """
+        state, guild_id = self._state, self._guild_id
+        if state is None or guild_id is None or not state.cache.supports_sync:
+            return list(self._channels)
+        bucket = state._guild_bucket("channels", guild_id)
+        return [bucket.get_nowait(channel.id) or channel for channel in self._channels]
+
+    @channels.setter
+    def channels(self, value: list[Snowflake]) -> None:
+        self._channels = value
+
+    @property
+    def roles(self) -> list[Snowflake]:
+        """The roles assigned to the user when they select this option.
+
+        A role that is in the in-process cache is the cached :class:`Role`,
+        otherwise it is the :class:`Object` (or the snowflake) it was built with.
+        Use :meth:`get_roles` with any cache backend.
+        """
+        state, guild_id = self._state, self._guild_id
+        if state is None or guild_id is None or not state.cache.supports_sync:
+            return list(self._roles)
+        bucket = state._guild_bucket("roles", guild_id)
+        return [bucket.get_nowait(role.id) or role for role in self._roles]
+
+    @roles.setter
+    def roles(self, value: list[Snowflake]) -> None:
+        self._roles = value
+
+    @property
+    def emoji(self) -> GuildEmoji | AppEmoji | PartialEmoji | None:
+        """The emoji displayed with the option.
+
+        A custom emoji that is in the in-process cache is the cached
+        :class:`GuildEmoji`, otherwise it is the :class:`PartialEmoji`.
+        Use :meth:`get_emoji` with any cache backend.
+        """
+        emoji = self._emoji
+        if self._state is None or emoji is None or not emoji.id:
+            return emoji
+        return cached_emoji(self._state, emoji.id) or emoji
+
+    @emoji.setter
+    def emoji(self, value: GuildEmoji | AppEmoji | PartialEmoji | None) -> None:
+        self._emoji = value
+
+    def __repr__(self) -> str:
         return f"<PromptOption id={self.id} title={self.title!r} description={self.description!r} emoji={self.emoji!r}>"
 
     def to_dict(self) -> PromptOptionPayload:
+        """Convert this object to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The payload.
+        """
         dict_: PromptOptionPayload = {
             "title": self.title,
             "description": self.description,
-            "channel_ids": [channel.id for channel in self.channels],
-            "role_ids": [role.id for role in self.roles],
+            "channel_ids": [channel.id for channel in self._channels],
+            "role_ids": [role.id for role in self._roles],
             "id": str(self.id),
         }
-        if self.emoji:
-            dict_["emoji"] = {
-                "id": str(self.emoji.id) if self.emoji.id else None,
-                "name": self.emoji.name,
-                "animated": self.emoji.animated,
-            }
-            dict_["emoji_name"] = self.emoji.name
-            if self.emoji.id:
-                dict_["emoji_id"] = str(self.emoji.id)
-                dict_["emoji_animated"] = self.emoji.animated
+        if emoji := self._emoji:
+            dict_["emoji"] = cast(
+                "EmojiPayload",
+                {
+                    "id": str(emoji.id) if emoji.id else None,
+                    "name": emoji.name,
+                    "animated": emoji.animated,
+                },
+            )
+            dict_["emoji_name"] = cast("str", emoji.name)
+            if emoji.id:
+                dict_["emoji_id"] = str(emoji.id)
+                dict_["emoji_animated"] = emoji.animated
 
         return dict_
 
+    async def get_channels(self) -> list[GuildChannel | Snowflake]:
+        """|coro|
+
+        Returns the channels assigned to the user when they select this option.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        List[Union[:class:`~discord.abc.GuildChannel`, :class:`Snowflake`]]
+            The cached channels, a channel that is not cached is left as it is.
+        """
+        if self._state is None or self._guild_id is None:
+            return list(self._channels)
+        bucket = self._state._guild_bucket("channels", self._guild_id)
+        return [await bucket.get(channel.id) or channel for channel in self._channels]
+
+    async def get_roles(self) -> list[Role | Snowflake]:
+        """|coro|
+
+        Returns the roles assigned to the user when they select this option.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        List[Union[:class:`Role`, :class:`Snowflake`]]
+            The cached roles, a role that is not cached is left as it is.
+        """
+        if self._state is None or self._guild_id is None:
+            return list(self._roles)
+        bucket = self._state._guild_bucket("roles", self._guild_id)
+        return [await bucket.get(role.id) or role for role in self._roles]
+
+    async def get_emoji(self) -> GuildEmoji | AppEmoji | PartialEmoji | None:
+        """|coro|
+
+        Returns the emoji displayed with the option.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Optional[Union[:class:`GuildEmoji`, :class:`PartialEmoji`]]
+            The cached emoji if there is one, else the partial emoji.
+        """
+        emoji = self._emoji
+        if self._state is None or emoji is None or not emoji.id:
+            return emoji
+        return await self._state.get_emoji(emoji.id) or emoji
+
     @classmethod
-    def _from_dict(cls, data: PromptOptionPayload, guild: Guild) -> PromptOption:
+    def _from_dict(
+        cls, data: PromptOptionPayload, guild: Guild | PartialGuild
+    ) -> PromptOption:
         id = data.get("id", 0)
-        channel_ids = [int(channel_id) for channel_id in data.get("channel_ids", [])]
-        channels = [guild.get_channel(channel_id) for channel_id in channel_ids]
-        role_ids = [int(role_id) for role_id in data.get("role_ids", [])]
-        roles = [guild.get_role(role_id) for role_id in role_ids]
+        channels: list[Snowflake] = [
+            Object(int(channel_id)) for channel_id in data.get("channel_ids", [])
+        ]
+        roles: list[Snowflake] = [
+            Object(int(role_id)) for role_id in data.get("role_ids", [])
+        ]
         title = data.get("title")
         description = data.get("description")
 
-        _emoji: dict[str, Any] = data.get("emoji") or {}
-        if "name" in _emoji:
-            # Emoji object is {'id': None, 'name': None, 'animated': False} ...
-            emoji = PartialEmoji.from_dict(_emoji)
-            if emoji.id:
-                emoji = get(guild.emojis, id=emoji.id) or emoji
-        else:
-            emoji = None
+        _emoji = cast("dict[str, Any]", data.get("emoji") or {})
+        # Emoji object is {'id': None, 'name': None, 'animated': False} ...
+        emoji = PartialEmoji.from_dict(_emoji) if "name" in _emoji else None
 
-        return cls(channels=channels, roles=roles, title=title, description=description, emoji=emoji, id=id)  # type: ignore
+        option = cls(
+            channels=channels,
+            roles=roles,
+            title=title,
+            description=description,
+            emoji=emoji,
+            id=id,
+        )
+        option._state = guild._state
+        option._guild_id = guild.id
+        return option
 
 
 class OnboardingPrompt:
@@ -141,7 +272,6 @@ class OnboardingPrompt:
 
     Attributes
     ----------
-
     id: :class:`int`
         The id of the prompt.
     type: :class:`PromptType`
@@ -166,8 +296,10 @@ class OnboardingPrompt:
         single_select: bool,
         required: bool,
         in_onboarding: bool,
-        id: int | None = None,  # Currently optional as users can manually create these
-    ):
+        id: int
+        | str
+        | None = None,  # Currently optional as users can manually create these
+    ) -> None:
         # ID is required when making edits, but it can be any snowflake that isn't already used by another prompt during edits
         self.id: int = int(id) if id else generate_snowflake()
 
@@ -180,10 +312,17 @@ class OnboardingPrompt:
         self.required: bool = required
         self.in_onboarding: bool = in_onboarding
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<OnboardingPrompt id={self.id} title={self.title!r} required={self.required}>"
 
     def to_dict(self) -> OnboardingPromptPayload:
+        """Convert this object to the payload sent to Discord.
+
+        Returns
+        -------
+        :class:`dict`
+            The payload.
+        """
         dict_: OnboardingPromptPayload = {
             "type": self.type.value,
             "title": self.title,
@@ -198,7 +337,7 @@ class OnboardingPrompt:
 
     @classmethod
     def _from_dict(
-        cls, data: OnboardingPromptPayload, guild: Guild
+        cls, data: OnboardingPromptPayload, guild: Guild | PartialGuild
     ) -> OnboardingPrompt:
         id = data.get("id", 0)
         type = try_enum(PromptType, data.get("type"))
@@ -210,7 +349,15 @@ class OnboardingPrompt:
             PromptOption._from_dict(option, guild) for option in data.get("options", [])
         ]
 
-        return cls(type=type, title=title, single_select=single_select, required=required, in_onboarding=in_onboarding, options=options, id=id)  # type: ignore
+        return cls(
+            type=type,
+            title=title,
+            single_select=single_select,
+            required=required,
+            in_onboarding=in_onboarding,
+            options=options,
+            id=id,
+        )
 
 
 class Onboarding:
@@ -220,7 +367,6 @@ class Onboarding:
 
     Attributes
     ----------
-
     prompts: List[:class:`OnboardingPrompt`]
         A list of prompts displayed in the onboarding flow.
     enabled: :class:`bool`
@@ -229,15 +375,15 @@ class Onboarding:
         The current onboarding mode.
     """
 
-    def __init__(self, data: OnboardingPayload, guild: Guild):
+    def __init__(self, data: OnboardingPayload, guild: Guild | PartialGuild) -> None:
         self.guild = guild
         self._update(data)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Onboarding guild={self.guild!r} enabled={self.enabled} mode={self.mode} prompts={self.prompts}>"
 
-    def _update(self, data: OnboardingPayload):
-        self.guild_id: Snowflake = data["guild_id"]
+    def _update(self, data: OnboardingPayload) -> None:
+        self.guild_id: SnowflakePayload = data["guild_id"]
         self.prompts: list[OnboardingPrompt] = [
             OnboardingPrompt._from_dict(prompt, self.guild)
             for prompt in data.get("prompts", [])
@@ -256,11 +402,36 @@ class Onboarding:
 
         If a channel is not found in the guild's cache,
         then it will be returned as an :class:`Object`.
+
+        This reads the in-memory cache, use :meth:`get_default_channels` with any
+        cache backend.
         """
-        if self.guild is None:
-            return [Object(channel_id) for channel_id in self.default_channel_ids]
+        bucket = self.guild._state._guild_bucket("channels", self.guild.id)
         return [
-            self.guild.get_channel(channel_id) or Object(channel_id)
+            bucket.get_nowait(channel_id) or Object(channel_id)
+            for channel_id in self.default_channel_ids
+        ]
+
+    async def get_default_channels(
+        self,
+    ) -> list[TextChannel | ForumChannel | VoiceChannel | Object]:
+        """|coro|
+
+        Returns the channels that members are opted into by default.
+
+        If a channel is not found in the guild's cache,
+        then it will be returned as an :class:`Object`.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        List[Union[:class:`TextChannel`, :class:`ForumChannel`, :class:`VoiceChannel`, :class:`Object`]]
+            The default channels.
+        """
+        bucket = self.guild._state._guild_bucket("channels", self.guild.id)
+        return [
+            await bucket.get(channel_id) or Object(channel_id)
             for channel_id in self.default_channel_ids
         ]
 
@@ -282,7 +453,6 @@ class Onboarding:
 
         Parameters
         ----------
-
         prompts: Optional[List[:class:`OnboardingPrompt`]]
             The new list of prompts for this flow.
         default_channels: Optional[List[:class:`Snowflake`]]
@@ -308,19 +478,22 @@ class Onboarding:
         Forbidden
             You don't have permissions to edit the onboarding flow.
         """
-
         fields: dict[str, Any] = {}
         if prompts is not MISSING:
-            fields["prompts"] = [prompt.to_dict() for prompt in prompts]
+            fields["prompts"] = [
+                prompt.to_dict() for prompt in cast("list[OnboardingPrompt]", prompts)
+            ]
 
         if default_channels is not MISSING:
-            fields["default_channel_ids"] = [channel.id for channel in default_channels]
+            fields["default_channel_ids"] = [
+                channel.id for channel in cast("list[Snowflake]", default_channels)
+            ]
 
         if enabled is not MISSING:
             fields["enabled"] = enabled
 
         if mode is not MISSING:
-            fields["mode"] = mode.value
+            fields["mode"] = cast("OnboardingMode", mode).value
 
         new = await self.guild._state.http.edit_onboarding(
             self.guild.id, fields, reason=reason
@@ -338,7 +511,7 @@ class Onboarding:
         in_onboarding: bool,
         *,
         reason: str | None = None,
-    ):
+    ) -> Onboarding:
         """|coro|
 
         Adds a new onboarding prompt.
@@ -375,11 +548,10 @@ class Onboarding:
         Forbidden
             You don't have permissions to edit the onboarding flow.
         """
-
         prompt = OnboardingPrompt(
             type, title, options, single_select, required, in_onboarding
         )
-        prompts = self.prompts + [prompt]
+        prompts = [*self.prompts, prompt]
         return await self.edit(prompts=prompts, reason=reason)
 
     async def append_prompt(
@@ -387,7 +559,7 @@ class Onboarding:
         prompt: OnboardingPrompt,
         *,
         reason: str | None = None,
-    ):
+    ) -> Onboarding:
         """|coro|
 
         Append an onboarding prompt onto this flow.
@@ -414,17 +586,14 @@ class Onboarding:
         Forbidden
             You don't have permissions to edit the onboarding flow.
         """
-
-        prompts = self.prompts + [prompt]
+        prompts = [*self.prompts, prompt]
         return await self.edit(prompts=prompts, reason=reason)
 
     def get_prompt(
         self,
         id: int,
-    ):
-        """|coro|
-
-        Get an onboarding prompt with the given ID.
+    ) -> OnboardingPrompt | None:
+        """Get an onboarding prompt with the given ID.
 
         Parameters
         ----------
@@ -436,7 +605,6 @@ class Onboarding:
         :class:`OnboardingPrompt`
             The matching prompt, or None if it didn't exist.
         """
-
         return get(self.prompts, id=id)
 
     async def delete_prompt(
@@ -444,7 +612,7 @@ class Onboarding:
         id: int,
         *,
         reason: str | None = MISSING,
-    ):
+    ) -> Onboarding:
         """|coro|
 
         Delete an onboarding prompt with the given ID.
@@ -473,7 +641,6 @@ class Onboarding:
         Forbidden
             You don't have permissions to edit the onboarding flow.
         """
-
         to_delete = self.get_prompt(id)
         if not to_delete:
             raise ValueError("Prompt with the given ID was not found.")

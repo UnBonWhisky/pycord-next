@@ -25,12 +25,11 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import collections
 import collections.abc
+import contextlib
 import sys
 import traceback
-from collections.abc import Callable, Coroutine, Iterable
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import discord
 
@@ -41,22 +40,25 @@ from .help import DefaultHelpCommand, HelpCommand
 from .view import StringView
 
 if TYPE_CHECKING:
-    from discord.message import Message
+    from collections.abc import Callable, Coroutine, Iterable
 
-    from ._types import CoroFunc
+    from discord.message import Message
+    from discord.user import ClientUser
+
+    from ._types import Check, CoroFunc
 
 __all__ = (
+    "AutoShardedBot",
+    "Bot",
     "when_mentioned",
     "when_mentioned_or",
-    "Bot",
-    "AutoShardedBot",
 )
 
 MISSING: Any = discord.utils.MISSING
 
 T = TypeVar("T")
 CFT = TypeVar("CFT", bound="CoroFunc")
-CXT = TypeVar("CXT", bound="Context")
+CXT = TypeVar("CXT", bound="Context[Any]")
 
 
 def when_mentioned(bot: Bot | AutoShardedBot, msg: Message) -> list[str]:
@@ -65,7 +67,8 @@ def when_mentioned(bot: Bot | AutoShardedBot, msg: Message) -> list[str]:
     These are meant to be passed into the :attr:`.Bot.command_prefix` attribute.
     """
     # bot.user will never be None when this is called
-    return [f"<@{bot.user.id}> ", f"<@!{bot.user.id}> "]  # type: ignore
+    user = cast("ClientUser", bot.user)
+    return [f"<@{user.id}> ", f"<@!{user.id}> "]
 
 
 def when_mentioned_or(
@@ -84,7 +87,7 @@ def when_mentioned_or(
 
     .. code-block:: python3
 
-        bot = commands.Bot(command_prefix=commands.when_mentioned_or('!'))
+        bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"))
 
     .. note::
 
@@ -94,41 +97,39 @@ def when_mentioned_or(
         .. code-block:: python3
 
             async def get_prefix(bot, message):
-                extras = await prefixes_for(message.guild) # returns a list
+                extras = await prefixes_for(message.guild)  # returns a list
                 return commands.when_mentioned_or(*extras)(bot, message)
     """
 
-    def inner(bot, msg):
+    def inner(bot: Bot | AutoShardedBot, msg: Message) -> list[str]:
         r = list(prefixes)
-        r = when_mentioned(bot, msg) + r
-        return r
+        return when_mentioned(bot, msg) + r
 
     return inner
 
 
-def _is_submodule(parent: str, child: str) -> bool:
-    return parent == child or child.startswith(f"{parent}.")
-
-
-class BotBase(GroupMixin, discord.cog.CogMixin):
+class BotBase(GroupMixin[Any], discord.cog.CogMixin):
     _help_command = None
     _supports_prefixed_commands = True
 
+    if TYPE_CHECKING:
+        _event_handlers: dict[str, list[CoroFunc]]
+        _checks: list[Check]
+        _check_once: list[Check]
+
+        @property
+        def user(self) -> ClientUser | None: ...
+
+        def dispatch(self, event: str, *args: Any, **kwargs: Any) -> None: ...
+
     def __init__(
         self,
-        command_prefix: (
-            str
-            | Iterable[str]
-            | Callable[
-                [Bot | AutoShardedBot, Message],
-                str | Iterable[str] | Coroutine[Any, Any, str | Iterable[str]],
-            ]
-        ) = when_mentioned,
+        command_prefix: CommandPrefix = when_mentioned,
         help_command: HelpCommand | None = MISSING,
-        **options,
-    ):
+        **options: Any,
+    ) -> None:
         super().__init__(**options)
-        self.command_prefix = command_prefix
+        self.command_prefix: CommandPrefix = command_prefix
         self.help_command = (
             DefaultHelpCommand() if help_command is MISSING else help_command
         )
@@ -136,22 +137,18 @@ class BotBase(GroupMixin, discord.cog.CogMixin):
 
     @discord.utils.copy_doc(discord.Client.close)
     async def close(self) -> None:
-        for extension in tuple(self.__extensions):
-            try:
+        for extension in tuple(self.extensions):
+            with contextlib.suppress(Exception):
                 self.unload_extension(extension)
-            except Exception:
-                pass
 
-        for cog in tuple(self.__cogs):
-            try:
+        for cog in tuple(self.cogs):
+            with contextlib.suppress(Exception):
                 self.remove_cog(cog)
-            except Exception:
-                pass
 
-        await super().close()  # type: ignore
+        await cast("Any", super()).close()
 
     async def on_command_error(
-        self, context: Context, exception: errors.CommandError
+        self, context: Context[Any], exception: errors.CommandError
     ) -> None:
         """|coro|
 
@@ -173,19 +170,21 @@ class BotBase(GroupMixin, discord.cog.CogMixin):
         if cog and cog.has_error_handler():
             return
 
-        print(f"Ignoring exception in command {context.command}:", file=sys.stderr)
+        sys.stderr.write(f"Ignoring exception in command {context.command}:\n")
         traceback.print_exception(
             type(exception), exception, exception.__traceback__, file=sys.stderr
         )
 
-    async def can_run(self, ctx: Context, *, call_once: bool = False) -> bool:
+    async def can_run(self, ctx: Context[Any], *, call_once: bool = False) -> bool:
         data = self._check_once if call_once else self._checks
 
         if len(data) == 0:
             return True
 
         # type-checker doesn't distinguish between functions and methods
-        return await discord.utils.async_all(f(ctx) for f in data)  # type: ignore
+        return await discord.utils.async_all(
+            cast("Callable[[Context[Any]], Any]", f)(ctx) for f in data
+        )
 
     # help command stuff
 
@@ -195,15 +194,16 @@ class BotBase(GroupMixin, discord.cog.CogMixin):
 
     @help_command.setter
     def help_command(self, value: HelpCommand | None) -> None:
+        bot = cast("Bot | AutoShardedBot", self)
         if value is not None:
-            if not isinstance(value, HelpCommand):
+            if not isinstance(cast("object", value), HelpCommand):
                 raise TypeError("help_command must be a subclass of HelpCommand")
             if self._help_command is not None:
-                self._help_command._remove_from_bot(self)
+                self._help_command._remove_from_bot(bot)
             self._help_command = value
-            value._add_to_bot(self)
+            value._add_to_bot(bot)
         elif self._help_command is not None:
-            self._help_command._remove_from_bot(self)
+            self._help_command._remove_from_bot(bot)
             self._help_command = None
         else:
             self._help_command = None
@@ -227,28 +227,28 @@ class BotBase(GroupMixin, discord.cog.CogMixin):
             A list of prefixes or a single prefix that the bot is
             listening for.
         """
-        prefix = ret = self.command_prefix
-        if callable(prefix):
-            ret = await discord.utils.maybe_coroutine(prefix, self, message)
+        raw = cast("Any", self.command_prefix)
+        if callable(raw):
+            raw = await discord.utils.maybe_coroutine(raw, self, message)
 
-        if not isinstance(ret, str):
-            try:
-                ret = list(ret)
-            except TypeError:
-                # It's possible that a generator raised this exception.  Don't
-                # replace it with our own error if that's the case.
-                if isinstance(ret, collections.abc.Iterable):
-                    raise
+        if isinstance(raw, str):
+            return raw
 
-                raise TypeError(
-                    "command_prefix must be plain string, iterable of strings, or"
-                    f" callable returning either of these, not {ret.__class__.__name__}"
-                )
+        try:
+            ret = list(cast("Iterable[str]", raw))
+        except TypeError as exc:
+            # It's possible that a generator raised this exception.  Don't
+            # replace it with our own error if that's the case.
+            if isinstance(raw, collections.abc.Iterable):
+                raise
 
-            if not ret:
-                raise ValueError(
-                    "Iterable command_prefix must contain at least one prefix"
-                )
+            raise TypeError(
+                "command_prefix must be plain string, iterable of strings, or"
+                f" callable returning either of these, not {raw.__class__.__name__}"
+            ) from exc
+
+        if not ret:
+            raise ValueError("Iterable command_prefix must contain at least one prefix")
 
         return ret
 
@@ -266,7 +266,7 @@ class BotBase(GroupMixin, discord.cog.CogMixin):
         invoked under :meth:`~.Bot.invoke`.
 
         Parameters
-        -----------
+        ----------
         message: :class:`discord.Message`
             The message to get the invocation context from.
         cls
@@ -276,24 +276,29 @@ class BotBase(GroupMixin, discord.cog.CogMixin):
             interface.
 
         Returns
-        --------
+        -------
         :class:`.Context`
             The invocation context. The type of this can change via the
             ``cls`` parameter.
         """
-
         view = StringView(message.content)
-        ctx = cls(prefix=None, view=view, bot=self, message=message)
+        ctx = cls(
+            prefix=None,
+            view=view,
+            bot=cast("Bot | AutoShardedBot", self),
+            message=message,
+        )
 
-        if message.author.id == self.user.id:  # type: ignore
+        if message.author.id == cast("ClientUser", self.user).id:
             return ctx
 
         prefix = await self.get_prefix(message)
-        invoked_prefix = prefix
+        invoked_prefix: str | None = None
 
         if isinstance(prefix, str):
             if not view.skip_string(prefix):
                 return ctx
+            invoked_prefix = prefix
         else:
             try:
                 # if the context class' __init__ consumes something from the view this
@@ -303,21 +308,22 @@ class BotBase(GroupMixin, discord.cog.CogMixin):
                 else:
                     return ctx
 
-            except TypeError:
-                if not isinstance(prefix, list):
+            except TypeError as exc:
+                prefix_value = cast("object", prefix)
+                if not isinstance(prefix_value, list):
                     raise TypeError(
                         "get_prefix must return either a string or a list of string, "
-                        f"not {prefix.__class__.__name__}"
-                    )
+                        f"not {prefix_value.__class__.__name__}"
+                    ) from exc
 
                 # It's possible a bad command_prefix got us here.
-                for value in prefix:
+                for value in cast("list[object]", prefix_value):
                     if not isinstance(value, str):
                         raise TypeError(
                             "Iterable command_prefix or list returned from get_prefix"
                             " must contain only strings, not"
                             f" {value.__class__.__name__}"
-                        )
+                        ) from exc
 
                 # Getting here shouldn't happen
                 raise
@@ -327,12 +333,11 @@ class BotBase(GroupMixin, discord.cog.CogMixin):
 
         invoker = view.get_word()
         ctx.invoked_with = invoker
-        # type-checker fails to narrow invoked_prefix type.
-        ctx.prefix = invoked_prefix  # type: ignore
+        ctx.prefix = invoked_prefix
         ctx.command = self.prefixed_commands.get(invoker)
         return ctx
 
-    async def invoke(self, ctx: Context) -> None:
+    async def invoke(self, ctx: Context[Any]) -> None:
         """|coro|
 
         Invokes the command given under the invocation context and
@@ -383,14 +388,14 @@ class BotBase(GroupMixin, discord.cog.CogMixin):
         if message.author.bot:
             return
 
-        ctx = await self.get_context(message)
+        ctx = cast("Context[Any]", await self.get_context(message))
         await self.invoke(ctx)
 
-    async def on_message(self, message):
+    async def on_message(self, message: Message) -> None:
         await self.process_commands(message)
 
 
-class Bot(BotBase, discord.Bot):
+class Bot(BotBase, discord.Bot):  # pyright: ignore[reportIncompatibleMethodOverride, reportIncompatibleVariableOverride]
     """Represents a discord bot.
 
     This class is a subclass of :class:`discord.Bot` and as a result
@@ -452,7 +457,16 @@ class Bot(BotBase, discord.Bot):
     """
 
 
-class AutoShardedBot(BotBase, discord.AutoShardedBot):
-    """This is similar to :class:`.Bot` except that it is inherited from
-    :class:`discord.AutoShardedBot` instead.
-    """
+class AutoShardedBot(BotBase, discord.AutoShardedBot):  # pyright: ignore[reportIncompatibleMethodOverride, reportIncompatibleVariableOverride]
+    """Similar to :class:`.Bot` except that it is inherited from :class:`discord.AutoShardedBot` instead."""
+
+
+if TYPE_CHECKING:
+    CommandPrefix = (
+        str
+        | Iterable[str]
+        | Callable[
+            [Bot | AutoShardedBot, Message],
+            str | Iterable[str] | Coroutine[Any, Any, str | Iterable[str]],
+        ]
+    )

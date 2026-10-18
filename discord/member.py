@@ -25,53 +25,65 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-import datetime
 import inspect
-import itertools
 import sys
+from contextlib import suppress
 from operator import attrgetter
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import discord.abc
 
 from . import utils
+from ._internal.aliases import AliasMixin
+from ._internal.cache_peek import cached_guild_channel
 from .activity import ActivityTypes, create_activity
 from .asset import Asset
-from .collectibles import Collectibles
-from .colour import Colour
-from .enums import Status, try_enum
-from .errors import InvalidArgument
+from .enums import ChannelType, Status, try_enum
+from .errors import ClientException, InvalidArgument
 from .flags import MemberFlags
 from .object import Object
 from .permissions import Permissions
 from .primary_guild import PrimaryGuild
 from .role import RoleColours
-from .types.collectibles import AvatarDecoration
 from .user import BaseUser, User, _UserTag
 from .utils import MISSING, utcnow
 
 __all__ = (
-    "VoiceState",
     "Member",
+    "VoiceState",
 )
 
 if TYPE_CHECKING:
+    import datetime as dt
+    from collections.abc import Callable, Sequence
+
+    from typing_extensions import Self
+
     from .abc import Snowflake
-    from .channel import DMChannel, VocalGuildChannel
+    from .cache import CacheBucket
+    from .channel import DMChannel, PartialGuildChannel, VocalGuildChannel
     from .client import Client
+    from .collectibles import Collectibles
+    from .colour import Colour
     from .flags import PublicUserFlags
-    from .guild import Guild
+    from .guild import Guild, PartialGuild
+    from .iterators import MessageSearchIterator
     from .message import Message
     from .role import Role
     from .state import ConnectionState
     from .types.activity import PartialPresenceUpdate
-    from .types.member import Member as MemberPayload
-    from .types.member import MemberUpdateEvent as MemberUpdateEventPayload
-    from .types.member import MemberWithUser as MemberWithUserPayload
-    from .types.member import UserWithMember as UserWithMemberPayload
+    from .types.collectibles import AvatarDecoration
+    from .types.member import (
+        Member as MemberPayload,
+        MemberUpdateEvent as MemberUpdateEventPayload,
+        MemberWithUser as MemberWithUserPayload,
+        UserWithMember as UserWithMemberPayload,
+    )
     from .types.user import User as UserPayload
-    from .types.voice import VoiceState as GuildVoiceStatePayload
-    from .types.voice import VoiceState as VoiceStatePayload
+    from .types.voice import (
+        VoiceState as GuildVoiceStatePayload,
+        VoiceState as VoiceStatePayload,
+    )
 
 
 class VoiceState:
@@ -112,22 +124,26 @@ class VoiceState:
 
     afk: :class:`bool`
         Indicates if the user is currently in the AFK channel in the guild.
-    channel: Optional[Union[:class:`VoiceChannel`, :class:`StageChannel`]]
-        The voice channel that the user is currently connected to. ``None`` if the user
+    channel_id: Optional[:class:`int`]
+        The ID of the voice channel that the user is currently connected to. ``None`` if the user
         is not currently in a voice channel.
+    guild_id: Optional[:class:`int`]
+        The ID of the guild the voice state belongs to.
     """
 
     __slots__ = (
-        "session_id",
+        "_state",
+        "afk",
+        "channel_id",
         "deaf",
+        "guild_id",
         "mute",
+        "requested_to_speak_at",
+        "self_deaf",
         "self_mute",
         "self_stream",
         "self_video",
-        "self_deaf",
-        "afk",
-        "channel",
-        "requested_to_speak_at",
+        "session_id",
         "suppress",
     )
 
@@ -135,16 +151,49 @@ class VoiceState:
         self,
         *,
         data: VoiceStatePayload | GuildVoiceStatePayload,
+        state: ConnectionState | None = None,
         channel: VocalGuildChannel | None = None,
-    ):
+    ) -> None:
+        if state is None and channel is not None:
+            state = channel._state
+        self._state: ConnectionState | None = state
         self.session_id: str = data.get("session_id")
+        guild_id = utils._get_as_snowflake(data, "guild_id")
+        if guild_id is None and channel is not None:
+            guild_id = channel.guild_id
+        self.guild_id: int | None = guild_id
         self._update(data, channel)
+
+    @property
+    def channel(self) -> VocalGuildChannel | PartialGuildChannel | None:
+        """The voice channel that the user is currently connected to.
+
+        ``None`` if the user is not currently in a voice channel.
+
+        This is the cached channel with the in-process cache, and a
+        :class:`PartialGuildChannel` handle when it is not cached or the cache
+        backend is not the in-process one. Use :meth:`PartialGuildChannel.get` to
+        get the cached channel with any backend.
+        """
+        if self.channel_id is None or self.guild_id is None or self._state is None:
+            return None
+        cached = cached_guild_channel(self._state, self.guild_id, self.channel_id)
+        if cached is not None:
+            return cast("VocalGuildChannel", cached)
+        from .channel import PartialGuildChannel
+
+        return PartialGuildChannel(
+            state=self._state,
+            id=self.channel_id,
+            guild_id=self.guild_id,
+            type=ChannelType.voice,
+        )
 
     def _update(
         self,
         data: VoiceStatePayload | GuildVoiceStatePayload,
         channel: VocalGuildChannel | None,
-    ):
+    ) -> None:
         self.self_mute: bool = data.get("self_mute", False)
         self.self_deaf: bool = data.get("self_deaf", False)
         self.self_stream: bool = data.get("self_stream", False)
@@ -153,10 +202,10 @@ class VoiceState:
         self.mute: bool = data.get("mute", False)
         self.deaf: bool = data.get("deaf", False)
         self.suppress: bool = data.get("suppress", False)
-        self.requested_to_speak_at: datetime.datetime | None = utils.parse_time(
+        self.requested_to_speak_at: dt.datetime | None = utils.parse_time(
             data.get("request_to_speak_timestamp")
         )
-        self.channel: VocalGuildChannel | None = channel
+        self.channel_id: int | None = channel.id if channel is not None else None
 
     def __repr__(self) -> str:
         attrs = [
@@ -167,28 +216,32 @@ class VoiceState:
             ("requested_to_speak_at", self.requested_to_speak_at),
             ("channel", self.channel),
         ]
-        inner = " ".join("%s=%r" % t for t in attrs)
+        inner = " ".join(f"{name}={value!r}" for name, value in attrs)
         return f"<{self.__class__.__name__} {inner}>"
 
     @classmethod
     def _create_default(cls, channel: VocalGuildChannel, client: Client) -> VoiceState:
-        self = cls(
-            data={
-                "channel_id": channel.id,
-                "guild_id": channel.guild.id,
-                "self_deaf": False,
-                "self_mute": False,
-                "user_id": client._connection.self_id,  # type: ignore
-            },
+        return cls(
+            data=cast(
+                "VoiceStatePayload",
+                {
+                    "channel_id": channel.id,
+                    "guild_id": channel.guild_id,
+                    "self_deaf": False,
+                    "self_mute": False,
+                    "user_id": client._connection.self_id,
+                },
+            ),
+            state=client._connection,
             channel=channel,
         )
-        return self
 
 
-def flatten_user(cls):
-    for attr, value in itertools.chain(
-        BaseUser.__dict__.items(), User.__dict__.items()
-    ):
+M = TypeVar("M", bound="Member")
+
+
+def flatten_user(cls: type[M]) -> type[M]:
+    for attr, value in [*BaseUser.__dict__.items(), *User.__dict__.items()]:
         # ignore private/special methods
         if attr.startswith("_"):
             continue
@@ -209,33 +262,38 @@ def flatten_user(cls):
             # However I'm not sure how I feel about "functions" returning properties
             # It probably breaks something in Sphinx.
             # probably a member function by now
-            def generate_function(x):
+            def generate_function(x: str, original: Any) -> Callable[..., Any]:
+                general: Callable[..., Any]
                 # We want sphinx to properly show coroutine functions as coroutines
-                if inspect.iscoroutinefunction(value):
+                if inspect.iscoroutinefunction(original):
 
-                    async def general(self, *args, **kwargs):  # type: ignore
+                    async def async_general(
+                        self: Member, *args: Any, **kwargs: Any
+                    ) -> Any:
                         return await getattr(self._user, x)(*args, **kwargs)
+
+                    general = async_general
 
                 else:
 
-                    def general(self, *args, **kwargs):
+                    def sync_general(self: Member, *args: Any, **kwargs: Any) -> Any:
                         return getattr(self._user, x)(*args, **kwargs)
 
+                    general = sync_general
+
                 general.__name__ = x
+                general.__qualname__ = f"Member.{x}"
                 return general
 
-            func = generate_function(attr)
+            func = generate_function(attr, value)
             func = utils.copy_doc(value)(func)
             setattr(cls, attr, func)
 
     return cls
 
 
-M = TypeVar("M", bound="Member")
-
-
 @flatten_user
-class Member(discord.abc.Messageable, _UserTag):
+class Member(discord.abc.Messageable, _UserTag, AliasMixin):
     """Represents a Discord member to a :class:`Guild`.
 
     This implements a lot of the functionality of :class:`User`.
@@ -274,8 +332,8 @@ class Member(discord.abc.Messageable, _UserTag):
             if they are listening to a song with a title longer
             than 128 characters.
 
-    guild: :class:`Guild`
-        The guild that the member belongs to.
+    guild_id: :class:`int`
+        The ID of the guild that the member belongs to.
     nick: Optional[:class:`str`]
         The guild specific nickname of the user.
     pending: :class:`bool`
@@ -296,21 +354,21 @@ class Member(discord.abc.Messageable, _UserTag):
     """
 
     __slots__ = (
-        "_roles",
-        "joined_at",
-        "premium_since",
-        "activities",
-        "guild",
-        "pending",
-        "nick",
-        "_client_status",
-        "_user",
-        "_state",
         "_avatar",
+        "_avatar_decoration",
         "_banner",
+        "_client_status",
+        "_roles",
+        "_state",
+        "_user",
+        "activities",
         "communication_disabled_until",
         "flags",
-        "_avatar_decoration",
+        "guild_id",
+        "joined_at",
+        "nick",
+        "pending",
+        "premium_since",
     )
 
     if TYPE_CHECKING:
@@ -319,31 +377,35 @@ class Member(discord.abc.Messageable, _UserTag):
         discriminator: str
         bot: bool
         system: bool
-        created_at: datetime.datetime
+        created_at: dt.datetime
         default_avatar: Asset
         avatar: Asset | None
         dm_channel: DMChannel | None
+        get_dm_channel = User.get_dm_channel
         create_dm = User.create_dm
         mutual_guilds: list[Guild]
+        get_mutual_guilds = User.get_mutual_guilds
         public_flags: PublicUserFlags
         banner: Asset | None
         accent_color: Colour | None
         accent_colour: Colour | None
-        communication_disabled_until: datetime.datetime | None
+        communication_disabled_until: dt.datetime | None
         primary_guild: PrimaryGuild | None
         collectibles: Collectibles | None
         avatar_decoration: Asset | None
 
     def __init__(
-        self, *, data: MemberWithUserPayload, guild: Guild, state: ConnectionState
-    ):
+        self,
+        *,
+        data: MemberWithUserPayload | MemberUpdateEventPayload,
+        guild: Guild | PartialGuild,
+        state: ConnectionState,
+    ) -> None:
         self._state: ConnectionState = state
-        self._user: User = state.store_user(data["user"])
-        self.guild: Guild = guild
-        self.joined_at: datetime.datetime | None = utils.parse_time(
-            data.get("joined_at")
-        )
-        self.premium_since: datetime.datetime | None = utils.parse_time(
+        self._user: User = state.create_user(data["user"])
+        self.guild_id: int = guild.id
+        self.joined_at: dt.datetime | None = utils.parse_time(data.get("joined_at"))
+        self.premium_since: dt.datetime | None = utils.parse_time(
             data.get("premium_since")
         )
         self._roles: utils.SnowflakeList = utils.SnowflakeList(map(int, data["roles"]))
@@ -353,13 +415,30 @@ class Member(discord.abc.Messageable, _UserTag):
         self.pending: bool = data.get("pending", False)
         self._avatar: str | None = data.get("avatar")
         self._banner: str | None = data.get("banner")
-        self.communication_disabled_until: datetime.datetime | None = utils.parse_time(
+        self.communication_disabled_until: dt.datetime | None = utils.parse_time(
             data.get("communication_disabled_until")
         )
-        self.flags: MemberFlags = MemberFlags._from_value(data.get("flags", 0))
+        self.flags: MemberFlags = MemberFlags._from_value(data.get("flags") or 0)
         self._avatar_decoration: AvatarDecoration | None = data.get(
             "avatar_decoration_data"
         )
+
+    @property
+    def guild(self) -> Guild | PartialGuild:
+        """The guild that the member belongs to.
+
+        This is the cached :class:`Guild`, or a :class:`PartialGuild` handle when
+        it is not cached or the cache backend is not the in-process one. Use
+        :meth:`PartialGuild.get` to get the cached :class:`Guild` with any backend.
+        """
+        from .guild import PartialGuild
+
+        state = self._state
+        if state.cache.supports_sync:
+            guild = state._guilds.get_nowait(self.guild_id)
+            if guild is not None:
+                return guild
+        return PartialGuild(state=state, id=self.guild_id)
 
     def __str__(self) -> str:
         return str(self._user)
@@ -372,29 +451,33 @@ class Member(discord.abc.Messageable, _UserTag):
                     f" id={self._user.id} name={self._user.name!r} global_name={self.global_name!r}"
                     f" bot={self._user.bot} nick={self.nick!r} guild={self.guild!r}>"
                 )
-            else:
-                return (
-                    "<Member"
-                    f" id={self._user.id} name={self._user.name!r}"
-                    f" bot={self._user.bot} nick={self.nick!r} guild={self.guild!r}>"
-                )
+            return (
+                "<Member"
+                f" id={self._user.id} name={self._user.name!r}"
+                f" bot={self._user.bot} nick={self.nick!r} guild={self.guild!r}>"
+            )
         return (
             "<Member"
             f" id={self._user.id} name={self._user.name!r} discriminator={self._user.discriminator!r}"
             f" bot={self._user.bot} nick={self.nick!r} guild={self.guild!r}>"
         )
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         return isinstance(other, _UserTag) and other.id == self.id
 
     def __hash__(self) -> int:
         return hash(self._user)
 
     @classmethod
-    def _from_message(cls: type[M], *, message: Message, data: MemberPayload) -> M:
+    def _from_message(cls, *, message: Message, data: MemberPayload) -> Self:
         author = message.author
-        data["user"] = author._to_minimal_user_json()  # type: ignore
-        return cls(data=data, guild=message.guild, state=message._state)  # type: ignore
+        user = author._user if isinstance(author, Member) else author
+        data["user"] = user._to_minimal_user_json()
+        return cls(
+            data=cast("MemberWithUserPayload", data),
+            guild=cast("Guild | PartialGuild", message.guild),
+            state=message._state,
+        )
 
     def _update_from_message(self, data: MemberPayload) -> None:
         self.joined_at = utils.parse_time(data.get("joined_at"))
@@ -405,30 +488,31 @@ class Member(discord.abc.Messageable, _UserTag):
 
     @classmethod
     def _try_upgrade(
-        cls: type[M],
+        cls,
         *,
         data: UserWithMemberPayload,
-        guild: Guild,
+        guild: Guild | PartialGuild,
         state: ConnectionState,
-    ) -> User | M:
+    ) -> User | Self:
         # A User object with a 'member' key
         try:
             member_data = data.pop("member")
         except KeyError:
             return state.create_user(data)
         else:
-            member_data["user"] = data  # type: ignore
-            return cls(data=member_data, guild=guild, state=state)  # type: ignore
+            full_data = cast("MemberWithUserPayload", member_data)
+            full_data["user"] = data
+            return cls(data=full_data, guild=guild, state=state)
 
     @classmethod
-    def _copy(cls: type[M], member: M) -> M:
-        self: M = cls.__new__(cls)  # to bypass __init__
+    def _copy(cls, member: Self) -> Self:
+        self: Self = cls.__new__(cls)  # to bypass __init__
 
-        self._roles = utils.SnowflakeList(member._roles, is_sorted=True)  # type: ignore # the API is the same
+        self._roles = utils.SnowflakeList(member._roles, is_sorted=True)
         self.joined_at = member.joined_at
         self.premium_since = member.premium_since
         self._client_status = member._client_status.copy()
-        self.guild = member.guild
+        self.guild_id = member.guild_id
         self.nick = member.nick
         self.pending = member.pending
         self.activities = member.activities
@@ -444,44 +528,41 @@ class Member(discord.abc.Messageable, _UserTag):
         self._user = member._user
         return self
 
-    async def _get_channel(self):
-        ch = await self.create_dm()
-        return ch
+    async def _get_channel(self) -> DMChannel:
+        return await self.create_dm()
 
     def _update(self, data: MemberPayload | MemberUpdateEventPayload) -> None:
         # the nickname change is optional,
         # if it isn't in the payload then it didn't change
-        try:
-            self.nick = data["nick"]  # type: ignore # handled by the type-except
-        except KeyError:
-            pass
+        if "nick" in data:
+            self.nick = data["nick"]
 
-        try:
-            self.pending = data["pending"]  # type: ignore # handled by the type-except
-        except KeyError:
-            pass
+        if "pending" in data:
+            self.pending = data["pending"]
 
         self.premium_since = utils.parse_time(data.get("premium_since"))
-        self._roles = utils.SnowflakeList(map(int, data["roles"]))  # type: ignore # the API is the same
+        self._roles = utils.SnowflakeList(map(int, data["roles"]))
         self._avatar = data.get("avatar")
         self._banner = data.get("banner")
         self.communication_disabled_until = utils.parse_time(
             data.get("communication_disabled_until")
         )
-        self.flags = MemberFlags._from_value(data.get("flags", 0))
+        self.flags = MemberFlags._from_value(data.get("flags") or 0)
         self._avatar_decoration = data.get("avatar_decoration_data")
 
     def _presence_update(
-        self, data: PartialPresenceUpdate, user: UserPayload
+        self, data: PartialPresenceUpdate, user: UserPayload | tuple[()]
     ) -> tuple[User, User] | None:
         self.activities = tuple(map(create_activity, data["activities"]))
         self._client_status = {
             sys.intern(key): sys.intern(value)
-            for key, value in data.get("client_status", {}).items()  # type: ignore
+            for key, value in cast(
+                "dict[str, str]", data.get("client_status", {})
+            ).items()
         }
         self._client_status[None] = sys.intern(data["status"])
 
-        if len(user) > 1:
+        if isinstance(user, dict) and len(user) > 1:
             return self._update_inner_user(user)
         return None
 
@@ -530,10 +611,12 @@ class Member(discord.abc.Messageable, _UserTag):
             ) = modified
             # Signal to dispatch on_user_update
             return to_return, u
+        return None
 
     @property
     def status(self) -> Status:
         """The member's overall status.
+
         If the value is unknown, then it will be a :class:`str` instead.
         """
         return try_enum(Status, self._client_status[None])
@@ -583,21 +666,95 @@ class Member(discord.abc.Messageable, _UserTag):
         """A helper function that determines if a member is active on a mobile device."""
         return "mobile" in self._client_status
 
+    async def get_colour(self) -> Colour:
+        """|coro|
+
+        Returns the rendered primary colour for the member. If the default colour
+        is the one rendered then an instance of :meth:`Colour.default` is returned.
+
+        This is an alias for ``(await Member.get_colours()).primary``.
+
+        Returns
+        -------
+        :class:`Colour`
+            The rendered primary colour of the member.
+        """
+        return (await self.get_colours()).primary
+
+    async def get_colours(self) -> RoleColours:
+        """|coro|
+
+        Returns the rendered :class:`RoleColours` for the member. If the default
+        colour is the one rendered then an instance of :meth:`RoleColours.default`
+        is returned.
+
+        .. versionadded:: 2.8
+
+        Returns
+        -------
+        :class:`RoleColours`
+            The rendered colours of the member.
+        """
+        roles = (await self.get_roles())[1:]  # remove @everyone
+
+        # highest order of the colour is the one that gets rendered.
+        # if the highest is the default colour then the next one with a colour
+        # is chosen instead
+        for role in reversed(roles):
+            if role.colours.primary.value:
+                return role.colours
+        return RoleColours.default()
+
+    async def get_roles(self) -> list[Role]:
+        r"""|coro|
+
+        Returns the :class:`Role`\s that the member belongs to. Note
+        that the first element of this list is always the default '@everyone'
+        role.
+
+        These roles are sorted by their position in the role hierarchy.
+
+        Returns
+        -------
+        List[:class:`Role`]
+            The cached roles of the member.
+        """
+        found = await self._roles_bucket().get_many({*self._roles, self.guild_id})
+        return self._sorted_roles(found.get)
+
+    def _roles_bucket(self) -> CacheBucket[int, Role]:
+        return self._state._guild_bucket("roles", self.guild_id)
+
+    def _sorted_roles(self, lookup: Callable[[int], Role | None]) -> list[Role]:
+        result = [role for role_id in self._roles if (role := lookup(role_id))]
+        default_role = lookup(self.guild_id)
+        if default_role is not None:
+            result.append(default_role)
+        result.sort()
+        return result
+
+    def _permissions_from(self, roles: list[Role], *, is_owner: bool) -> Permissions:
+        if is_owner:
+            return Permissions.all()
+
+        base = Permissions.none()
+        for r in roles:
+            base.value |= r.permissions.value
+
+        if base.administrator:
+            return Permissions.all()
+
+        if self.timed_out:
+            return Permissions(
+                base.value
+                & Permissions(view_channel=True, read_message_history=True).value
+            )
+
+        return base
+
     @property
     def colour(self) -> Colour:
-        """A property that returns a colour denoting the rendered primary colour
-        for the member. If the default colour is the one rendered then an instance
-        of :meth:`Colour.default` is returned.
-
-        This is an alias for ``Member.colours.primary``.
-        """
-        return self.colours.primary
-
-    @property
-    def color(self) -> Colour:
-        """A property that returns a color denoting the primary rendered color for
-        the member. If the default color is the one rendered then an instance of :meth:`Colour.default`
-        is returned.
+        """A property that returns a colour denoting the rendered primary colour for the member. If the default colour is the one rendered then an instance of :meth:`Colour.default` is returned.
 
         This is an alias for ``Member.colours.primary``.
         """
@@ -605,15 +762,12 @@ class Member(discord.abc.Messageable, _UserTag):
 
     @property
     def colours(self) -> RoleColours:
-        """A property that returns the rendered :class:`RoleColours` for
-        the member. If the default color is the one rendered then an instance of :meth:`RoleColours.default`
-        is returned.
+        """A property that returns the rendered :class:`RoleColours` for the member. If the default color is the one rendered then an instance of :meth:`RoleColours.default`
 
-        There is an alias for this named :attr:`colors`.
+        is returned.
 
         .. versionadded:: 2.8
         """
-
         roles = self.roles[1:]  # remove @everyone
 
         # highest order of the colour is the one that gets rendered.
@@ -625,35 +779,12 @@ class Member(discord.abc.Messageable, _UserTag):
         return RoleColours.default()
 
     @property
-    def colors(self) -> RoleColours:
-        """A property that returns the rendered :class:`RoleColours` for the member.
-        If the default color is the one rendered then an instance
-        of :meth:`Colour.default` is returned.
-
-        This is an alias for :attr:`colours`.
-
-        .. versionadded:: 2.8
-        """
-        return self.colours
-
-    @property
     def roles(self) -> list[Role]:
-        """A :class:`list` of :class:`Role` that the member belongs to. Note
-        that the first element of this list is always the default '@everyone'
-        role.
+        """A :class:`list` of :class:`Role` that the member belongs to. Note that the first element of this list is always the default '@everyone' role.
 
         These roles are sorted by their position in the role hierarchy.
         """
-        result = []
-        g = self.guild
-        for role_id in self._roles:
-            role = g.get_role(role_id)
-            if role:
-                result.append(role)
-        if g.default_role:
-            result.append(g.default_role)
-        result.sort()
-        return result
+        return self._sorted_roles(self._roles_bucket().get_nowait)
 
     @property
     def mention(self) -> str:
@@ -663,6 +794,7 @@ class Member(discord.abc.Messageable, _UserTag):
     @property
     def display_name(self) -> str:
         """Returns the user's display name.
+
         This will either be their guild specific nickname, global name or username.
         """
         return self.nick or self.global_name or self.name
@@ -680,15 +812,14 @@ class Member(discord.abc.Messageable, _UserTag):
 
     @property
     def guild_avatar(self) -> Asset | None:
-        """Returns an :class:`Asset` for the guild avatar
-        the member has. If unavailable, ``None`` is returned.
+        """Returns an :class:`Asset` for the guild avatar the member has. If unavailable, ``None`` is returned.
 
         .. versionadded:: 2.0
         """
         if self._avatar is None:
             return None
         return Asset._from_guild_avatar(
-            self._state, self.guild.id, self.id, self._avatar
+            self._state, self.guild_id, self.id, self._avatar
         )
 
     @property
@@ -704,8 +835,7 @@ class Member(discord.abc.Messageable, _UserTag):
 
     @property
     def guild_avatar_decoration(self) -> Asset | None:
-        """Returns an :class:`Asset` for the guild specific avatar decoration
-        the member has. If unavailable, ``None`` is returned.
+        """Returns an :class:`Asset` for the guild specific avatar decoration the member has. If unavailable, ``None`` is returned.
 
         .. versionadded:: 2.8
         """
@@ -728,21 +858,19 @@ class Member(discord.abc.Messageable, _UserTag):
 
     @property
     def guild_banner(self) -> Asset | None:
-        """Returns an :class:`Asset` for the guild banner
-        the member has. If unavailable, ``None`` is returned.
+        """Returns an :class:`Asset` for the guild banner the member has. If unavailable, ``None`` is returned.
 
         .. versionadded:: 2.7
         """
         if self._banner is None:
             return None
         return Asset._from_guild_banner(
-            self._state, self.guild.id, self.id, self._banner
+            self._state, self.guild_id, self.id, self._banner
         )
 
     @property
     def activity(self) -> ActivityTypes | None:
-        """Returns the primary
-        activity the user is currently doing. Could be ``None`` if no activity is being done.
+        """Returns the primary activity the user is currently doing. Could be ``None`` if no activity is being done.
 
         .. note::
 
@@ -756,6 +884,7 @@ class Member(discord.abc.Messageable, _UserTag):
         """
         if self.activities:
             return self.activities[0]
+        return None
 
     def mentioned_in(self, message: Message) -> bool:
         """Checks if the member is mentioned in the specified message.
@@ -770,7 +899,7 @@ class Member(discord.abc.Messageable, _UserTag):
         :class:`bool`
             Indicates if the member is mentioned in the message.
         """
-        if message.guild is None or message.guild.id != self.guild.id:
+        if message.guild_id is None or message.guild_id != self.guild_id:
             return False
 
         if self._user.mentioned_in(message):
@@ -785,11 +914,12 @@ class Member(discord.abc.Messageable, _UserTag):
         This is useful for figuring where a member stands in the role
         hierarchy chain.
         """
-        guild = self.guild
+        bucket = self._roles_bucket()
+        default_role = cast("Role", bucket.get_nowait(self.guild_id))
         if len(self._roles) == 0:
-            return guild.default_role
+            return default_role
 
-        return max(guild.get_role(rid) or guild.default_role for rid in self._roles)
+        return max(bucket.get_nowait(rid) or default_role for rid in self._roles)
 
     @property
     def guild_permissions(self) -> Permissions:
@@ -803,23 +933,81 @@ class Member(discord.abc.Messageable, _UserTag):
         This does take into consideration guild ownership and the
         administrator implication.
         """
-
-        if self.guild.owner_id == self.id:
-            return Permissions.all()
-
-        base = Permissions.none()
-        for r in self.roles:
-            base.value |= r.permissions.value
-
-        if base.administrator:
-            return Permissions.all()
-
-        return base
+        guild = self._state._guilds.get_nowait(self.guild_id)
+        return self._permissions_from(
+            self.roles, is_owner=guild is not None and guild.owner_id == self.id
+        )
 
     @property
     def voice(self) -> VoiceState | None:
         """Returns the member's current voice state."""
-        return self.guild._voice_state_for(self._user.id)
+        return self._state._guild_bucket("voice_states", self.guild_id).get_nowait(
+            self._user.id
+        )
+
+    async def get_top_role(self) -> Role | None:
+        """|coro|
+
+        Returns the member's highest role.
+
+        This is useful for figuring where a member stands in the role
+        hierarchy chain.
+
+        Returns
+        -------
+        Optional[:class:`Role`]
+            The highest cached role of the member, like :attr:`top_role`.
+            ``None`` when the roles of the guild are not cached.
+        """
+        roles = await self.get_roles()
+        return roles[-1] if roles else None
+
+    async def get_guild_permissions(self) -> Permissions:
+        """|coro|
+
+        Returns the member's guild permissions.
+
+        This only takes into consideration the guild permissions
+        and not most of the implied permissions or any of the
+        channel permission overwrites. For 100% accurate permission
+        calculation, please use :meth:`abc.GuildChannel.permissions_for`.
+
+        This does take into consideration guild ownership and the
+        administrator implication. A member that is :attr:`timed_out` only
+        keeps :attr:`~Permissions.view_channel` and
+        :attr:`~Permissions.read_message_history`, unless they own the guild or
+        have the administrator permission.
+
+        Returns
+        -------
+        :class:`Permissions`
+            The guild permissions of the member.
+        """
+        guild = await self._state._get_guild(self.guild_id)
+        return self._permissions_from(
+            await self.get_roles(),
+            is_owner=guild is not None and guild.owner_id == self.id,
+        )
+
+    async def get_voice_state(self) -> VoiceState | None:
+        """|coro|
+
+        Returns the member's current voice state.
+
+        Returns
+        -------
+        Optional[:class:`VoiceState`]
+            The cached voice state, or ``None`` if the member is not connected to a voice channel.
+        """
+        return await self._state._guild_bucket("voice_states", self.guild_id).get(
+            self._user.id
+        )
+
+    async def _get_voice_channel_id(self) -> int:
+        voice = await self.get_voice_state()
+        if voice is None or voice.channel_id is None:
+            raise ClientException("The member is not connected to a voice channel.")
+        return voice.channel_id
 
     @property
     def timed_out(self) -> bool:
@@ -869,10 +1057,10 @@ class Member(discord.abc.Messageable, _UserTag):
         mute: bool = MISSING,
         deafen: bool = MISSING,
         suppress: bool = MISSING,
-        roles: list[discord.abc.Snowflake] = MISSING,
+        roles: Sequence[discord.abc.Snowflake] = MISSING,
         voice_channel: VocalGuildChannel | None = MISSING,
         reason: str | None = None,
-        communication_disabled_until: datetime.datetime | None = MISSING,
+        communication_disabled_until: dt.datetime | None = MISSING,
         bypass_verification: bool | None = MISSING,
         banner: bytes | None = MISSING,
         avatar: bytes | None = MISSING,
@@ -961,20 +1149,20 @@ class Member(discord.abc.Messageable, _UserTag):
             A :term:`py:bytes-like object` representing the banner.
             Could be ``None`` to denote removal of the banner.
 
-            This is only available when editing the bot's own member (i.e. :attr:`Guild.me`).
+            This is only available when editing the bot's own member (i.e. :meth:`Guild.get_me`).
 
             .. versionadded:: 2.7
         avatar: Optional[:class:`bytes`]
             A :term:`py:bytes-like object` representing the avatar.
             Could be ``None`` to denote removal of the avatar.
 
-            This is only available when editing the bot's own member (i.e. :attr:`Guild.me`).
+            This is only available when editing the bot's own member (i.e. :meth:`Guild.get_me`).
 
             .. versionadded:: 2.7
         bio: Optional[:class:`str`]
             The new bio for the member. Could be ``None`` to denote removal of the bio.
 
-            This is only available when editing the bot's own member (i.e. :attr:`Guild.me`).
+            This is only available when editing the bot's own member (i.e. :meth:`Guild.get_me`).
 
             .. versionadded:: 2.7
 
@@ -994,7 +1182,7 @@ class Member(discord.abc.Messageable, _UserTag):
             You tried to edit the avatar, banner, or bio of a member that is not the bot.
         """
         http = self._state.http
-        guild_id = self.guild.id
+        guild_id = self.guild_id
         me = self._state.self_id == self.id
         payload: dict[str, Any] = {}
         bot_payload: dict[str, Any] = {}
@@ -1013,8 +1201,8 @@ class Member(discord.abc.Messageable, _UserTag):
             payload["mute"] = mute
 
         if suppress is not MISSING:
-            voice_state_payload = {
-                "channel_id": self.voice.channel.id,
+            voice_state_payload: dict[str, Any] = {
+                "channel_id": await self._get_voice_channel_id(),
                 "suppress": suppress,
             }
 
@@ -1047,7 +1235,7 @@ class Member(discord.abc.Messageable, _UserTag):
 
         if bypass_verification is not MISSING:
             flags = MemberFlags._from_value(self.flags.value)
-            flags.bypasses_verification = bypass_verification
+            flags.bypasses_verification = bool(bypass_verification)
             payload["flags"] = flags.value
 
         if avatar is not MISSING:
@@ -1070,17 +1258,20 @@ class Member(discord.abc.Messageable, _UserTag):
                 "Can only edit avatar, banner, or bio for the bot's member."
             )
 
+        data = None
+
         if payload:
             data = await http.edit_member(guild_id, self.id, reason=reason, **payload)
-        elif bot_payload:
+        if bot_payload:
             data = await http.edit_member(guild_id, "@me", reason=reason, **bot_payload)
-        else:
+
+        if data is None:
             return None
 
         return Member(data=data, guild=self.guild, state=self._state)
 
     async def timeout(
-        self, until: datetime.datetime | None, *, reason: str | None = None
+        self, until: dt.datetime | None, *, reason: str | None = None
     ) -> None:
         """|coro|
 
@@ -1105,7 +1296,7 @@ class Member(discord.abc.Messageable, _UserTag):
         await self.edit(communication_disabled_until=until, reason=reason)
 
     async def timeout_for(
-        self, duration: datetime.timedelta, *, reason: str | None = None
+        self, duration: dt.timedelta, *, reason: str | None = None
     ) -> None:
         """|coro|
 
@@ -1177,15 +1368,15 @@ class Member(discord.abc.Messageable, _UserTag):
             The operation failed.
         """
         payload = {
-            "channel_id": self.voice.channel.id,
+            "channel_id": await self._get_voice_channel_id(),
             "request_to_speak_timestamp": utcnow().isoformat(),
         }
 
         if self._state.self_id != self.id:
             payload["suppress"] = False
-            await self._state.http.edit_voice_state(self.guild.id, self.id, payload)
+            await self._state.http.edit_voice_state(self.guild_id, self.id, payload)
         else:
-            await self._state.http.edit_my_voice_state(self.guild.id, payload)
+            await self._state.http.edit_my_voice_state(self.guild_id, payload)
 
     async def move_to(
         self, channel: VocalGuildChannel | None, *, reason: str | None = None
@@ -1224,7 +1415,7 @@ class Member(discord.abc.Messageable, _UserTag):
         of roles than the highest role of the member.
 
         Parameters
-        -----------
+        ----------
         \*roles: :class:`abc.Snowflake`
             An argument list of :class:`abc.Snowflake` representing a :class:`Role`
             to give to the member.
@@ -1236,21 +1427,22 @@ class Member(discord.abc.Messageable, _UserTag):
             state of the cache.
 
         Raises
-        -------
+        ------
         Forbidden
             You do not have permissions to add these roles.
         HTTPException
             Adding roles failed.
         """
-
         if not atomic:
             new_roles = utils._unique(
-                Object(id=r.id) for s in (self.roles[1:], roles) for r in s
+                Object(id=r.id)
+                for s in ((await self.get_roles())[1:], roles)
+                for r in s
             )
             await self.edit(roles=new_roles, reason=reason)
         else:
             req = self._state.http.add_role
-            guild_id = self.guild.id
+            guild_id = self.guild_id
             user_id = self.id
             for role in roles:
                 await req(guild_id, user_id, role.id, reason=reason)
@@ -1267,7 +1459,7 @@ class Member(discord.abc.Messageable, _UserTag):
         of roles than the highest role of the member.
 
         Parameters
-        -----------
+        ----------
         \*roles: :class:`abc.Snowflake`
             An argument list of :class:`abc.Snowflake` representing a :class:`Role`
             to remove from the member.
@@ -1279,25 +1471,24 @@ class Member(discord.abc.Messageable, _UserTag):
             state of the cache.
 
         Raises
-        -------
+        ------
         Forbidden
             You do not have permissions to remove these roles.
         HTTPException
             Removing the roles failed.
         """
-
         if not atomic:
-            new_roles = [Object(id=r.id) for r in self.roles[1:]]  # remove @everyone
+            new_roles = [
+                Object(id=r.id) for r in (await self.get_roles())[1:]
+            ]  # remove @everyone
             for role in roles:
-                try:
+                with suppress(ValueError):
                     new_roles.remove(Object(id=role.id))
-                except ValueError:
-                    pass
 
             await self.edit(roles=new_roles, reason=reason)
         else:
             req = self._state.http.remove_role
-            guild_id = self.guild.id
+            guild_id = self.guild_id
             user_id = self.id
             for role in roles:
                 await req(guild_id, user_id, role.id, reason=reason)
@@ -1317,4 +1508,39 @@ class Member(discord.abc.Messageable, _UserTag):
         Optional[:class:`Role`]
             The role or ``None`` if not found in the member's roles.
         """
-        return self.guild.get_role(role_id) if self._roles.has(role_id) else None
+        if not self._roles.has(role_id):
+            return None
+        return self._roles_bucket().get_nowait(role_id)
+
+    def search_messages(self, **filters: Any) -> MessageSearchIterator:
+        """Retrieves an :class:`.AsyncIterator` of the messages sent by this member.
+
+        This is :meth:`Guild.search_messages` with ``authors`` set to this member.
+
+        .. versionadded:: 3.0
+        """
+        return self.guild.search_messages(authors=[self], **filters)
+
+    def search_replies(self, **filters: Any) -> MessageSearchIterator:
+        """Retrieves an :class:`.AsyncIterator` of the messages replying to this member.
+
+        This is :meth:`Guild.search_messages` with ``replied_to_users`` set to this member.
+
+        .. versionadded:: 3.0
+        """
+        return self.guild.search_messages(replied_to_users=[self], **filters)
+
+    def search_mentions(self, **filters: Any) -> MessageSearchIterator:
+        """Retrieves an :class:`.AsyncIterator` of the messages mentioning this member.
+
+        This is :meth:`Guild.search_messages` with ``mentions`` set to this member.
+
+        .. versionadded:: 3.0
+        """
+        return self.guild.search_messages(mentions=[self], **filters)
+
+    if TYPE_CHECKING:
+        color = colour
+        colors = colours
+        get_color = get_colour
+        get_colors = get_colours

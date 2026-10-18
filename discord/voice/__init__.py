@@ -1,12 +1,12 @@
-"""
-discord.voice
-~~~~~~~~~~~~~
+"""Voice support for the Discord API.
 
-Voice support for the Discord API.
+Copyright (c) 2015-2021 Rapptz
+Copyright (c) 2021-present Pycord Development
 
-:copyright: (c) 2015-2021 Rapptz & 2021-present Pycord Development
 :license: MIT, see LICENSE for more details.
 """
+
+from __future__ import annotations
 
 from ..errors import MissingVoiceDependenciesError
 from ..utils import get_missing_voice_dependencies

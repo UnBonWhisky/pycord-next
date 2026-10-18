@@ -23,6 +23,8 @@ The following section outlines the API of Pycord.
   cogs
   application_info
   voice
+  cache
+  gateway
   events
   utils
   enums

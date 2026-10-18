@@ -24,35 +24,40 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
-from functools import partial
-from typing import TYPE_CHECKING, ClassVar, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 
-from ..components import ActionRow as ActionRowComponent
-from ..components import SelectDefaultValue, SelectOption, _component_factory
+from typing_extensions import TypeVar, override
+
+from ..components import (
+    ActionRow as ActionRowComponent,
+    SelectDefaultValue,
+    SelectOption,
+)
 from ..enums import ButtonStyle, ChannelType, ComponentType
-from ..utils import find, get
+from ..limits import ComponentLimits
 from .button import Button
-from .file import File
-from .item import ItemCallbackType, ViewItem
+from .core import _insertion_index, _item_getter, _validate_position
+from .item import ItemCallbackType, ViewItem, _callback_item, _set_disabled
 from .select import Select
 
 __all__ = ("ActionRow",)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
     from typing_extensions import Self
 
+    from ..components import Component
     from ..emoji import AppEmoji, GuildEmoji
-    from ..partial_emoji import PartialEmoji, _EmojiTag
+    from ..partial_emoji import PartialEmoji
     from ..types.components import ActionRow as ActionRowPayload
     from .view import DesignerView
 
 
-A = TypeVar("A", bound="ActionRow")
-V = TypeVar("V", bound="DesignerView", covariant=True)
+V_co = TypeVar("V_co", bound="DesignerView", covariant=True, default="DesignerView")
 
 
-class ActionRow(ViewItem[V]):
+class ActionRow(ViewItem[V_co]):
     """Represents a UI Action Row used in :class:`discord.ui.DesignerView`.
 
     The items supported are as follows:
@@ -61,6 +66,13 @@ class ActionRow(ViewItem[V]):
     - :class:`discord.ui.Button`
 
     .. versionadded:: 2.7
+
+    .. container:: operations
+
+        .. describe:: len(x)
+
+            Returns the total count of all items in this row.
+            This includes the row itself, counting towards Discord's component limits.
 
     Parameters
     ----------
@@ -75,14 +87,29 @@ class ActionRow(ViewItem[V]):
         "id",
     )
 
-    __row_children_items__: ClassVar[list[ItemCallbackType]] = []
+    __component__ = ActionRowComponent
+    __component_type__ = ComponentType.action_row
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> ActionRowComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    __row_children_items__: ClassVar[list[ItemCallbackType[ViewItem]]] = []
 
     def __init_subclass__(cls) -> None:
-        children: list[ItemCallbackType] = []
+        children: list[ItemCallbackType[ViewItem]] = []
         for base in reversed(cls.__mro__):
-            for member in base.__dict__.values():
-                if hasattr(member, "__discord_ui_model_type__"):
-                    children.append(member)
+            children.extend(
+                member
+                for member in base.__dict__.values()
+                if hasattr(member, "__discord_ui_model_type__")
+            )
 
         cls.__row_children_items__ = children
 
@@ -90,75 +117,97 @@ class ActionRow(ViewItem[V]):
         self,
         *items: ViewItem,
         id: int | None = None,
-    ):
+    ) -> None:
         super().__init__()
 
         self.children: list[ViewItem] = []
 
-        self._underlying = self._generate_underlying(id=id)
+        self._build_underlying(id=id, children=[])
 
         for func in self.__row_children_items__:
-            item: ViewItem = func.__discord_ui_model_type__(
-                **func.__discord_ui_model_kwargs__
-            )
-            item.callback = partial(func, self, item)
+            item: ViewItem = _callback_item(self, func)
             self.add_item(item)
             setattr(self, func.__name__, item)
         for i in items:
             self.add_item(i)
 
+    def __len__(self) -> int:
+        return len(self.children) + 1
+
     @property
     def items(self) -> list[ViewItem]:
+        """The items of this row, an alias of :attr:`children`."""
         return self.children
 
     @items.setter
     def items(self, value: list[ViewItem]) -> None:
         self.children = value
 
-    def _add_component_from_item(self, item: ViewItem):
+    def _add_component_from_item(self, item: ViewItem) -> None:
         self.underlying.children.append(item._generate_underlying())
 
-    def _set_components(self, items: list[ViewItem]):
+    def _set_components(self, items: list[ViewItem]) -> None:
         self.underlying.children.clear()
         for item in items:
             self._add_component_from_item(item)
 
-    def _generate_underlying(self, id: int | None = None) -> ActionRowComponent:
-        super()._generate_underlying(ActionRowComponent)
-        row = ActionRowComponent._raw_construct(
-            type=ComponentType.action_row,
-            id=id or self.id,
-            children=[],
-        )
-        for i in self.children:
-            row.children.append(i._generate_underlying())
+    def _generate_underlying(self) -> ActionRowComponent:
+        row = cast("ActionRowComponent", super()._generate_underlying())
+        row.children = [i._generate_underlying() for i in self.children]
         return row
 
-    def add_item(self, item: ViewItem) -> Self:
+    def add_item(
+        self,
+        item: ViewItem,
+        *,
+        index: int | None = None,
+        before: ViewItem[V_co] | str | int | None = None,
+        after: ViewItem[V_co] | str | int | None = None,
+    ) -> Self:
         """Adds an item to the action row.
+
+        .. versionchanged:: 3.0
+            Added the ``index``, ``before`` and ``after`` parameters.
 
         Parameters
         ----------
         item: :class:`ViewItem`
             The item to add to the action row.
+        index: Optional[:class:`int`]
+            Add the new item at the specific index of :attr:`children`. Same behavior as Python's :func:`~list.insert`.
+        before: Optional[Union[:class:`ViewItem`, :class:`int`, :class:`str`]]
+            Add the new item **before** the specified item. If an :class:`int` is provided, the item will be detected by ``id``, otherwise by ``custom_id``.
+        after: Optional[Union[:class:`ViewItem`, :class:`int`, :class:`str`]]
+            Add the new item **after** the specified item. If an :class:`int` is provided, the item will be detected by ``id``, otherwise by ``custom_id``.
 
         Raises
         ------
         TypeError
             A :class:`ViewItem` was not passed.
+        ValueError
+            More than one of ``index``, ``before`` and ``after`` was given,
+            there is not enough space left in the row, or a searched item could not be found in the row.
         """
+        _validate_position(index, before, after)
 
-        if not isinstance(item, (Select, Button)):
+        if not isinstance(cast("object", item), (Select, Button)):
             raise TypeError(f"expected Select or Button, not {item.__class__!r}")
         if item.row:
             raise ValueError(f"{item.__class__!r}.row is not supported in ActionRow")
-        if self.width + item.width > 5:
-            raise ValueError(f"Not enough space left on this ActionRow")
+        if self.width + item.width > ComponentLimits.ACTION_ROW_CHILDREN_MAX:
+            raise ValueError("Not enough space left on this ActionRow")
+
+        position = _insertion_index(
+            self, self.children, index, before, after, "the action row"
+        )
 
         item.parent = self
-
-        self.children.append(item)
-        self._add_component_from_item(item)
+        if position is None:
+            self.children.append(item)
+            self._add_component_from_item(item)
+        else:
+            self.children.insert(position, item)
+            self._underlying = self._generate_underlying()
         return self
 
     def remove_item(self, item: ViewItem | str | int) -> Self:
@@ -169,9 +218,11 @@ class ActionRow(ViewItem[V]):
         item: Union[:class:`ViewItem`, :class:`int`, :class:`str`]
             The item, ``id``, or item ``custom_id`` to remove from the action row.
         """
-
         if isinstance(item, (str, int)):
-            item = self.get_item(item)
+            found = self.get_item(item)
+            if found is None:
+                return self
+            item = found
         try:
             self.children.remove(item)
             item.parent = None
@@ -179,25 +230,75 @@ class ActionRow(ViewItem[V]):
             pass
         return self
 
-    def get_item(self, id: str | int) -> ViewItem | None:
-        """Get an item from this action row. Roughly equivalent to `utils.get(row.children, ...)`.
-        If an ``int`` is provided, the item will be retrieved by ``id``, otherwise by ``custom_id``.
+    def replace_item(
+        self, original_item: ViewItem | str | int, new_item: ViewItem
+    ) -> Self:
+        """Directly replace an item in this row.
+
+        If an :class:`int` is provided, the item will be replaced by ``id``, otherwise by ``custom_id``.
+
+        .. versionadded:: 3.0
 
         Parameters
         ----------
-        id: Union[:class:`str`, :class:`int`]
+        original_item: Union[:class:`ViewItem`, :class:`int`, :class:`str`]
+            The item, item ``id``, or item ``custom_id`` to replace in the row.
+        new_item: :class:`ViewItem`
+            The new item to insert into the row.
+
+        Raises
+        ------
+        TypeError
+            The new item is not a :class:`Button` or :class:`Select`.
+        ValueError
+            The original item could not be found in the row.
+        """
+        if not isinstance(cast("object", new_item), (Select, Button)):
+            raise TypeError(f"expected Select or Button, not {new_item.__class__!r}")
+
+        if isinstance(original_item, (str, int)):
+            found = self.get_item(original_item)
+            if found is None:
+                raise ValueError(f"Could not find {original_item!r} in the action row.")
+            original_item = found
+        try:
+            i = self.children.index(original_item)
+        except ValueError:
+            raise ValueError(
+                f"Could not find {original_item!r} in the action row."
+            ) from None
+        new_item.parent = self
+        self.children[i] = new_item
+        original_item.parent = None
+        self._underlying = self._generate_underlying()
+        return self
+
+    def get_item(self, id: str | int | None = None, **attrs: Any) -> ViewItem | None:
+        r"""Get an item from this action row. Roughly equivalent to `utils.get(row.children, ...)`.
+
+        If an ``int`` is provided, the item will be retrieved by ``id``, otherwise by ``custom_id``.
+        If ``attrs`` are provided, they are all checked (logical AND) as done in :func:`~discord.utils.get`.
+        To have a nested attribute search (i.e. search by ``x.y``) then pass in ``x__y`` as the keyword argument.
+
+        .. versionchanged:: 3.0
+            Added support for ``attrs``.
+
+        Parameters
+        ----------
+        id: Optional[Union[:class:`str`, :class:`int`]]
             The id or custom_id of the item to get.
+        \*\*attrs
+            Keyword arguments that denote attributes to search with.
 
         Returns
         -------
         Optional[:class:`ViewItem`]
-            The item with the matching ``id`` or ``custom_id`` if it exists.
+            The item with the matching ``id``, ``custom_id`` or ``attrs`` if it exists.
         """
-        if not id:
-            return None
-        attr = "id" if isinstance(id, int) else "custom_id"
-        child = find(lambda i: getattr(i, attr, None) == id, self.children)
-        return child
+        if id:
+            attr = "id" if isinstance(id, int) else "custom_id"
+            attrs[attr] = id
+        return cast("ViewItem | None", _item_getter(self.children, **attrs))
 
     def add_button(
         self,
@@ -236,7 +337,6 @@ class ActionRow(ViewItem[V]):
         id: Optional[:class:`int`]
             The button's ID.
         """
-
         button = Button(
             style=style,
             label=label,
@@ -262,7 +362,7 @@ class ActionRow(ViewItem[V]):
         options: list[SelectOption] | None = ...,
         disabled: bool = ...,
         id: int | None = ...,
-    ) -> None: ...
+    ) -> Self: ...
 
     @overload
     def add_select(
@@ -277,7 +377,7 @@ class ActionRow(ViewItem[V]):
         disabled: bool = ...,
         id: int | None = ...,
         default_values: Sequence[SelectDefaultValue] | None = ...,
-    ) -> None: ...
+    ) -> Self: ...
 
     @overload
     def add_select(
@@ -295,7 +395,7 @@ class ActionRow(ViewItem[V]):
         disabled: bool = ...,
         id: int | None = ...,
         default_values: Sequence[SelectDefaultValue] | None = ...,
-    ) -> None: ...
+    ) -> Self: ...
 
     def add_select(
         self,
@@ -350,7 +450,6 @@ class ActionRow(ViewItem[V]):
             These can be either :class:`discord.SelectDefaultValue` instances or models, which will be converted into :class:`discord.SelectDefaultValue`
             instances.
         """
-
         select = Select(
             select_type=select_type,
             custom_id=custom_id,
@@ -366,12 +465,15 @@ class ActionRow(ViewItem[V]):
 
         return self.add_item(select)
 
+    @override
     def is_dispatchable(self) -> bool:
         return any(item.is_dispatchable() for item in self.children)
 
+    @override
     def is_persistent(self) -> bool:
         return all(item.is_persistent() for item in self.children)
 
+    @override
     def refresh_component(self, component: ActionRowComponent) -> None:
         self.underlying = component
         for i, y in enumerate(component.components):
@@ -389,7 +491,7 @@ class ActionRow(ViewItem[V]):
         """
         for item in self.walk_items():
             if exclusions is None or item not in exclusions:
-                item.disabled = True
+                _set_disabled(item, True)
         return self
 
     def enable_all_items(self, *, exclusions: list[ViewItem] | None = None) -> Self:
@@ -403,11 +505,11 @@ class ActionRow(ViewItem[V]):
         """
         for item in self.walk_items():
             if exclusions is None or item not in exclusions:
-                item.disabled = False
+                _set_disabled(item, False)
         return self
 
     @property
-    def width(self):
+    def width(self) -> int:
         """Return the sum of the items' widths."""
         t = 0
         for item in self.children:
@@ -415,14 +517,17 @@ class ActionRow(ViewItem[V]):
         return t
 
     def walk_items(self) -> Iterator[ViewItem]:
+        """Iterates over the items of this row."""
         yield from self.children
 
+    @override
     def to_component_dict(self) -> ActionRowPayload:
         self._underlying = self._generate_underlying()
-        return super().to_component_dict()
+        return cast("ActionRowPayload", super().to_component_dict())
 
     @classmethod
-    def from_component(cls: type[A], component: ActionRowComponent) -> A:
+    @override
+    def from_component(cls, component: ActionRowComponent) -> Self:
         from .view import _component_to_item, _walk_all_components
 
         items = [
@@ -433,4 +538,4 @@ class ActionRow(ViewItem[V]):
             id=component.id,
         )
 
-    callback = None
+    callback = None  # pyright: ignore[reportAssignmentType]

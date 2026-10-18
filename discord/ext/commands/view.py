@@ -23,6 +23,8 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 from .errors import (
     ExpectedClosingQuoteError,
     InvalidEndOfQuotedStringError,
@@ -32,45 +34,57 @@ from .errors import (
 # map from opening quotes to closing quotes
 _quotes = {
     '"': '"',
-    "‘": "’",
-    "‚": "‛",
-    "“": "”",
-    "„": "‟",
-    "⹂": "⹂",
-    "「": "」",
-    "『": "』",
-    "〝": "〞",
-    "﹁": "﹂",
-    "﹃": "﹄",
-    "＂": "＂",
-    "｢": "｣",
-    "«": "»",
-    "‹": "›",
-    "《": "》",
-    "〈": "〉",
+    "\u2018": "\u2019",
+    "\u201a": "\u201b",
+    "\u201c": "\u201d",
+    "\u201e": "\u201f",
+    "\u2e42": "\u2e42",
+    "\u300c": "\u300d",
+    "\u300e": "\u300f",
+    "\u301d": "\u301e",
+    "\ufe41": "\ufe42",
+    "\ufe43": "\ufe44",
+    "\uff02": "\uff02",
+    "\uff62": "\uff63",
+    "\u00ab": "\u00bb",
+    "\u2039": "\u203a",
+    "\u300a": "\u300b",
+    "\u3008": "\u3009",
 }
 _all_quotes = set(_quotes.keys()) | set(_quotes.values())
 
 
 class StringView:
-    def __init__(self, buffer):
+    """A cursor over the raw string of a command invocation.
+
+    Parameters
+    ----------
+    buffer: :class:`str`
+        The text to read from.
+    """
+
+    def __init__(self, buffer: str) -> None:
         self.index = 0
         self.buffer = buffer
         self.end = len(buffer)
         self.previous = 0
 
     @property
-    def current(self):
+    def current(self) -> str | None:
+        """The character under the cursor, or ``None`` at the end of the buffer."""
         return None if self.eof else self.buffer[self.index]
 
     @property
-    def eof(self):
+    def eof(self) -> bool:
+        """Whether the cursor reached the end of the buffer."""
         return self.index >= self.end
 
-    def undo(self):
+    def undo(self) -> None:
+        """Move the cursor back to where it was before the last read."""
         self.index = self.previous
 
-    def skip_ws(self):
+    def skip_ws(self) -> bool:
+        """Skip whitespace, returning whether the cursor moved."""
         pos = 0
         while not self.eof:
             try:
@@ -85,7 +99,8 @@ class StringView:
         self.index += pos
         return self.previous != self.index
 
-    def skip_string(self, string):
+    def skip_string(self, string: str) -> bool:
+        """Skip ``string`` if the buffer continues with it, returning whether it did."""
         strlen = len(string)
         if self.buffer[self.index : self.index + strlen] == string:
             self.previous = self.index
@@ -93,19 +108,22 @@ class StringView:
             return True
         return False
 
-    def read_rest(self):
+    def read_rest(self) -> str:
+        """Read everything left in the buffer."""
         result = self.buffer[self.index :]
         self.previous = self.index
         self.index = self.end
         return result
 
-    def read(self, n):
+    def read(self, n: int) -> str:
+        """Read ``n`` characters."""
         result = self.buffer[self.index : self.index + n]
         self.previous = self.index
         self.index += n
         return result
 
-    def get(self):
+    def get(self) -> str | None:
+        """Advance the cursor and return the character after the current one."""
         try:
             result = self.buffer[self.index + 1]
         except IndexError:
@@ -115,7 +133,8 @@ class StringView:
         self.index += 1
         return result
 
-    def get_word(self):
+    def get_word(self) -> str:
+        """Read up to the next whitespace character."""
         pos = 0
         while not self.eof:
             try:
@@ -130,15 +149,31 @@ class StringView:
         self.index += pos
         return result
 
-    def get_quoted_word(self):
+    def get_quoted_word(self) -> str | None:
+        """Read a word, honouring quotes and backslash escapes.
+
+        Returns
+        -------
+        :class:`str` | None
+            The unquoted word, or ``None`` at the end of the buffer.
+
+        Raises
+        ------
+        ExpectedClosingQuoteError
+            A quoted word was not terminated.
+        UnexpectedQuoteError
+            A quote appeared inside an unquoted word.
+        InvalidEndOfQuotedStringError
+            A closing quote was not followed by whitespace or the end.
+        """
         current = self.current
         if current is None:
             return None
 
         close_quote = _quotes.get(current)
-        is_quoted = bool(close_quote)
+        is_quoted = close_quote is not None
         if is_quoted:
-            result = []
+            result: list[str] = []
             _escaped_quotes = (current, close_quote)
         else:
             result = [current]
@@ -180,8 +215,7 @@ class StringView:
             # closing quote
             if is_quoted and current == close_quote:
                 next_char = self.get()
-                valid_eof = not next_char or next_char.isspace()
-                if not valid_eof:
+                if next_char and not next_char.isspace():
                     raise InvalidEndOfQuotedStringError(next_char)
 
                 # we're quoted so it's okay
@@ -193,7 +227,9 @@ class StringView:
 
             result.append(current)
 
-    def __repr__(self):
+        return None
+
+    def __repr__(self) -> str:
         return (
             f"<StringView pos: {self.index} prev: {self.previous} end: {self.end} eof:"
             f" {self.eof}>"

@@ -29,6 +29,9 @@ permissions:
   contents: read
   pull-requests: read
 
+env:
+  COV_FAIL_UNDER: 95
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -105,6 +108,74 @@ jobs:
           python-version: "3.14"
       - name: "Run bandit"
         run: bandit --recursive  --skip B101,B104,B105,B110,B307,B311,B404,B603,B607 .
+  ruff:
+    needs: [ changes ]
+    if: ${{ needs.changes.outputs.lib == 'true' && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: "Setup Python dev environment"
+        uses: ./.github/actions/setup-python-dev
+        with:
+          python-version: "3.14"
+      - name: "Run ruff check"
+        run: ruff check .
+  ruff-format:
+    needs: [ changes ]
+    if: ${{ needs.changes.outputs.lib == 'true' && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: "Setup Python dev environment"
+        uses: ./.github/actions/setup-python-dev
+        with:
+          python-version: "3.14"
+      - name: "Run ruff format"
+        run: ruff format --check .
+  pyright:
+    needs: [ changes ]
+    if: ${{ needs.changes.outputs.lib == 'true' && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: "Setup Python dev environment"
+        uses: ./.github/actions/setup-python-dev
+        with:
+          python-version: "3.14"
+          extras: "voice,redis,memcached,zstd,speed"
+      - name: "Run pyright"
+        run: pyright --pythonpath "$(which python)" discord
+  mypy:
+    needs: [ changes ]
+    if: ${{ needs.changes.outputs.lib == 'true' && github.event_name != 'schedule' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: "Setup Python dev environment"
+        uses: ./.github/actions/setup-python-dev
+        with:
+          python-version: "3.14"
+          extras: "voice,redis,memcached,zstd,speed"
+      - name: "Setup cache"
+        id: cache-mypy
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .mypy_cache
+          key: mypy-${{ runner.os }}-py3.14-${{ hashFiles('pyproject.toml', 'discord/**/*.py') }}
+          restore-keys: |
+            mypy-${{ runner.os }}-py3.14-
+      - name: "Make mypy cache directory"
+        id: cache-dir-mypy
+        run: mkdir -p -v .mypy_cache
+      - name: "Run mypy on core packages"
+        run: mypy --non-interactive --follow-imports=silent discord/_internal discord/cache discord/gateway discord/http discord/state
+      - name: "Run mypy on the whole package (informational)"
+        continue-on-error: true
+        run: mypy --non-interactive discord
   pylint:
     needs: [ changes ]
     if: ${{ needs.changes.outputs.lib == 'true' && github.event_name != 'schedule' }}
@@ -124,32 +195,10 @@ jobs:
           key: pylint-${{ runner.os }}-py3.14-${{ hashFiles('pyproject.toml', 'discord/**/*.py') }}
           restore-keys: |
             pylint-${{ runner.os }}-py3.14-
+      - name: "Install pylint"
+        run: uv pip install --system pylint
       - name: "Run pylint"
         run: pylint discord/ --exit-zero
-  mypy:
-    needs: [ changes ]
-    if: ${{ needs.changes.outputs.lib == 'true' && github.event_name != 'schedule' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: "Checkout Repository"
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: "Setup Python dev environment"
-        uses: ./.github/actions/setup-python-dev
-        with:
-          python-version: "3.14"
-      - name: "Setup cache"
-        id: cache-mypy
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .mypy_cache
-          key: mypy-${{ runner.os }}-py3.14-${{ hashFiles('pyproject.toml', 'discord/**/*.py') }}
-          restore-keys: |
-            mypy-${{ runner.os }}-py3.14-
-      - name: "Make mypy cache directory"
-        id: cache-dir-mypy
-        run: mkdir -p -v .mypy_cache
-      - name: "Run mypy"
-        run: mypy --non-interactive discord/
   flake8:
     needs: [ changes ]
     if: ${{ needs.changes.outputs.lib == 'true' }}
@@ -161,17 +210,58 @@ jobs:
         uses: ./.github/actions/setup-python-dev
         with:
           python-version: "3.14"
+      - name: "Install flake8"
+        run: uv pip install --system flake8
       - name: "Lint with flake8"
         run: |
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
   tests:
     needs: [ changes ]
+    if: ${{ needs.changes.outputs.lib == 'true' }}
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      REDIS_URL: redis://localhost:6379/0
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [ "3.10", "3.11", "3.12", "3.13", "3.14" ]
+        voice: [ true, false ]
+    steps:
+      - name: "Checkout Repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: "Setup Python dev environment"
+        uses: ./.github/actions/setup-python-dev
+        with:
+          python-version: ${{ matrix.python-version }}
+          extras: ${{ matrix.voice && 'voice,redis' || 'redis' }}
+          groups: "dev test"
+
+      - name: "Run tests"
+        run: pytest tests --cov=discord --cov-branch --cov-report=xml --cov-fail-under=${{ matrix.voice && env.COV_FAIL_UNDER || 0 }}
+      - name: "Upload coverage"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-py${{ matrix.python-version }}-${{ matrix.voice && 'voice' || 'novoice' }}
+          path: coverage.xml
+          if-no-files-found: error
+  tests-os:
+    needs: [ changes ]
     if: ${{ needs.changes.outputs.lib == 'true' && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        os: [ windows-latest, macos-latest ]
         python-version: [ "3.10", "3.14" ]
     steps:
       - name: "Checkout Repository"
@@ -190,7 +280,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        os: [ windows-latest, macos-latest ]
         python-version: [ "3.10", "3.11", "3.12", "3.13", "3.14" ]
     steps:
       - name: "Checkout Repository"
@@ -205,7 +295,7 @@ jobs:
         run: tox
   tests-pass: # ref: https://github.com/orgs/community/discussions/4324#discussioncomment-3477871
     runs-on: ubuntu-latest
-    needs: [ changes, tests, tests-full ]
+    needs: [ changes, tests, tests-os, tests-full ]
     if: always()
     steps:
       - name: Tests succeeded

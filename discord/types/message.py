@@ -25,23 +25,21 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
+
+from typing_extensions import NotRequired, TypedDict
 
 from .channel import ChannelType
 from .components import Component
 from .embed import Embed
 from .emoji import PartialEmoji
+from .interaction_metadata import InteractionMetadata, MessageInteraction
 from .member import Member, UserWithMember
 from .poll import Poll
 from .snowflake import Snowflake, SnowflakeList
 from .sticker import StickerItem
-from .threads import Thread
+from .threads import Thread, ThreadMember
 from .user import User
-
-if TYPE_CHECKING:
-    from .interactions import InteractionMetadata, MessageInteraction
-
-from typing_extensions import NotRequired, TypedDict
 
 
 class ChannelMention(TypedDict):
@@ -66,12 +64,23 @@ class ReactionCountDetails(TypedDict):
     burst: int
 
 
+SharedClientThemeBaseType = Literal[0, 1, 2, 3, 4]
+
+
+class SharedClientTheme(TypedDict):
+    colors: list[str]
+    gradient_angle: int
+    base_mix: int
+    base_theme: NotRequired[SharedClientThemeBaseType | None]
+
+
 class Attachment(TypedDict):
     height: NotRequired[int | None]
     width: NotRequired[int | None]
     content_type: NotRequired[str]
     description: NotRequired[str]
     spoiler: NotRequired[bool]
+    is_spoiler: NotRequired[bool]
     id: Snowflake
     filename: str
     size: int
@@ -118,7 +127,7 @@ MessageType = Literal[
 
 class MessageCall(TypedDict):
     participants: SnowflakeList
-    ended_timestamp: NotRequired[str]
+    ended_timestamp: NotRequired[str | None]
 
 
 class ForwardedMessage(TypedDict):
@@ -174,6 +183,7 @@ class Message(TypedDict):
     poll: Poll
     call: MessageCall
     message_snapshots: NotRequired[list[MessageSnapshot]]
+    shared_client_theme: NotRequired[SharedClientTheme]
 
 
 class MessagePin(TypedDict):
@@ -194,3 +204,36 @@ class AllowedMentions(TypedDict):
     roles: SnowflakeList
     users: SnowflakeList
     replied_user: bool
+
+
+SearchAuthorType = Literal["user", "bot", "webhook"]
+SearchHasType = Literal[
+    "image",
+    "sound",
+    "video",
+    "file",
+    "sticker",
+    "embed",
+    "link",
+    "poll",
+    "snapshot",
+]
+SearchEmbedType = Literal["image", "video", "gif", "sound", "article"]
+SearchSortMode = Literal["timestamp", "relevance"]
+SearchSortOrder = Literal["asc", "desc"]
+
+
+class MessageSearchResults(TypedDict):
+    doing_deep_historical_index: bool
+    documents_indexed: NotRequired[int]
+    total_results: int
+    messages: list[list[Message]]
+    threads: NotRequired[list[Thread]]
+    members: NotRequired[list[ThreadMember]]
+
+
+class MessageSearchIndexing(TypedDict):
+    message: str
+    code: int
+    documents_indexed: int
+    retry_after: float

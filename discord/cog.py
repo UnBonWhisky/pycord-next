@@ -25,9 +25,12 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import inspect
-import os
 import pathlib
 import sys
 import types
@@ -38,26 +41,37 @@ from typing import (
     ClassVar,
     TypeGuard,
     TypeVar,
+    cast,
     overload,
 )
+
+from typing_extensions import TypeIs
 
 import discord.utils
 
 from . import errors
 from .commands import (
     ApplicationCommand,
-    ApplicationContext,
+    SlashCommand,
     SlashCommandGroup,
     _BaseCommand,
 )
+from .commands.core import _is_str, _mark_callback
+from .commands.registry import declared_parent
 
 if TYPE_CHECKING:
+    from typing_extensions import Self
+
+    from .commands.context import BaseContext
     from .ext.bridge import BridgeCommand
+    from .ext.commands.core import Command
+
+    CogCommand = ApplicationCommand | Command[Any, ..., Any] | BridgeCommand
 
 
 __all__ = (
-    "CogMeta",
     "Cog",
+    "CogMeta",
     "CogMixin",
 )
 
@@ -71,11 +85,19 @@ def _is_submodule(parent: str, child: str) -> bool:
     return parent == child or child.startswith(f"{parent}.")
 
 
-def _is_bridge_command(command: Any) -> TypeGuard[BridgeCommand]:
+def _is_bridge_command(command: object) -> TypeIs[BridgeCommand]:
     return getattr(command, "__bridge__", False)
 
 
-def _name_filter(c: Any) -> str:
+def _is_group_member(
+    value: object,
+) -> TypeGuard[SlashCommand[Any, ..., Any] | SlashCommandGroup]:
+    return bool(getattr(value, "parent", None)) and isinstance(
+        value, ApplicationCommand
+    )
+
+
+def _name_filter(c: object) -> str:
     return (
         "app"
         if isinstance(c, ApplicationCommand)
@@ -92,32 +114,44 @@ def _validate_name_prefix(base_class: type, name: str) -> None:
 
 def _process_attributes(
     base: type,
-) -> tuple[dict[str, Any], dict[str, Any]]:  # pyright: ignore[reportExplicitAny]
+) -> tuple[
+    dict[str, _BaseCommand | BridgeCommand],
+    dict[str, Callable[..., Any]],
+    dict[str, SlashCommand[Any, ..., Any] | SlashCommandGroup],
+    dict[str, BridgeCommand],
+]:
     commands: dict[str, _BaseCommand | BridgeCommand] = {}
     listeners: dict[str, Callable[..., Any]] = {}
+    members: dict[str, SlashCommand[Any, ..., Any] | SlashCommandGroup] = {}
+    bridge_members: dict[str, BridgeCommand] = {}
 
-    for attr_name, attr_value in base.__dict__.items():
-        if attr_name in commands:
-            del commands[attr_name]
-        if attr_name in listeners:
-            del listeners[attr_name]
+    for attr_name, raw_value in base.__dict__.items():
+        attr_value: object = raw_value
+        commands.pop(attr_name, None)
+        listeners.pop(attr_name, None)
+        members.pop(attr_name, None)
+        if attr_name in bridge_members:
+            del bridge_members[attr_name]
+            members.pop(f"app_{attr_name}", None)
 
-        if getattr(attr_value, "parent", None) and isinstance(
-            attr_value, ApplicationCommand
-        ):
-            # Skip application commands if they are a part of a group
-            # Since they are already added when the group is added
+        if _is_group_member(attr_value):
+            members[attr_name] = attr_value
+            continue
+
+        if _is_bridge_command(attr_value) and attr_value.parent:
+            bridge_members[attr_name] = attr_value
+            members[f"app_{attr_name}"] = attr_value.slash_variant
             continue
 
         is_static_method = isinstance(attr_value, staticmethod)
         if is_static_method:
-            attr_value = attr_value.__func__
+            attr_value = _unwrap_static(attr_value)
 
         if inspect.iscoroutinefunction(attr_value) and getattr(
             attr_value, "__cog_listener__", False
         ):
             _validate_name_prefix(base, attr_name)
-            listeners[attr_name] = attr_value
+            listeners[attr_name] = cast("Callable[..., Any]", attr_value)
             continue
 
         if isinstance(attr_value, _BaseCommand) or _is_bridge_command(attr_value):
@@ -134,16 +168,16 @@ def _process_attributes(
             commands[f"ext_{attr_name}"] = attr_value.ext_variant
             commands[f"app_{attr_name}"] = attr_value.slash_variant
             commands[attr_name] = attr_value
-            for cmd in getattr(attr_value, "subcommands", []):
+            for cmd in getattr(attr_value, "walk_commands", tuple)():
                 commands[f"ext_{cmd.ext_variant.qualified_name}"] = cmd.ext_variant
 
-    return commands, listeners
+    return commands, listeners, members, bridge_members
 
 
 def _update_command(
-    command: _BaseCommand | BridgeCommand,
+    command: CogCommand,
     guild_ids: list[int],
-    lookup_table: dict[str, _BaseCommand | BridgeCommand],
+    lookup_table: dict[str, CogCommand],
     new_cls: type[Cog],
 ) -> None:
     if isinstance(command, ApplicationCommand) and not command.guild_ids and guild_ids:
@@ -151,11 +185,8 @@ def _update_command(
 
     if not isinstance(command, SlashCommandGroup) and not _is_bridge_command(command):
         # ignore bridge commands
-        cmd: BridgeCommand | _BaseCommand | None = getattr(
-            new_cls,
-            command.callback.__name__,
-            None,  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType,reportAttributeAccessIssue]
-        )
+        callback_name: str = command.callback.__name__
+        cmd: object = getattr(new_cls, callback_name, None)
         if _is_bridge_command(cmd):
             setattr(
                 cmd,
@@ -163,24 +194,16 @@ def _update_command(
                 command,
             )
         else:
-            setattr(
-                new_cls,
-                command.callback.__name__,
-                command,  # pyright: ignore [reportAttributeAccessIssue, reportUnknownArgumentType, reportUnknownMemberType]
-            )
+            setattr(new_cls, callback_name, command)
 
-        parent: (
-            BridgeCommand | _BaseCommand | None
-        ) = (  # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
-            command.parent  # pyright: ignore [reportAttributeAccessIssue]
-        )
+        parent: Any = command.parent
         if parent is not None:
             # Get the latest parent reference
-            parent = lookup_table[f"{_name_filter(command)}_{parent.qualified_name}"]  # type: ignore # pyright: ignore[reportUnknownMemberType]
+            parent = lookup_table[f"{_name_filter(command)}_{parent.qualified_name}"]
 
             # Update the parent's reference to our self
-            parent.remove_command(command.name)  # type: ignore # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
-            parent.add_command(command)  # type: ignore # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+            parent.remove_command(command.name)
+            parent.add_command(command)
 
 
 class CogMeta(type):
@@ -196,11 +219,14 @@ class CogMeta(type):
 
         import abc
 
+
         class CogABCMeta(discord.CogMeta, abc.ABCMeta):
             pass
 
+
         class SomeMixin(metaclass=abc.ABCMeta):
             pass
+
 
         class SomeCogMixin(SomeMixin, discord.Cog, metaclass=CogABCMeta):
             pass
@@ -213,7 +239,7 @@ class CogMeta(type):
 
         .. code-block:: python3
 
-            class MyCog(discord.Cog, name='My Cog'):
+            class MyCog(discord.Cog, name="My Cog"):
                 pass
 
     Attributes
@@ -236,11 +262,11 @@ class CogMeta(type):
             class MyCog(discord.Cog, command_attrs=dict(hidden=True)):
                 @discord.slash_command()
                 async def foo(self, ctx):
-                    pass # hidden -> True
+                    pass  # hidden -> True
 
                 @discord.slash_command(hidden=False)
                 async def bar(self, ctx):
-                    pass # hidden -> False
+                    pass  # hidden -> False
 
     guild_ids: Optional[List[:class:`int`]]
         A shortcut to :attr:`.command_attrs`, what ``guild_ids`` should all application commands have
@@ -251,11 +277,15 @@ class CogMeta(type):
 
     __cog_name__: str
     __cog_settings__: dict[str, Any]
-    __cog_commands__: list[_BaseCommand | BridgeCommand]
+    __cog_commands__: list[CogCommand]
     __cog_listeners__: list[tuple[str, str]]
     __cog_guild_ids__: list[int]
+    __cog_group_members__: list[SlashCommand[Any, ..., Any] | SlashCommandGroup]
+    __cog_ext_members__: list[Command[Any, ..., Any]]
+    __cog_group_copies__: list[tuple[SlashCommandGroup, SlashCommandGroup]]
 
     def __new__(cls: type[CogMeta], *args: Any, **kwargs: Any) -> CogMeta:
+        """Creates the cog class and collects its commands, listeners and groups."""
         name, bases, attrs = args
         attrs["__cog_name__"] = kwargs.pop("name", name)
         attrs["__cog_settings__"] = kwargs.pop("command_attrs", {})
@@ -268,27 +298,61 @@ class CogMeta(type):
 
         commands: dict[str, _BaseCommand | BridgeCommand] = {}
         listeners: dict[str, Callable[..., Any]] = {}
+        members: dict[str, SlashCommand | SlashCommandGroup] = {}
+        bridge_members: dict[str, BridgeCommand] = {}
 
         new_cls = super().__new__(cls, name, bases, attrs, **kwargs)
+        cog_cls = cast("type[Cog]", new_cls)
 
         for base in reversed(new_cls.__mro__):
-            new_commands, new_listeners = _process_attributes(base)
+            new_commands, new_listeners, new_members, new_bridge_members = (
+                _process_attributes(base)
+            )
             commands.update(new_commands)
             listeners.update(new_listeners)
+            members.update(new_members)
+            bridge_members.update(new_bridge_members)
 
-        new_cls.__cog_commands__ = list(commands.values())
+        new_cls.__cog_commands__ = cast("list[CogCommand]", list(commands.values()))
+
+        collected = {id(c) for c in new_cls.__cog_commands__}
+        new_cls.__cog_ext_members__ = [
+            b.ext_variant
+            for b in bridge_members.values()
+            if id(b.ext_variant) not in collected
+        ]
+        for ext_member in new_cls.__cog_ext_members__:
+            if ext_member.parent is not None:
+                ext_member.parent.remove_command(ext_member.name)
+
+        new_cls.__cog_group_members__ = list(members.values())
+        for member in new_cls.__cog_group_members__:
+            declared_parent(member)
+            if member._cog_class is None:
+                member._cog_class = cog_cls
 
         new_cls.__cog_listeners__ = [
             (listener_name, listener.__name__)
             for listener in listeners.values()
-            for listener_name in listener.__cog_listener_names__
+            for listener_name in _listener_names(listener)
         ]
 
         cmd_attrs = new_cls.__cog_settings__
 
         # Either update the command with the cog provided defaults or copy it.
-        # r.e type ignore, type-checker complains about overriding a ClassVar
-        new_cls.__cog_commands__ = list(tuple(c._update_copy(cmd_attrs) if not _is_bridge_command(c) else c for c in new_cls.__cog_commands__))  # type: ignore
+        originals = new_cls.__cog_commands__
+        new_cls.__cog_commands__ = [
+            c if _is_bridge_command(c) else c._update_copy(cmd_attrs)
+            for c in new_cls.__cog_commands__
+        ]
+
+        new_cls.__cog_group_copies__ = []
+        for original, copy in zip(originals, new_cls.__cog_commands__, strict=True):
+            if isinstance(copy, SlashCommandGroup):
+                copy.subcommands = [c for c in copy.subcommands if c._cog_class is None]
+                new_cls.__cog_group_copies__.append(
+                    (cast("SlashCommandGroup", original), copy)
+                )
 
         lookup = {
             f"{_name_filter(cmd)}_{cmd.qualified_name}": cmd
@@ -297,20 +361,35 @@ class CogMeta(type):
 
         # Update the Command instances dynamically as well
         for command in new_cls.__cog_commands__:
-            _update_command(command, new_cls.__cog_guild_ids__, lookup, new_cls)
+            _update_command(command, new_cls.__cog_guild_ids__, lookup, cog_cls)
 
         return new_cls
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(cls, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args)
 
     @classmethod
     def qualified_name(cls) -> str:
+        """The name of the cog class."""
         return cls.__cog_name__
 
 
+def _listener_names(listener: Callable[..., Any]) -> list[str]:
+    return cast("list[str]", getattr(listener, "__cog_listener_names__", []))
+
+
+def _is_cog(value: object) -> bool:
+    return isinstance(value, Cog)
+
+
+def _unwrap_static(func: object) -> Callable[..., Any]:
+    if isinstance(func, staticmethod):
+        return cast("Callable[..., Any]", func.__func__)
+    return cast("Callable[..., Any]", func)
+
+
 def _cog_special_method(func: FuncT) -> FuncT:
-    func.__cog_special_method__ = None
+    _mark_callback(func, "__cog_special_method__", None)
     return func
 
 
@@ -327,33 +406,30 @@ class Cog(metaclass=CogMeta):
 
     __cog_name__: ClassVar[str]
     __cog_settings__: ClassVar[dict[str, Any]]
-    __cog_commands__: ClassVar[list[ApplicationCommand]]
+    __cog_commands__: ClassVar[list[CogCommand]]
     __cog_listeners__: ClassVar[list[tuple[str, str]]]
     __cog_guild_ids__: ClassVar[list[int]]
+    __cog_group_members__: ClassVar[list[SlashCommand | SlashCommandGroup]]
+    __cog_ext_members__: ClassVar[list[Command[Any, ..., Any]]]
+    __cog_attachment__: Any = None
+    __cog_group_copies__: ClassVar[list[tuple[SlashCommandGroup, SlashCommandGroup]]]
 
-    def __new__(cls: type[CogT], *args: Any, **kwargs: Any) -> CogT:
-        # For issue 426, we need to store a copy of the command objects
-        # since we modify them to inject `self` to them.
-        # To do this, we need to interfere with the Cog creation process.
-        return super().__new__(cls)
+    def get_commands(self) -> list[ApplicationCommand | Command[Any, ..., Any]]:
+        r"""Returns the commands that are defined inside this cog.
 
-    def get_commands(self) -> list[ApplicationCommand]:
-        r"""
         Returns
-        --------
-        List[:class:`.ApplicationCommand`]
-            A :class:`list` of :class:`.ApplicationCommand`\s that are
-            defined inside this cog.
+        -------
+        List[Union[:class:`~discord.ApplicationCommand`, :class:`.Command`]]
+            A :class:`list` of commands that are defined inside this cog.
 
             .. note::
 
                 This does not include subcommands.
         """
-        return [
-            c
-            for c in self.__cog_commands__
-            if isinstance(c, ApplicationCommand) and c.parent is None
-        ]
+        return cast(
+            "list[ApplicationCommand | Command[Any, ..., Any]]",
+            [c for c in self.__cog_commands__ if c.parent is None],
+        )
 
     @property
     def qualified_name(self) -> str:
@@ -369,7 +445,7 @@ class Cog(metaclass=CogMeta):
     def description(self, description: str) -> None:
         self.__cog_description__ = description
 
-    def walk_commands(self) -> Generator[ApplicationCommand]:
+    def walk_commands(self) -> Generator[ApplicationCommand | Command[Any, ..., Any]]:
         """An iterator that recursively walks through this cog's commands and subcommands.
 
         Yields
@@ -377,9 +453,24 @@ class Cog(metaclass=CogMeta):
         Union[:class:`.Command`, :class:`.Group`]
             A command or group from the cog.
         """
+        from .ext.commands.core import GroupMixin
+
+        seen: set[int] = set()
         for command in self.__cog_commands__:
             if isinstance(command, SlashCommandGroup):
-                yield from command.walk_commands()
+                for child in command.walk_commands():
+                    seen.add(id(child))
+                    yield child
+            elif isinstance(command, ApplicationCommand):
+                yield command
+            elif command.parent is None:
+                yield cast("Command[Any, ..., Any]", command)
+                if isinstance(command, GroupMixin):
+                    yield from command.walk_commands()
+
+        for member in self.__cog_group_members__:
+            if id(member) not in seen:
+                yield member
 
     def get_listeners(self) -> list[tuple[str, Callable[..., Any]]]:
         """Returns a :class:`list` of (name, function) listener pairs that are defined in this cog.
@@ -424,26 +515,24 @@ class Cog(metaclass=CogMeta):
             The function is not a coroutine function or a string was not passed as
             the name.
         """
-
-        if name is not MISSING and not isinstance(name, str):
+        if name is not MISSING and not _is_str(name):
             raise TypeError(
                 "Cog.listener expected str but received"
                 f" {name.__class__.__name__!r} instead."
             )
 
         def decorator(func: FuncT) -> FuncT:
-            actual = func
-            if isinstance(actual, staticmethod):
-                actual = actual.__func__
+            actual = _unwrap_static(func)
             if not inspect.iscoroutinefunction(actual):
                 raise TypeError("Listener function must be a coroutine function.")
-            actual.__cog_listener__ = True
+            _mark_callback(actual, "__cog_listener__", True)
             to_assign = name or actual.__name__
-            actual._once = once
-            try:
-                actual.__cog_listener_names__.append(to_assign)
-            except AttributeError:
-                actual.__cog_listener_names__ = [to_assign]
+            _mark_callback(actual, "_once", once)
+            names: list[str] | None = getattr(actual, "__cog_listener_names__", None)
+            if names is None:
+                _mark_callback(actual, "__cog_listener_names__", [to_assign])
+            else:
+                names.append(to_assign)
             # we have to return `func` instead of `actual` because
             # we need the type to be `staticmethod` for the metaclass
             # to pick it up but the metaclass unfurls the function and
@@ -470,56 +559,50 @@ class Cog(metaclass=CogMeta):
         """
 
     @_cog_special_method
-    def bot_check_once(self, ctx: ApplicationContext) -> bool:
-        """A special method that registers as a :meth:`.Bot.check_once`
-        check.
+    def bot_check_once(self, ctx: BaseContext) -> bool:
+        """A special method that registers as a :meth:`.Bot.check_once` check.
 
         This function **can** be a coroutine and must take a sole parameter,
         ``ctx``, to represent the :class:`.Context` or :class:`.ApplicationContext`.
 
         Parameters
         ----------
-        ctx: :class:`.Context`
+        ctx: Union[:class:`.Context`, :class:`.ApplicationContext`]
             The invocation context.
         """
         return True
 
     @_cog_special_method
-    def bot_check(self, ctx: ApplicationContext) -> bool:
-        """A special method that registers as a :meth:`.Bot.check`
-        check.
+    def bot_check(self, ctx: BaseContext) -> bool:
+        """A special method that registers as a :meth:`.Bot.check` check.
 
         This function **can** be a coroutine and must take a sole parameter,
         ``ctx``, to represent the :class:`.Context` or :class:`.ApplicationContext`.
 
         Parameters
         ----------
-        ctx: :class:`.Context`
+        ctx: Union[:class:`.Context`, :class:`.ApplicationContext`]
             The invocation context.
         """
         return True
 
     @_cog_special_method
-    def cog_check(self, ctx: ApplicationContext) -> bool:
-        """A special method that registers as a :func:`~discord.ext.commands.check`
-        for every command and subcommand in this cog.
+    def cog_check(self, ctx: BaseContext) -> bool:
+        """A special method that registers as a :func:`~discord.ext.commands.check` for every command and subcommand in this cog.
 
         This function **can** be a coroutine and must take a sole parameter,
         ``ctx``, to represent the :class:`.Context` or :class:`.ApplicationContext`.
 
         Parameters
         ----------
-        ctx: :class:`.Context`
+        ctx: Union[:class:`.Context`, :class:`.ApplicationContext`]
             The invocation context.
         """
         return True
 
     @_cog_special_method
-    async def cog_command_error(
-        self, ctx: ApplicationContext, error: Exception
-    ) -> None:
-        """A special method that is called whenever an error
-        is dispatched inside this cog.
+    async def cog_command_error(self, ctx: BaseContext, error: Exception) -> None:
+        """A special method that is called whenever an error is dispatched inside this cog.
 
         This is similar to :func:`.on_command_error` except only applying
         to the commands inside this cog.
@@ -528,41 +611,51 @@ class Cog(metaclass=CogMeta):
 
         Parameters
         ----------
-        ctx: :class:`.ApplicationContext`
+        ctx: Union[:class:`.Context`, :class:`.ApplicationContext`]
             The invocation context where the error happened.
         error: :class:`ApplicationCommandError`
             The error that happened.
         """
 
     @_cog_special_method
-    async def cog_before_invoke(self, ctx: ApplicationContext) -> None:
+    async def cog_before_invoke(self, ctx: BaseContext) -> None:
         """A special method that acts as a cog local pre-invoke hook.
 
         This is similar to :meth:`.ApplicationCommand.before_invoke`.
 
         This **must** be a coroutine.
 
+        .. versionchanged:: 3.0
+
+            When this cog owns a :class:`.SlashCommandGroup` shared with other cogs, this hook also runs
+            before the commands of the other cogs, before their own ``cog_before_invoke``.
+
         Parameters
         ----------
-        ctx: :class:`.ApplicationContext`
+        ctx: Union[:class:`.Context`, :class:`.ApplicationContext`]
             The invocation context.
         """
 
     @_cog_special_method
-    async def cog_after_invoke(self, ctx: ApplicationContext) -> None:
+    async def cog_after_invoke(self, ctx: BaseContext) -> None:
         """A special method that acts as a cog local post-invoke hook.
 
         This is similar to :meth:`.ApplicationCommand.after_invoke`.
 
         This **must** be a coroutine.
 
+        .. versionchanged:: 3.0
+
+            When this cog owns a :class:`.SlashCommandGroup` shared with other cogs, this hook also runs
+            after the commands of the other cogs, after their own ``cog_after_invoke``.
+
         Parameters
         ----------
-        ctx: :class:`.ApplicationContext`
+        ctx: Union[:class:`.Context`, :class:`.ApplicationContext`]
             The invocation context.
         """
 
-    def _inject(self: CogT, bot) -> CogT:
+    def _inject(self, bot: Any) -> Self:
         cls = self.__class__
 
         # realistically, the only thing that can cause loading errors
@@ -578,23 +671,37 @@ class Cog(metaclass=CogMeta):
             command._set_cog(self)
 
             if isinstance(command, ApplicationCommand):
-                if isinstance(command, discord.SlashCommandGroup):
-                    for x in command.subcommands:
-                        if isinstance(x, discord.SlashCommandGroup):
-                            for y in x.subcommands:
-                                y.parent = x
-                        x.parent = command
-                bot.add_application_command(command)
+                if not isinstance(command, discord.SlashCommandGroup):
+                    bot.add_application_command(command)
 
             elif command.parent is None:
                 try:
                     bot.add_command(command)
-                except Exception as e:
+                except Exception:
                     # undo our additions
                     for to_undo in self.__cog_commands__[:index]:
                         if to_undo.parent is None:
                             bot.remove_command(to_undo.name)
-                    raise e
+                    raise
+
+        for member in cls.__cog_group_members__:
+            member._set_cog(self)
+
+        try:
+            changed = bot._group_registry.attach(self)
+            self._attach_ext_members(bot)
+        except BaseException:
+            self._detach_ext_members()
+            bot._group_registry.detach(self)
+            for member in cls.__cog_group_members__:
+                if member.cog is self:
+                    member._unset_cog()
+            self._remove_commands(bot)
+            raise
+
+        if changed:
+            bot._schedule_group_sync()
+
         # check if we're overriding the default
         if cls.bot_check is not Cog.bot_check:
             bot.add_check(self.bot_check)
@@ -611,18 +718,62 @@ class Cog(metaclass=CogMeta):
 
         return self
 
-    def _eject(self, bot) -> None:
+    def _attach_ext_members(self, bot: Any) -> None:
+        attached: list[tuple[Any, Any]] = []
+        self.__cog_ext_attached__ = attached
+
+        def ensure(group: Any) -> Any:
+            if group.parent is None:
+                return bot.get_command(group.name)
+            parent = ensure(group.parent)
+            if parent is None:
+                return None
+            existing = parent.get_command(group.name)
+            if existing is not None:
+                return existing
+            parent.add_command(group)
+            attached.append((parent, group))
+            return group
+
+        for member in type(self).__cog_ext_members__:
+            member._set_cog(self)
+            parent = ensure(member.parent)
+            if parent is not None:
+                parent.add_command(member)
+                attached.append((parent, member))
+
+    def _detach_ext_members(self) -> None:
+        attached: list[tuple[Any, Any]] = getattr(self, "__cog_ext_attached__", [])
+        self.__cog_ext_attached__ = []
+        for parent, command in reversed(attached):
+            if not getattr(command, "commands", None):
+                parent.remove_command(command.name)
+            if command.cog is self:
+                command.cog = None
+        for member in type(self).__cog_ext_members__:
+            if member.cog is self:
+                member.cog = None
+
+    def _remove_commands(self, bot: Any) -> None:
+        for command in self.__cog_commands__:
+            if _is_bridge_command(command):
+                if command in bot.bridge_commands:
+                    bot.bridge_commands.remove(command)
+            elif isinstance(command, ApplicationCommand):
+                if not isinstance(command, discord.SlashCommandGroup):
+                    bot.remove_application_command(command)
+            elif command.parent is None:
+                bot.remove_command(command.name)
+
+    def _eject(self, bot: Any) -> None:
         cls = self.__class__
 
         try:
-            for command in self.__cog_commands__:
-                if _is_bridge_command(command):
-                    bot.bridge_commands.remove(command)
-                    continue
-                elif isinstance(command, ApplicationCommand):
-                    bot.remove_application_command(command)
-                elif command.parent is None:
-                    bot.remove_command(command.name)
+            self._remove_commands(bot)
+
+            self._detach_ext_members()
+            if bot._group_registry.detach(self):
+                bot._schedule_group_sync()
 
             for _, method_name in self.__cog_listeners__:
                 bot.remove_listener(getattr(self, method_name))
@@ -633,14 +784,24 @@ class Cog(metaclass=CogMeta):
             if cls.bot_check_once is not Cog.bot_check_once:
                 bot.remove_check(self.bot_check_once, call_once=True)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 self.cog_unload()
-            except Exception:
-                pass
 
 
 class CogMixin:
-    def __init__(self, *args, **kwargs):
+    """The part of the bots that loads cogs and extensions."""
+
+    if TYPE_CHECKING:
+        # Provided by the other bases of the bots, they depend on the bot class.
+        _help_command: Any
+        _supports_prefixed_commands: Any
+        prefixed_commands: Any
+        _application_commands: Any
+        _event_handlers: Any
+        remove_command: Any
+        remove_application_command: Any
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.__cogs: dict[str, Cog] = {}
         self.__extensions: dict[str, types.ModuleType] = {}
@@ -674,8 +835,7 @@ class CogMixin:
         ClientException
             A cog with the same name is already loaded.
         """
-
-        if not isinstance(cog, Cog):
+        if not _is_cog(cog):
             raise TypeError("cogs must derive from Cog")
 
         cog_name = cog.__cog_name__
@@ -726,10 +886,9 @@ class CogMixin:
         Optional[:class:`.Cog`]
              The cog that was removed. ``None`` if not found.
         """
-
         cog = self.__cogs.pop(name, None)
         if cog is None:
-            return
+            return None
 
         if hasattr(self, "_help_command"):
             help_command = self._help_command
@@ -758,13 +917,9 @@ class CogMixin:
         if self._supports_prefixed_commands:
             for cmd in self.prefixed_commands.copy().values():
                 if cmd.module is not None and _is_submodule(name, cmd.module):
-                    # if isinstance(cmd, GroupMixin):
-                    #     cmd.recursively_remove_all_commands()
                     self.remove_command(cmd.name)
         for cmd in self._application_commands.copy().values():
             if cmd.module is not None and _is_submodule(name, cmd.module):
-                # if isinstance(cmd, GroupMixin):
-                #     cmd.recursively_remove_all_commands()
                 self.remove_application_command(cmd)
 
         # remove all the listeners from the module
@@ -781,14 +936,10 @@ class CogMixin:
 
     def _call_module_finalizers(self, lib: types.ModuleType, key: str) -> None:
         try:
-            func = getattr(lib, "teardown")
-        except AttributeError:
-            pass
-        else:
-            try:
-                func(self)
-            except Exception:
-                pass
+            func = getattr(lib, "teardown", None)
+            if func is not None:
+                with contextlib.suppress(Exception):
+                    func(self)
         finally:
             self.__extensions.pop(key, None)
             sys.modules.pop(key, None)
@@ -800,20 +951,20 @@ class CogMixin:
     def _load_from_module_spec(
         self, spec: importlib.machinery.ModuleSpec, key: str
     ) -> None:
-        # precondition: key not in self.__extensions
+        # the key must not be loaded yet
         lib = importlib.util.module_from_spec(spec)
         sys.modules[key] = lib
         try:
-            spec.loader.exec_module(lib)  # type: ignore
+            cast("importlib.abc.Loader", spec.loader).exec_module(lib)
         except Exception as e:
             del sys.modules[key]
             raise errors.ExtensionFailed(key, e) from e
 
         try:
-            setup = getattr(lib, "setup")
+            setup = lib.setup
         except AttributeError:
             del sys.modules[key]
-            raise errors.NoEntryPointError(key)
+            raise errors.NoEntryPointError(key) from None
 
         try:
             setup(self)
@@ -828,8 +979,8 @@ class CogMixin:
     def _resolve_name(self, name: str, package: str | None) -> str:
         try:
             return importlib.util.resolve_name(name, package)
-        except ImportError:
-            raise errors.ExtensionNotFound(name)
+        except ImportError as exc:
+            raise errors.ExtensionNotFound(name) from exc
 
     @overload
     def load_extension(
@@ -851,7 +1002,12 @@ class CogMixin:
     ) -> dict[str, Exception | bool] | list[str] | None: ...
 
     def load_extension(
-        self, name, *, package=None, recursive=False, store=False
+        self,
+        name: str,
+        *,
+        package: str | None = None,
+        recursive: bool = False,
+        store: bool = False,
     ) -> dict[str, Exception | bool] | list[str] | None:
         """Loads an extension.
 
@@ -918,9 +1074,9 @@ class CogMixin:
         ExtensionFailed
             The extension or its setup function had an execution error.
         """
-
         name = self._resolve_name(name, package)
 
+        final_out: dict[str, Exception | bool] | list[str] | Exception
         if name in self.__extensions:
             exc = errors.ExtensionAlreadyLoaded(name)
             final_out = {name: exc} if store else exc
@@ -943,9 +1099,10 @@ class CogMixin:
         # This indicates we've been given a folder because the ModuleSpec exists but is not a file
         else:
             # Split the directory path and join it to get an os-native Path object
-            path = pathlib.Path(os.path.join(*name.split(".")))
+            path = pathlib.Path(*name.split("."))
             glob = path.rglob if recursive else path.glob
-            final_out = {} if store else []
+            found: dict[str, Exception | bool] = {}
+            found_names: list[str] = []
 
             # Glob all files with a pattern to gather all .py files that don't start with _
             for ext_file in glob("[!_]*.py"):
@@ -956,12 +1113,15 @@ class CogMixin:
                 loaded = self.load_extension(
                     ".".join(parts), package=package, recursive=recursive, store=store
                 )
-                final_out.update(loaded) if store else final_out.extend(loaded)
+                if store:
+                    found.update(cast("dict[str, Exception | bool]", loaded))
+                else:
+                    found_names.extend(cast("list[str]", loaded))
+            final_out = found if store else found_names
 
         if isinstance(final_out, Exception):
             raise final_out
-        else:
-            return final_out
+        return final_out
 
     @overload
     def load_extensions(
@@ -981,7 +1141,11 @@ class CogMixin:
     ) -> dict[str, Exception | bool] | list[str] | None: ...
 
     def load_extensions(
-        self, *names, package=None, recursive=False, store=False
+        self,
+        *names: str,
+        package: str | None = None,
+        recursive: bool = False,
+        store: bool = False,
     ) -> dict[str, Exception | bool] | list[str] | None:
         """Loads multiple extensions at once.
 
@@ -1041,20 +1205,19 @@ class CogMixin:
         ExtensionFailed
             A given extension or its setup function had an execution error.
         """
-
-        loaded_extensions = {} if store else []
+        loaded_dict: dict[str, Exception | bool] = {}
+        loaded_list: list[str] = []
 
         for ext_path in names:
             loaded = self.load_extension(
                 ext_path, package=package, recursive=recursive, store=store
             )
-            (
-                loaded_extensions.update(loaded)
-                if store
-                else loaded_extensions.extend(loaded)
-            )
+            if store:
+                loaded_dict.update(cast("dict[str, Exception | bool]", loaded))
+            else:
+                loaded_list.extend(cast("list[str]", loaded))
 
-        return loaded_extensions
+        return loaded_dict if store else loaded_list
 
     def unload_extension(self, name: str, *, package: str | None = None) -> None:
         """Unloads an extension.
@@ -1088,7 +1251,6 @@ class CogMixin:
         ExtensionNotLoaded
             The extension was not loaded.
         """
-
         name = self._resolve_name(name, package)
         lib = self.__extensions.get(name)
         if lib is None:
@@ -1131,7 +1293,6 @@ class CogMixin:
         ExtensionFailed
             The extension setup function had an execution error.
         """
-
         name = self._resolve_name(name, package)
         lib = self.__extensions.get(name)
         if lib is None:
@@ -1153,7 +1314,7 @@ class CogMixin:
             # if the load failed, the remnants should have been
             # cleaned from the load_extension function call
             # so let's load it from our old compiled library.
-            lib.setup(self)  # type: ignore
+            lib.setup(self)
             self.__extensions[name] = lib
 
             # revert sys.modules back to normal and raise back to caller

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import io
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 __all__ = (
@@ -36,8 +37,9 @@ __all__ = (
 
 
 class File:
-    r"""A parameter object used for :meth:`abc.Messageable.send`
-    for sending file objects.
+    r"""A parameter object used for sending file objects.
+
+    It is accepted by :meth:`abc.Messageable.send`.
 
     .. note::
 
@@ -45,7 +47,7 @@ class File:
         multiple :meth:`abc.Messageable.send`\s.
 
     Attributes
-    -----------
+    ----------
     fp: Union[:class:`os.PathLike`, :class:`io.BufferedIOBase`]
         A file-like object opened in binary mode and read mode
         or a filename representing a file in the hard drive to
@@ -69,13 +71,13 @@ class File:
     """
 
     __slots__ = (
-        "fp",
-        "filename",
-        "spoiler",
+        "_closer",
         "_original_pos",
         "_owner",
-        "_closer",
         "description",
+        "filename",
+        "fp",
+        "spoiler",
     )
 
     if TYPE_CHECKING:
@@ -86,13 +88,12 @@ class File:
 
     def __init__(
         self,
-        fp: str | bytes | os.PathLike | io.BufferedIOBase,
+        fp: str | bytes | os.PathLike[str] | os.PathLike[bytes] | io.BufferedIOBase,
         filename: str | None = None,
         *,
         description: str | None = None,
         spoiler: bool = False,
-    ):
-
+    ) -> None:
         if isinstance(fp, io.IOBase):
             if not (fp.seekable() and fp.readable()):
                 raise ValueError(f"File buffer {fp!r} must be seekable and readable")
@@ -100,7 +101,7 @@ class File:
             self._original_pos = fp.tell()
             self._owner = False
         else:
-            self.fp = open(fp, "rb")
+            self.fp = Path(os.fsdecode(fp)).open("rb")
             self._original_pos = 0
             self._owner = True
 
@@ -132,6 +133,14 @@ class File:
         self.description = description
 
     def reset(self, *, seek: int | bool = True) -> None:
+        """Rewind the file to the position it had when it was wrapped.
+
+        Parameters
+        ----------
+        seek
+            Whether to actually seek. Falsy on the first attempt of a request,
+            which avoids an unnecessary seek.
+        """
         # The `seek` parameter is needed because
         # the retry-loop is iterated over multiple times
         # starting from 0, as an implementation quirk
@@ -144,6 +153,7 @@ class File:
             self.fp.seek(self._original_pos)
 
     def close(self) -> None:
+        """Close the file if it was opened by this object."""
         self.fp.close = self._closer
         if self._owner:
             self._closer()
@@ -188,19 +198,20 @@ class VoiceMessage(File):
     """
 
     __slots__ = (
-        "waveform",
         "duration_secs",
+        "waveform",
     )
 
     def __init__(
         self,
-        fp: str | bytes | os.PathLike | io.BufferedIOBase,
+        fp: str | bytes | os.PathLike[str] | os.PathLike[bytes] | io.BufferedIOBase,
         filename: str | None = None,
         *,
         waveform: str = "",
         duration_secs: float = 0.0,
-        **kwargs,
-    ):
-        super().__init__(fp, filename, **kwargs)
+        description: str | None = None,
+        spoiler: bool = False,
+    ) -> None:
+        super().__init__(fp, filename, description=description, spoiler=spoiler)
         self.waveform = waveform
         self.duration_secs = duration_secs

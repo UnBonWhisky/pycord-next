@@ -404,6 +404,23 @@ of :class:`enum.Enum`.
 
         .. versionadded:: 1.5
 
+.. class:: StatusDisplayType
+
+    Specifies which field of an :class:`Activity` is displayed in the status
+    text of the user, for example in the member list.
+
+    .. versionadded:: 3.0
+
+    .. attribute:: name
+
+        The name of the activity, e.g. "Listening to Spotify".
+    .. attribute:: state
+
+        The state of the activity, e.g. "Listening to Rick Astley".
+    .. attribute:: details
+
+        The details of the activity, e.g. "Listening to Never Gonna Give You Up".
+
 .. class:: InteractionType
 
     Specifies the type of :class:`Interaction`.
@@ -468,6 +485,13 @@ of :class:`enum.Enum`.
         Responds to the interaction by sending a modal dialog.
 
         See also :meth:`InteractionResponse.send_modal`
+    .. attribute:: launch_activity
+
+        Responds to the interaction by launching the activity of the application.
+
+        See also :meth:`InteractionResponse.launch_activity`
+
+        .. versionadded:: 3.0
 
 .. class:: ComponentType
 
@@ -615,6 +639,13 @@ of :class:`enum.Enum`.
 
     Specifies the region a voice server belongs to.
 
+    .. deprecated:: 3.0
+
+        The list of voice regions is dynamic. Use :meth:`Guild.fetch_voice_regions` or
+        :meth:`Client.fetch_voice_regions` to retrieve the available regions as
+        :class:`VoiceServerRegion` objects and use their ``id``. Accessing the members emits a
+        :class:`DeprecationWarning`.
+
     .. attribute:: amsterdam
 
         The Amsterdam region.
@@ -657,6 +688,9 @@ of :class:`enum.Enum`.
     .. attribute:: london
 
         The London region.
+    .. attribute:: rotterdam
+
+        The Rotterdam region.
     .. attribute:: russia
 
         The Russia region.
@@ -1853,6 +1887,21 @@ of :class:`enum.Enum`.
 
         The job has failed.
 
+.. class:: EntryPointHandler
+
+    Represents who handles an invocation of an entry point command.
+
+    .. versionadded:: 3.0
+
+    .. attribute:: app_handler
+
+        The application handles the interaction and has to respond to it.
+
+    .. attribute:: discord_launch_activity
+
+        Discord launches the activity and posts a follow-up message without
+        sending the interaction to the application.
+
 .. class:: VideoQualityMode
 
     Represents the camera video quality mode for voice channel participants.
@@ -2230,11 +2279,14 @@ of :class:`enum.Enum`.
 
         Alias to :attr:`canceled`.
 
-.. class:: ScheduledEventLocationType
+.. class:: ScheduledEventEntityType
 
-    Represents a scheduled event location type (otherwise known as the entity type on the API).
+    Represents the entity type of a scheduled event, which tells where it happens.
 
     .. versionadded:: 2.0
+
+    .. versionchanged:: 3.0
+        Renamed from ``ScheduledEventLocationType``, which is kept as an alias.
 
     .. attribute:: stage_instance
 
@@ -2247,6 +2299,68 @@ of :class:`enum.Enum`.
     .. attribute:: external
 
         Represents a generic location as a :class:`str`.
+
+.. class:: ScheduledEventLocationType
+
+    An alias of :class:`ScheduledEventEntityType`.
+
+    .. versionadded:: 2.0
+
+.. class:: ScheduledEventRecurrenceFrequency
+
+    Represents how often a scheduled event recurs.
+
+    .. versionadded:: 3.0
+
+    .. attribute:: yearly
+
+        The event recurs every year.
+
+    .. attribute:: monthly
+
+        The event recurs every month.
+
+    .. attribute:: weekly
+
+        The event recurs every week.
+
+    .. attribute:: daily
+
+        The event recurs every day.
+
+.. class:: ScheduledEventWeekday
+
+    Represents a day of the week in a scheduled event recurrence rule.
+
+    .. versionadded:: 3.0
+
+    .. attribute:: monday
+
+        Monday.
+
+    .. attribute:: tuesday
+
+        Tuesday.
+
+    .. attribute:: wednesday
+
+        Wednesday.
+
+    .. attribute:: thursday
+
+        Thursday.
+
+    .. attribute:: friday
+
+        Friday.
+
+    .. attribute:: saturday
+
+        Saturday.
+
+    .. attribute:: sunday
+
+        Sunday.
 
 .. class:: ScheduledEventPrivacyLevel
 
@@ -2702,3 +2816,117 @@ of :class:`enum.Enum`.
     .. attribute:: read_only
 
         Represents the team read only role.
+
+
+.. class:: SharedClientThemeBaseType
+
+    The base theme mode of a :class:`SharedClientTheme`.
+
+    .. versionadded:: 3.0
+
+    .. attribute:: unset
+
+        No explicit base theme, equivalent to :attr:`dark`.
+
+    .. attribute:: dark
+
+        The dark base theme.
+
+    .. attribute:: light
+
+        The light base theme.
+
+    .. attribute:: darker
+
+        The darker base theme.
+
+    .. attribute:: midnight
+
+        The midnight base theme.
+
+.. class:: SearchEmbedType
+
+    The kind of embed a message search can filter on.
+
+    .. versionadded:: 3.0
+
+    .. attribute:: image
+
+        Messages that have an image embed.
+
+    .. attribute:: video
+
+        Messages that have a video embed.
+
+    .. attribute:: gif
+
+        Messages that have a gifv embed.
+
+    .. attribute:: sound
+
+        Messages that have a sound embed.
+
+    .. attribute:: article
+
+        Messages that have an article embed.
+
+.. class:: SearchSortMode
+
+    The sorting algorithm of a message search.
+
+    .. versionadded:: 3.0
+
+    .. attribute:: timestamp
+
+        Sort by the creation time of the message.
+
+    .. attribute:: relevance
+
+        Sort by the relevance of the message to the search query.
+
+.. class:: SearchSortOrder
+
+    The direction a message search is sorted in.
+
+    .. versionadded:: 3.0
+
+    .. attribute:: asc
+
+        Sort in ascending order.
+
+    .. attribute:: desc
+
+        Sort in descending order.
+
+.. class:: MessageReferenceType
+
+    Represents the type of a :class:`MessageReference`.
+
+    .. attribute:: default
+
+        A standard reference, used by replies and some system messages.
+
+    .. attribute:: forward
+
+        A reference to a message at a point in time, used by forwarded messages.
+
+.. class:: SpeakingState
+
+    Represents the speaking state of a user in a voice channel, as a flag value
+    (the states can be combined).
+
+    .. attribute:: none
+
+        The user is not speaking.
+
+    .. attribute:: voice
+
+        The user is transmitting voice.
+
+    .. attribute:: soundshare
+
+        The user is transmitting a soundshare.
+
+    .. attribute:: priority
+
+        The user is a priority speaker.

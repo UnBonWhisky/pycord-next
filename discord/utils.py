@@ -28,9 +28,10 @@ from __future__ import annotations
 import array
 import asyncio
 import collections.abc
-import datetime
+import contextlib
 import functools
 import importlib.resources
+import importlib.util
 import io
 import itertools
 import json
@@ -52,8 +53,8 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from inspect import isawaitable as _isawaitable
-from inspect import signature as _signature
+from datetime import datetime, time as dt_time, timezone
+from inspect import isawaitable as _isawaitable, signature as _signature
 from operator import attrgetter
 from typing import (
     TYPE_CHECKING,
@@ -64,6 +65,7 @@ from typing import (
     Protocol,
     TypeVar,
     Union,
+    cast,
     overload,
 )
 
@@ -88,12 +90,7 @@ if TYPE_CHECKING:
 
 from .errors import HTTPException, InvalidArgument, InvalidData
 
-try:
-    import msgspec
-except ModuleNotFoundError:
-    HAS_MSGSPEC = False
-else:
-    HAS_MSGSPEC = True
+HAS_MSGSPEC = importlib.util.find_spec("msgspec") is not None
 
 __all__ = (
     "MISSING",
@@ -128,25 +125,33 @@ _log = logging.getLogger(__name__)
 
 DISCORD_EPOCH = 1420070400000
 
-try:
-    with (
-        importlib.resources.files(__package__)
-        .joinpath("emojis.json")
-        .open(encoding="utf-8") as f
-    ):
-        EMOJIS_MAP = json.load(f)
-except FileNotFoundError:
-    _log.debug(
-        "Couldn't find emojis.json. Is the package data missing? Discord emojis names will not work.",
-    )
-    EMOJIS_MAP = {}
+
+def _load_emojis_map() -> dict[str, str]:
+    try:
+        with (
+            importlib.resources.files(__package__ or "discord")
+            .joinpath("emojis.json")
+            .open(encoding="utf-8") as f
+        ):
+            return cast("dict[str, str]", json.load(f))
+    except FileNotFoundError:
+        _log.debug(
+            "Couldn't find emojis.json. Is the package data missing? Discord emojis names will not work.",
+        )
+        return {}
+
+
+EMOJIS_MAP = _load_emojis_map()
 
 UNICODE_EMOJIS = set(EMOJIS_MAP.values())
 
 
 class _MissingSentinel:
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         return False
+
+    def __hash__(self) -> int:
+        return id(self)
 
     def __bool__(self) -> bool:
         return False
@@ -159,6 +164,8 @@ MISSING: Any = _MissingSentinel()
 
 if TYPE_CHECKING:
     from typing import ParamSpec
+
+    from typing_extensions import Self
 
     from .abc import Snowflake
     from .commands.context import AutocompleteContext
@@ -178,14 +185,14 @@ else:
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
-_Iter = Union[Iterator[T], AsyncIterator[T]]
+_Iter = Iterator[T] | AsyncIterator[T]
 
 
 class CachedSlotProperty(Generic[T, T_co]):
     def __init__(self, name: str, function: Callable[[T], T_co]) -> None:
         self.name = name
         self.function = function
-        self.__doc__ = getattr(function, "__doc__")
+        self.__doc__ = function.__doc__
 
     @overload
     def __get__(
@@ -216,13 +223,19 @@ def cached_slot_property(
     return decorator
 
 
-class SequenceProxy(Generic[T_co], collections.abc.Sequence):
+class SequenceProxy(collections.abc.Sequence[T_co]):
     """Read-only proxy of a Sequence."""
 
-    def __init__(self, proxied: Sequence[T_co]):
+    def __init__(self, proxied: Sequence[T_co]) -> None:
         self.__proxied = proxied
 
-    def __getitem__(self, idx: int) -> T_co:
+    @overload
+    def __getitem__(self, idx: int) -> T_co: ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> Sequence[T_co]: ...
+
+    def __getitem__(self, idx: int | slice) -> T_co | Sequence[T_co]:
         return self.__proxied[idx]
 
     def __len__(self) -> int:
@@ -237,22 +250,25 @@ class SequenceProxy(Generic[T_co], collections.abc.Sequence):
     def __reversed__(self) -> Iterator[T_co]:
         return reversed(self.__proxied)
 
-    def index(self, value: Any, *args, **kwargs) -> int:
+    def index(self, value: Any, *args: Any, **kwargs: Any) -> int:
         return self.__proxied.index(value, *args, **kwargs)
 
     def count(self, value: Any) -> int:
         return self.__proxied.count(value)
 
 
-def delay_task(delay: float, func: Coroutine):
-    async def inner_call():
-        await asyncio.sleep(delay)
-        try:
-            await func
-        except HTTPException:
-            pass
+_background_tasks: set[asyncio.Task[None]] = set()
 
-    asyncio.create_task(inner_call())
+
+def delay_task(delay: float, func: Coroutine[Any, Any, Any]) -> None:
+    async def inner_call() -> None:
+        await asyncio.sleep(delay)
+        with contextlib.suppress(HTTPException):
+            await func
+
+    task = asyncio.create_task(inner_call())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 @overload
@@ -260,14 +276,14 @@ def parse_time(timestamp: None) -> None: ...
 
 
 @overload
-def parse_time(timestamp: str) -> datetime.datetime: ...
+def parse_time(timestamp: str) -> datetime: ...
 
 
 @overload
-def parse_time(timestamp: str | None) -> datetime.datetime | None: ...
+def parse_time(timestamp: str | None) -> datetime | None: ...
 
 
-def parse_time(timestamp: str | None) -> datetime.datetime | None:
+def parse_time(timestamp: str | None) -> datetime | None:
     """A helper function to convert an ISO 8601 timestamp to a datetime object.
 
     Parameters
@@ -281,14 +297,15 @@ def parse_time(timestamp: str | None) -> datetime.datetime | None:
         The converted datetime object.
     """
     if timestamp:
-        return datetime.datetime.fromisoformat(timestamp)
+        return datetime.fromisoformat(timestamp)
     return None
 
 
-def copy_doc(original: Callable) -> Callable[[T], T]:
+def copy_doc(original: Callable[..., Any]) -> Callable[[T], T]:
     def decorator(overridden: T) -> T:
-        overridden.__doc__ = original.__doc__
-        overridden.__signature__ = _signature(original)  # type: ignore
+        target = cast("Any", overridden)
+        target.__doc__ = original.__doc__
+        target.__signature__ = _signature(original)
         return overridden
 
     return decorator
@@ -302,8 +319,7 @@ def warn_deprecated(
     reference: str | None = None,
     stacklevel: int = 3,
 ) -> None:
-    """Warn about a deprecated function, with the ability to specify details about the deprecation. Emits a
-    DeprecationWarning.
+    """Warn about a deprecated function, with the ability to specify details about the deprecation. Emits a DeprecationWarning.
 
     Parameters
     ----------
@@ -349,8 +365,7 @@ def deprecated(
     *,
     use_qualname: bool = True,
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
-    """A decorator implementation of :func:`warn_deprecated`. This will automatically call :func:`warn_deprecated` when
-    the decorated function is called.
+    """A decorator implementation of :func:`warn_deprecated`. This will automatically call :func:`warn_deprecated` when the decorated function is called.
 
     .. deprecated:: 2.8
         Deprecated in favor of :func:`warnings.deprecated`.
@@ -403,8 +418,7 @@ def oauth_url(
     scopes: Iterable[str] = MISSING,
     disable_guild_select: bool = False,
 ) -> str:
-    """A helper function that returns the OAuth2 URL for inviting the bot
-    into guilds.
+    """A helper function that returns the OAuth2 URL for inviting the bot into guilds.
 
     Parameters
     ----------
@@ -446,7 +460,7 @@ def oauth_url(
     return url
 
 
-def snowflake_time(id: int) -> datetime.datetime:
+def snowflake_time(id: int) -> datetime:
     """Converts a Discord snowflake ID to a UTC-aware datetime object.
 
     Parameters
@@ -460,10 +474,10 @@ def snowflake_time(id: int) -> datetime.datetime:
         An aware datetime in UTC representing the creation time of the snowflake.
     """
     timestamp = ((id >> 22) + DISCORD_EPOCH) / 1000
-    return datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
 
-def time_snowflake(dt: datetime.datetime, high: bool = False) -> int:
+def time_snowflake(dt: datetime, high: bool = False) -> int:
     """Returns a numeric snowflake pretending to be created at the given date.
 
     When using as the lower end of a range, use ``time_snowflake(high=False) - 1``
@@ -490,10 +504,9 @@ def time_snowflake(dt: datetime.datetime, high: bool = False) -> int:
 
 
 def find(predicate: Callable[[T], Any], seq: Iterable[T]) -> T | None:
-    """A helper to return the first element found in the sequence
-    that meets the predicate. For example: ::
+    """A helper to return the first element found in the sequence that meets the predicate. For example: ::
 
-        member = discord.utils.find(lambda m: m.name == 'Mighty', channel.guild.members)
+        member = discord.utils.find(lambda m: m.name == "Mighty", channel.guild.members)
 
     would find the first :class:`~discord.Member` whose name is 'Mighty' and return it.
     If an entry is not found, then ``None`` is returned.
@@ -508,7 +521,6 @@ def find(predicate: Callable[[T], Any], seq: Iterable[T]) -> T | None:
     seq: :class:`collections.abc.Iterable`
         The iterable to search through.
     """
-
     for element in seq:
         if predicate(element):
             return element
@@ -516,9 +528,7 @@ def find(predicate: Callable[[T], Any], seq: Iterable[T]) -> T | None:
 
 
 def get(iterable: Iterable[T], **attrs: Any) -> T | None:
-    r"""A helper that returns the first element in the iterable that meets
-    all the traits passed in ``attrs``. This is an alternative for
-    :func:`~discord.utils.find`.
+    r"""A helper that returns the first element in the iterable that meets all the traits passed in ``attrs``. This is an alternative for :func:`~discord.utils.find`.
 
     When multiple attributes are specified, they are checked using
     logical AND, not logical OR. Meaning they have to meet every
@@ -531,34 +541,34 @@ def get(iterable: Iterable[T], **attrs: Any) -> T | None:
     ``None`` is returned.
 
     Examples
-    ---------
-
+    --------
     Basic usage:
 
     .. code-block:: python3
 
-        member = discord.utils.get(message.guild.members, name='Foo')
+        member = discord.utils.get(message.guild.members, name="Foo")
 
     Multiple attribute matching:
 
     .. code-block:: python3
 
-        channel = discord.utils.get(guild.voice_channels, name='Foo', bitrate=64000)
+        channel = discord.utils.get(guild.voice_channels, name="Foo", bitrate=64000)
 
     Nested attribute matching:
 
     .. code-block:: python3
 
-        channel = discord.utils.get(client.get_all_channels(), guild__name='Cool', name='general')
+        channel = discord.utils.get(
+            client.get_all_channels(), guild__name="Cool", name="general"
+        )
 
     Parameters
-    -----------
+    ----------
     iterable
         An iterable to search through.
     \*\*attrs
         Keyword arguments that denote attributes to search with.
     """
-
     converted = [
         (attrgetter(attr.replace("__", ".")), value) for attr, value in attrs.items()
     ]
@@ -577,7 +587,7 @@ _FETCHABLE = TypeVar(
     bound="VoiceChannel | TextChannel | ForumChannel | StageChannel | CategoryChannel | Thread | Member | User | Guild | Role | GuildEmoji | AppEmoji",
 )
 _D = TypeVar("_D")
-_Getter = Callable[[Any, int], Any]
+_Getter = Callable[[Any, int], Awaitable[Any]]
 _Fetcher = Callable[[Any, int], Awaitable[Any]]
 
 
@@ -587,11 +597,11 @@ _Fetcher = Callable[[Any, int], Awaitable[Any]]
 async def get_or_fetch(
     obj: Guild | Client,
     object_type: type[_FETCHABLE],
-    object_id: Literal[None],
+    object_id: None,
     default: _D = ...,
     attr: str = ...,
     id: int = ...,
-) -> None | _D: ...
+) -> _D | None: ...
 
 
 @overload
@@ -677,7 +687,7 @@ async def get_or_fetch(
             removed="3.0",
         )
 
-        deprecated_attr = attr if attr is not MISSING else object_type
+        deprecated_attr: Any = attr if attr is not MISSING else object_type
         deprecated_id = id if id is not MISSING else object_id
 
         if isinstance(deprecated_attr, str):
@@ -701,13 +711,13 @@ async def get_or_fetch(
 
     if isinstance(obj, Guild) and object_type is User:
         raise InvalidArgument("Guild cannot get_or_fetch User. Use Client instead.")
-    elif isinstance(obj, Client) and object_type is Member:
+    if isinstance(obj, Client) and object_type is Member:
         raise InvalidArgument("Client cannot get_or_fetch Member. Use Guild instead.")
-    elif isinstance(obj, Client) and object_type is Role:
+    if isinstance(obj, Client) and object_type is Role:
         raise InvalidArgument("Client cannot get_or_fetch Role. Use Guild instead.")
-    elif isinstance(obj, Guild) and object_type is Guild:
+    if isinstance(obj, Guild) and object_type is Guild:
         raise InvalidArgument("Guild cannot get_or_fetch Guild. Use Client instead.")
-    elif isinstance(obj, Guild) and object_type is AppEmoji:
+    if isinstance(obj, Guild) and object_type is AppEmoji:
         raise InvalidArgument("Guild cannot get_or_fetch AppEmoji. Use Client instead.")
 
     try:
@@ -715,9 +725,9 @@ async def get_or_fetch(
     except KeyError:
         raise InvalidArgument(
             f"Class {object_type.__name__} cannot be used with discord.{type(obj).__name__}.get_or_fetch()"
-        )
+        ) from None
 
-    result = getter(obj, object_id)
+    result = await getter(obj, object_id)
     if result is not None:
         return result
 
@@ -799,11 +809,13 @@ def _all_subclasses(cls: type) -> set[type]:
     return subs
 
 
-def _unique(iterable: Iterable[T]) -> list[T]:
-    return [x for x in dict.fromkeys(iterable)]
+def _unique(  # pyright: ignore[reportUnusedFunction]
+    iterable: Iterable[T],
+) -> list[T]:
+    return list(dict.fromkeys(iterable))
 
 
-def _get_as_snowflake(data: Any, key: str) -> int | None:
+def _get_as_snowflake(data: Any, key: str) -> int | None:  # pyright: ignore[reportUnusedFunction]
     try:
         value = data[key]
     except KeyError:
@@ -812,100 +824,109 @@ def _get_as_snowflake(data: Any, key: str) -> int | None:
         return value and int(value)
 
 
-def _get_mime_type_for_file(data: bytes):
+def _get_mime_type_for_file(data: bytes) -> str:
     if data.startswith(b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a"):
         return "image/png"
-    elif data[0:3] == b"\xff\xd8\xff" or data[6:10] in (b"JFIF", b"Exif"):
+    if data[0:3] == b"\xff\xd8\xff" or data[6:10] in (b"JFIF", b"Exif"):
         return "image/jpeg"
-    elif data.startswith((b"\x47\x49\x46\x38\x37\x61", b"\x47\x49\x46\x38\x39\x61")):
+    if data.startswith((b"\x47\x49\x46\x38\x37\x61", b"\x47\x49\x46\x38\x39\x61")):
         return "image/gif"
-    elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "image/webp"
-    elif data.startswith(b"\x49\x44\x33") or data.startswith(b"\xff\xfb"):
+    if data.startswith((b"ID3", b"\xff\xfb")):
         return "audio/mpeg"
-    else:
-        raise InvalidArgument("Unsupported file type given")
+    raise InvalidArgument("Unsupported file type given")
 
 
-def _bytes_to_base64_data(data: bytes) -> str:
+def _bytes_to_base64_data(  # pyright: ignore[reportUnusedFunction]
+    data: bytes,
+) -> str:
     fmt = "data:{mime};base64,{data}"
     mime = _get_mime_type_for_file(data)
     b64 = b64encode(data).decode("ascii")
     return fmt.format(mime=mime, data=b64)
 
 
-if HAS_MSGSPEC:
+_from_json: Callable[..., Any]
 
-    def _to_json(obj: Any) -> str:  # type: ignore
+if HAS_MSGSPEC:
+    import msgspec
+
+    def _to_json(  # pyright: ignore[reportUnusedFunction]
+        obj: Any,
+    ) -> str:
         return msgspec.json.encode(obj).decode("utf-8")
 
-    _from_json = msgspec.json.decode  # type: ignore
+    _from_json = msgspec.json.decode
 
 else:
 
-    def _to_json(obj: Any) -> str:
+    def _to_json(  # pyright: ignore[reportUnusedFunction]
+        obj: Any,
+    ) -> str:
         return json.dumps(obj, separators=(",", ":"), ensure_ascii=True)
 
     _from_json = json.loads
 
 
-def _parse_ratelimit_header(request: Any, *, use_clock: bool = False) -> float:
+def _parse_ratelimit_header(request: _RequestLike, *, use_clock: bool = False) -> float:  # pyright: ignore[reportUnusedFunction]
     reset_after: str | None = request.headers.get("X-Ratelimit-Reset-After")
     if not use_clock and reset_after:
         return float(reset_after)
-    utc = datetime.timezone.utc
-    now = datetime.datetime.now(utc)
-    reset = datetime.datetime.fromtimestamp(
-        float(request.headers["X-Ratelimit-Reset"]), utc
-    )
+    utc = timezone.utc
+    now = datetime.now(utc)
+    reset = datetime.fromtimestamp(float(request.headers["X-Ratelimit-Reset"]), utc)
     return (reset - now).total_seconds()
 
 
-async def maybe_coroutine(f, *args, **kwargs):
+async def maybe_coroutine(
+    f: Callable[P, T | Awaitable[T]], *args: P.args, **kwargs: P.kwargs
+) -> T:
     value = f(*args, **kwargs)
     if _isawaitable(value):
-        return await value
-    else:
-        return value
+        return await cast("Awaitable[T]", value)
+    return cast("T", value)
 
 
-async def async_all(gen, *, check=_isawaitable):
+async def async_all(
+    gen: Iterable[Any], *, check: Callable[[Any], bool] = _isawaitable
+) -> bool:
     for elem in gen:
-        if check(elem):
-            elem = await elem
-        if not elem:
+        result = await elem if check(elem) else elem
+        if not result:
             return False
     return True
 
 
-async def sane_wait_for(futures, *, timeout):
+async def sane_wait_for(
+    futures: Iterable[Awaitable[Any]], *, timeout: float | None
+) -> set[asyncio.Task[Any]]:
     ensured = [asyncio.ensure_future(fut) for fut in futures]
     done, pending = await asyncio.wait(
         ensured, timeout=timeout, return_when=asyncio.ALL_COMPLETED
     )
 
     if len(pending) != 0:
-        raise asyncio.TimeoutError()
+        raise asyncio.TimeoutError
 
     return done
 
 
 def get_slots(cls: type[Any]) -> Iterator[str]:
     for mro in reversed(cls.__mro__):
-        try:
-            yield from mro.__slots__
-        except AttributeError:
-            continue
+        slots = getattr(mro, "__slots__", MISSING)
+        if slots is not MISSING:
+            yield from cast("Iterable[str]", slots)
 
 
-def compute_timedelta(dt: datetime.datetime):
+def compute_timedelta(dt: datetime) -> float:
     if dt.tzinfo is None:
         dt = dt.astimezone()
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.now(timezone.utc)
     return max((dt - now).total_seconds(), 0)
 
 
-async def sleep_until(when: datetime.datetime, result: T | None = None) -> T | None:
+async def sleep_until(when: datetime, result: T | None = None) -> T | None:
     """|coro|
 
     Sleep until a specified time.
@@ -926,7 +947,7 @@ async def sleep_until(when: datetime.datetime, result: T | None = None) -> T | N
     return await asyncio.sleep(delta, result)
 
 
-def utcnow() -> datetime.datetime:
+def utcnow() -> datetime:
     """A helper function to return an aware UTC datetime representing the current time.
 
     This should be preferred to :meth:`datetime.datetime.utcnow` since it is an aware
@@ -939,7 +960,7 @@ def utcnow() -> datetime.datetime:
     :class:`datetime.datetime`
         The current aware datetime in UTC.
     """
-    return datetime.datetime.now(datetime.timezone.utc)
+    return datetime.now(timezone.utc)
 
 
 def valid_icon_size(size: int) -> bool:
@@ -947,7 +968,13 @@ def valid_icon_size(size: int) -> bool:
     return not size & (size - 1) and 4096 >= size >= 16
 
 
-class SnowflakeList(array.array):
+if TYPE_CHECKING:
+    _SnowflakeArray = array.array[int]
+else:
+    _SnowflakeArray = array.array
+
+
+class SnowflakeList(_SnowflakeArray):
     """Internal data storage class to efficiently store a list of snowflakes.
 
     This should have the following characteristics:
@@ -963,10 +990,12 @@ class SnowflakeList(array.array):
 
     if TYPE_CHECKING:
 
-        def __init__(self, data: Iterable[int], *, is_sorted: bool = False): ...
+        def __init__(self, data: Iterable[int], *, is_sorted: bool = False) -> None: ...
 
-    def __new__(cls, data: Iterable[int], *, is_sorted: bool = False):
-        return array.array.__new__(cls, "Q", data if is_sorted else sorted(data))  # type: ignore
+    def __new__(cls, data: Iterable[int], *, is_sorted: bool = False) -> Self:
+        return cast(
+            "Self", super().__new__(cls, "Q", data if is_sorted else sorted(data))
+        )
 
     def add(self, element: int) -> None:
         i = bisect_left(self, element)
@@ -984,15 +1013,15 @@ class SnowflakeList(array.array):
 _IS_ASCII = re.compile(r"^[\x00-\x7f]+$")
 
 
-def _string_width(string: str, *, _IS_ASCII=_IS_ASCII) -> int:
+def _string_width(string: str, *, is_ascii: re.Pattern[str] = _IS_ASCII) -> int:  # pyright: ignore[reportUnusedFunction]
     """Returns string's width."""
-    match = _IS_ASCII.match(string)
+    match = is_ascii.match(string)
     if match:
         return match.endpos
 
-    UNICODE_WIDE_CHAR_TYPE = "WFA"
+    wide_char_types = "WFA"
     func = unicodedata.east_asian_width
-    return sum(2 if func(char) in UNICODE_WIDE_CHAR_TYPE else 1 for char in string)
+    return sum(2 if func(char) in wide_char_types else 1 for char in string)
 
 
 def resolve_invite(invite: Invite | str) -> str:
@@ -1048,7 +1077,7 @@ def resolve_template(code: Template | str) -> str:
 
 
 _MARKDOWN_ESCAPE_SUBREGEX = "|".join(
-    r"\{0}(?=([\s\S]*((?<!\{0})\{0})))".format(c) for c in ("*", "`", "_", "~", "|")
+    rf"\{c}(?=([\s\S]*((?<!\{c})\{c})))" for c in ("*", "`", "_", "~", "|")
 )
 
 # regular expression for finding and escaping links in markdown
@@ -1068,7 +1097,7 @@ _MARKDOWN_ESCAPE_COMMON = rf"^>(?:>>)?\s|{_MARKDOWN_ESCAPE_LINKS}"
 
 _MARKDOWN_ESCAPE_REGEX = re.compile(
     rf"(?P<markdown>{_MARKDOWN_ESCAPE_SUBREGEX}|{_MARKDOWN_ESCAPE_COMMON})",
-    re.MULTILINE | re.X,
+    re.MULTILINE | re.VERBOSE,
 )
 
 _URL_REGEX = r"(?P<url><[^: >]+:\/[^ >]+>|(?:https?|steam):\/\/[^\s<]+[^<.,:;\"\'\]\s])"
@@ -1100,7 +1129,7 @@ def remove_markdown(text: str, *, ignore_links: bool = True) -> str:
         The text with the markdown special characters removed.
     """
 
-    def replacement(match):
+    def replacement(match: re.Match[str]) -> str:
         groupdict = match.groupdict()
         return groupdict.get("url", "")
 
@@ -1116,7 +1145,7 @@ def escape_markdown(
     r"""A helper function that escapes Discord's markdown.
 
     Parameters
-    -----------
+    ----------
     text: :class:`str`
         The text to escape markdown from.
     as_needed: :class:`bool`
@@ -1132,14 +1161,13 @@ def escape_markdown(
         Defaults to ``True``.
 
     Returns
-    --------
+    -------
     :class:`str`
         The text with the markdown special characters escaped with a slash.
     """
-
     if not as_needed:
 
-        def replacement(match):
+        def replacement(match: re.Match[str]) -> str:
             groupdict = match.groupdict()
             is_url = groupdict.get("url")
             if is_url:
@@ -1149,10 +1177,11 @@ def escape_markdown(
         regex = _MARKDOWN_STOCK_REGEX
         if ignore_links:
             regex = f"(?:{_URL_REGEX}|{regex})"
-        return re.sub(regex, replacement, text, count=0, flags=re.MULTILINE | re.X)
-    else:
-        text = re.sub(r"\\", r"\\\\", text)
-        return _MARKDOWN_ESCAPE_REGEX.sub(r"\\\1", text)
+        return re.sub(
+            regex, replacement, text, count=0, flags=re.MULTILINE | re.VERBOSE
+        )
+    text = re.sub(r"\\", r"\\\\", text)
+    return _MARKDOWN_ESCAPE_REGEX.sub(r"\\\1", text)
 
 
 def escape_mentions(text: str) -> str:
@@ -1242,10 +1271,13 @@ def _chunk(iterator: Iterator[T], max_size: int) -> Iterator[list[T]]:
 
 
 async def _atake(it: AsyncIterator[T], n: int) -> AsyncIterator[T]:
-    for _ in range(n):
-        try:
-            yield await it.__anext__()
-        except StopAsyncIteration:
+    if n <= 0:
+        return
+    taken = 0
+    async for item in it:
+        yield item
+        taken += 1
+        if taken == n:
             return
 
 
@@ -1294,7 +1326,7 @@ def as_chunks(iterator: _Iter[T], max_size: int) -> _Iter[list[T]]:
 
 def normalise_optional_params(parameters: Iterable[Any]) -> tuple[Any, ...]:
     none_cls = type(None)
-    return tuple(p for p in parameters if p is not none_cls) + (none_cls,)
+    return (*tuple(p for p in parameters if p is not none_cls), none_cls)
 
 
 def evaluate_annotation(
@@ -1304,7 +1336,7 @@ def evaluate_annotation(
     cache: dict[str, Any],
     *,
     implicit_str: bool = True,
-):
+) -> Any:
     if isinstance(tp, ForwardRef):
         tp = tp.__forward_arg__
         # ForwardRefs always evaluate their internals
@@ -1322,8 +1354,9 @@ def evaluate_annotation(
         is_literal = False
         args = tp.__args__
         if not hasattr(tp, "__origin__"):
-            if tp.__class__ is types.UnionType:  # type: ignore
-                converted = Union[args]  # type: ignore
+            if tp.__class__ is types.UnionType:
+                union: Any = Union
+                converted = union[args]
                 return evaluate_annotation(converted, globals, locals, cache)
 
             return tp
@@ -1380,9 +1413,7 @@ def resolve_annotation(
 TimestampStyle = Literal["f", "F", "d", "D", "t", "T", "R"]
 
 
-def format_dt(
-    dt: datetime.datetime | datetime.time, /, style: TimestampStyle | None = None
-) -> str:
+def format_dt(dt: datetime | dt_time, /, style: TimestampStyle | None = None) -> str:
     """A helper function to format a :class:`datetime.datetime` for presentation within Discord.
 
     This allows for a locale-independent way of presenting data using Discord specific Markdown.
@@ -1422,16 +1453,15 @@ def format_dt(
     :class:`str`
         The formatted string.
     """
-    if isinstance(dt, datetime.time):
-        dt = datetime.datetime.combine(datetime.datetime.now(), dt)
+    if isinstance(dt, dt_time):
+        dt = datetime.combine(datetime.now().astimezone().date(), dt)
     if style is None:
         return f"<t:{int(dt.timestamp())}>"
     return f"<t:{int(dt.timestamp())}:{style}>"
 
 
-def generate_snowflake(dt: datetime.datetime | None = None) -> int:
-    """Returns a numeric snowflake pretending to be created at the given date but more accurate and random
-    than :func:`time_snowflake`. If dt is not passed, it makes one from the current time using utcnow.
+def generate_snowflake(dt: datetime | None = None) -> int:
+    """Returns a numeric snowflake pretending to be created at the given date but more accurate and random than :func:`time_snowflake`. If dt is not passed, it makes one from the current time using utcnow.
 
     Parameters
     ----------
@@ -1444,24 +1474,21 @@ def generate_snowflake(dt: datetime.datetime | None = None) -> int:
     :class:`int`
         The snowflake representing the time given.
     """
-
     dt = dt or utcnow()
     return int(dt.timestamp() * 1000 - DISCORD_EPOCH) << 22 | 0x3FFFFF
 
 
-V = Union[Iterable[OptionChoice], Iterable[str], Iterable[int], Iterable[float]]
+V = Iterable[OptionChoice] | Iterable[str] | Iterable[int] | Iterable[float]
 AV = Awaitable[V]
-Values = Union[V, Callable[[AutocompleteContext], Union[V, AV]], AV]
+Values = V | Callable[[AutocompleteContext], V | AV] | AV
 AutocompleteFunc = Callable[[AutocompleteContext], AV]
-FilterFunc = Callable[[AutocompleteContext, Any], Union[bool, Awaitable[bool]]]
+FilterFunc = Callable[[AutocompleteContext, Any], bool | Awaitable[bool]]
 
 
 def basic_autocomplete(
     values: Values, *, filter: FilterFunc | None = None
 ) -> AutocompleteFunc:
-    """A helper function to make a basic autocomplete for slash commands. This is a pretty standard autocomplete and
-    will return any options that start with the value from the user, case-insensitive. If the ``values`` parameter is
-    callable, it will be called with the AutocompleteContext.
+    """A helper function to make a basic autocomplete for slash commands. This is a pretty standard autocomplete and will return any options that start with the value from the user, case-insensitive. If the ``values`` parameter is callable, it will be called with the AutocompleteContext.
 
     This is meant to be passed into the :attr:`discord.Option.autocomplete` attribute.
 
@@ -1483,7 +1510,6 @@ def basic_autocomplete(
 
     Examples
     --------
-
     Basic usage:
 
     .. code-block:: python3
@@ -1492,8 +1518,10 @@ def basic_autocomplete(
 
         # or
 
+
         async def autocomplete(ctx):
             return "foo", "bar", "baz", ctx.interaction.user.name
+
 
         Option(str, "name", autocomplete=basic_autocomplete(autocomplete))
 
@@ -1501,7 +1529,13 @@ def basic_autocomplete(
 
     .. code-block:: python3
 
-        Option(str, "color", autocomplete=basic_autocomplete(("red", "green", "blue"), filter=lambda c, i: str(c.value or "") in i))
+        Option(
+            str,
+            "color",
+            autocomplete=basic_autocomplete(
+                ("red", "green", "blue"), filter=lambda c, i: str(c.value or "") in i
+            ),
+        )
 
     .. versionadded:: 2.0
 
@@ -1511,12 +1545,13 @@ def basic_autocomplete(
     """
 
     async def autocomplete_callback(ctx: AutocompleteContext) -> V:
-        _values = values  # since we reassign later, python considers it local if we don't do this
+        resolved: Any = values
 
-        if callable(_values):
-            _values = _values(ctx)
-        if asyncio.iscoroutine(_values):
-            _values = await _values
+        if callable(resolved):
+            resolved = resolved(ctx)
+        if asyncio.iscoroutine(resolved):
+            resolved = await resolved
+        items = cast("Iterable[Any]", resolved)
 
         if filter is None:
 
@@ -1524,23 +1559,30 @@ def basic_autocomplete(
                 item = getattr(item, "name", item)
                 return str(item).lower().startswith(str(ctx.value or "").lower())
 
-            gen = (val for val in _values if _filter(ctx, val))
+            return iter(
+                itertools.islice((val for val in items if _filter(ctx, val)), 25)
+            )
 
-        elif asyncio.iscoroutinefunction(filter):
-            gen = (val for val in _values if await filter(ctx, val))
+        if asyncio.iscoroutinefunction(filter):
+            chosen: list[Any] = []
+            for val in items:
+                if len(chosen) == 25:
+                    break
+                if await cast("Awaitable[bool]", filter(ctx, val)):
+                    chosen.append(val)
+            return iter(chosen)
 
-        elif callable(filter):
-            gen = (val for val in _values if filter(ctx, val))
+        if callable(filter):
+            return iter(
+                itertools.islice((val for val in items if filter(ctx, val)), 25)
+            )
 
-        else:
-            raise TypeError("``filter`` must be callable.")
-
-        return iter(itertools.islice(gen, 25))
+        raise TypeError("``filter`` must be callable.")
 
     return autocomplete_callback
 
 
-def filter_params(params, **kwargs):
+def filter_params(params: dict[str, Any], **kwargs: str | None) -> dict[str, Any]:
     """A helper function to filter out and replace certain keyword parameters
 
     Parameters
@@ -1572,8 +1614,7 @@ def filter_params(params, **kwargs):
 
 
 def users_to_csv(users: Iterable[Snowflake]) -> io.BytesIO:
-    """Converts an iterable of users to a CSV file-like object for usage in
-    :meth:`~discord.abc.GuildChannel.create_invite` and :meth:`~discord.Invite.edit_target_users`.
+    """Converts an iterable of users to a CSV file-like object for usage in :meth:`~discord.abc.GuildChannel.create_invite` and :meth:`~discord.Invite.edit_target_users`.
 
     Parameters
     ----------
@@ -1585,7 +1626,7 @@ def users_to_csv(users: Iterable[Snowflake]) -> io.BytesIO:
     :class:`io.BytesIO`
         A file-like object containing the CSV data.
     """
-    return io.BytesIO("\n".join(map(lambda u: str(u.id), users)).encode("utf-8"))
+    return io.BytesIO("\n".join(str(u.id) for u in users).encode("utf-8"))
 
 
 voice_dependency_warning_emitted = False
@@ -1594,13 +1635,13 @@ voice_dependency_warning_emitted = False
 def get_missing_voice_dependencies() -> tuple[str, ...]:
     missing: list[str] = []
     try:
-        import nacl.secret
-        import nacl.utils
+        importlib.import_module("nacl.secret")
+        importlib.import_module("nacl.utils")
     except ImportError:
         missing.append("PyNaCl")
 
     try:
-        import davey
+        importlib.import_module("davey")
     except ImportError:
         missing.append("davey")
     return tuple(missing)
@@ -1624,7 +1665,7 @@ def warn_if_voice_dependencies_missing() -> None:
     )
 
 
-def _get_event_loop() -> asyncio.AbstractEventLoop:
+def _get_event_loop() -> asyncio.AbstractEventLoop:  # pyright: ignore[reportUnusedFunction]
     """Get the current event loop, creating one if necessary.
 
     If no event loop is running and none is set, a new event loop

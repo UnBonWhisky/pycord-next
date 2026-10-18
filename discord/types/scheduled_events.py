@@ -26,36 +26,61 @@ from __future__ import annotations
 
 from typing import Literal, TypedDict
 
+from typing_extensions import NotRequired
+
 from .member import Member
 from .snowflake import Snowflake
 from .user import User
 
 ScheduledEventStatus = Literal[1, 2, 3, 4]
-ScheduledEventLocationType = Literal[1, 2, 3]
+ScheduledEventEntityType = Literal[1, 2, 3]
+ScheduledEventLocationType = ScheduledEventEntityType
 ScheduledEventPrivacyLevel = Literal[2]
+ScheduledEventRecurrenceFrequency = Literal[0, 1, 2, 3]
+ScheduledEventWeekday = Literal[0, 1, 2, 3, 4, 5, 6]
+ScheduledEventMonth = Literal[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+
+class ScheduledEventNWeekdayRecurrence(TypedDict):
+    n: int
+    day: ScheduledEventWeekday
+
+
+class ScheduledEventRecurrenceRule(TypedDict):
+    start: str
+    end: NotRequired[str | None]
+    frequency: ScheduledEventRecurrenceFrequency
+    interval: int
+    by_weekday: NotRequired[list[ScheduledEventWeekday] | None]
+    by_n_weekday: NotRequired[list[ScheduledEventNWeekdayRecurrence] | None]
+    by_month: NotRequired[list[ScheduledEventMonth] | None]
+    by_month_day: NotRequired[list[int] | None]
+    by_year_day: NotRequired[list[int] | None]
+    count: NotRequired[int | None]
 
 
 class ScheduledEvent(TypedDict):
     id: Snowflake
     guild_id: Snowflake
-    channel_id: Snowflake
-    creator_id: Snowflake
+    channel_id: Snowflake | None
+    creator_id: NotRequired[Snowflake | None]
     name: str
-    description: str
-    image: str | None
+    description: NotRequired[str | None]
+    image: NotRequired[str | None]
     scheduled_start_time: str
     scheduled_end_time: str | None
     privacy_level: ScheduledEventPrivacyLevel
     status: ScheduledEventStatus
-    entity_type: ScheduledEventLocationType
-    entity_id: Snowflake
-    entity_metadata: ScheduledEventEntityMetadata
-    creator: User
-    user_count: int | None
+    entity_type: ScheduledEventEntityType
+    entity_id: Snowflake | None
+    entity_metadata: ScheduledEventEntityMetadata | None
+    creator: NotRequired[User]
+    user_count: NotRequired[int]
+    recurrence_rule: NotRequired[ScheduledEventRecurrenceRule | None]
 
 
 class ScheduledEventEntityMetadata(TypedDict):
-    location: str
+    location: NotRequired[str]
 
 
 class ScheduledEventSubscriber(TypedDict):

@@ -22,6 +22,8 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
+from __future__ import annotations
+
 import logging
 
 import pytest
@@ -64,3 +66,46 @@ def test_voice_modules_imports_without_voice_dependencies():
 
     with pytest.raises(discord.MissingVoiceDependenciesError):
         __import__("discord.voice.receive.reader")
+
+
+@pytest.mark.parametrize("missing", ["davey", "nacl"])
+def test_voice_stays_gated_and_sinks_importable_when_a_dependency_is_blocked(missing):
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent(
+        f"""
+        import sys
+        sys.modules[{missing!r}] = None
+
+        import discord
+        import discord.opus
+        import discord.sinks
+
+        assert discord.sinks.Sink().is_opus() is False
+        assert discord.sinks.WaveSink().recording is False
+
+        for name in (
+            "discord.voice",
+            "discord.voice.gateway",
+            "discord.voice.receive.reader",
+        ):
+            try:
+                __import__(name)
+            except discord.MissingVoiceDependenciesError:
+                pass
+            else:
+                raise SystemExit(name + " imported without " + {missing!r})
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout

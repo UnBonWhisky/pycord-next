@@ -25,7 +25,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from .snowflake import Snowflake, SnowflakeList
 from .user import User
@@ -34,15 +34,22 @@ from .user import User
 class PartialEmoji(TypedDict):
     id: Snowflake | None
     name: str | None
+    animated: NotRequired[bool]
 
 
-class Emoji(PartialEmoji, total=False):
-    roles: SnowflakeList
-    user: User
-    require_colons: bool
-    managed: bool
-    animated: bool
-    available: bool
+class Emoji(TypedDict):
+    id: Snowflake
+    name: str
+    roles: NotRequired[SnowflakeList]
+    user: NotRequired[User]
+    require_colons: NotRequired[bool]
+    managed: NotRequired[bool]
+    animated: NotRequired[bool]
+    available: NotRequired[bool]
+
+
+class ApplicationEmojis(TypedDict):
+    items: list[Emoji]
 
 
 class EditEmoji(TypedDict):

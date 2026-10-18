@@ -17,8 +17,13 @@ Exception Hierarchy
                 - :exc:`ConnectionClosed`
                 - :exc:`PrivilegedIntentsRequired`
                 - :exc:`InteractionResponded`
+                - :exc:`SyncCacheAccessError`
             - :exc:`NoMoreItems`
+            - :exc:`SearchIndexNotReady`
             - :exc:`GatewayNotFound`
+            - :exc:`GatewayRateLimited`
+            - :exc:`RateLimited`
+            - :exc:`ValidationError`
             - :exc:`HTTPException`
                 - :exc:`Forbidden`
                 - :exc:`NotFound`
@@ -69,7 +74,19 @@ The following exceptions are thrown by the library.
 
 .. autoexception:: InvalidArgument
 
+.. autoexception:: SearchIndexNotReady
+
 .. autoexception:: GatewayNotFound
+
+.. autoexception:: GatewayRateLimited
+    :members:
+
+.. autoexception:: RateLimited
+    :members:
+
+.. autoexception:: SyncCacheAccessError
+
+.. autoexception:: ValidationError
 
 .. autoexception:: ConnectionClosed
 

@@ -25,22 +25,25 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .enums import EntitlementType, SKUType, SubscriptionStatus, try_enum
 from .flags import SKUFlags
 from .iterators import SubscriptionIterator
 from .mixins import Hashable
-from .utils import MISSING, _get_as_snowflake, parse_time
+from .utils import MISSING, _get_as_snowflake, _MissingSentinel, parse_time
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from .abc import Snowflake, SnowflakeTime
     from .state import ConnectionState
-    from .types.monetization import SKU as SKUPayload
-    from .types.monetization import Entitlement as EntitlementPayload
-    from .types.monetization import Subscription as SubscriptionPayload
+    from .types import monetization as monetization_payloads
+    from .types.monetization import (
+        Entitlement as EntitlementPayload,
+        Subscription as SubscriptionPayload,
+    )
+    from .user import User
 
 
 __all__ = (
@@ -73,15 +76,17 @@ class SKU(Hashable):
 
     __slots__ = (
         "_state",
-        "id",
-        "type",
         "application_id",
+        "flags",
+        "id",
         "name",
         "slug",
-        "flags",
+        "type",
     )
 
-    def __init__(self, *, state: ConnectionState, data: SKUPayload) -> None:
+    def __init__(
+        self, *, state: ConnectionState, data: monetization_payloads.SKU
+    ) -> None:
         self._state: ConnectionState = state
         self.id: int = int(data["id"])
         self.type: SKUType = try_enum(SKUType, data["type"])
@@ -101,6 +106,9 @@ class SKU(Hashable):
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, self.__class__) and other.id == self.id
+
+    def __hash__(self) -> int:
+        return super().__hash__()
 
     @property
     def url(self) -> str:
@@ -146,15 +154,18 @@ class SKU(Hashable):
 
         Examples
         --------
-
         Usage ::
 
-            async for subscription in sku.fetch_subscriptions(discord.Object(id=123456789)):
+            async for subscription in sku.fetch_subscriptions(
+                discord.Object(id=123456789)
+            ):
                 print(subscription.status)
 
         Flattening into a list ::
 
-            subscriptions = await sku.fetch_subscriptions(discord.Object(id=123456789)).flatten()
+            subscriptions = await sku.fetch_subscriptions(
+                discord.Object(id=123456789)
+            ).flatten()
             # subscriptions is now a list of Subscription...
 
         All parameters except for ``user`` are optional.
@@ -209,16 +220,16 @@ class Entitlement(Hashable):
 
     __slots__ = (
         "_state",
-        "id",
-        "sku_id",
         "application_id",
-        "user_id",
-        "type",
+        "consumed",
         "deleted",
-        "starts_at",
         "ends_at",
         "guild_id",
-        "consumed",
+        "id",
+        "sku_id",
+        "starts_at",
+        "type",
+        "user_id",
     )
 
     def __init__(self, *, data: EntitlementPayload, state: ConnectionState) -> None:
@@ -226,16 +237,20 @@ class Entitlement(Hashable):
         self.id: int = int(data["id"])
         self.sku_id: int = int(data["sku_id"])
         self.application_id: int = int(data["application_id"])
-        self.user_id: int | MISSING = _get_as_snowflake(data, "user_id") or MISSING
+        self.user_id: int | _MissingSentinel = (
+            _get_as_snowflake(data, "user_id") or MISSING
+        )
         self.type: EntitlementType = try_enum(EntitlementType, data["type"])
         self.deleted: bool = data["deleted"]
-        self.starts_at: datetime | MISSING = (
+        self.starts_at: datetime | _MissingSentinel = (
             parse_time(data.get("starts_at")) or MISSING
         )
-        self.ends_at: datetime | MISSING | None = (
+        self.ends_at: datetime | _MissingSentinel | None = (
             parse_time(ea) if (ea := data.get("ends_at")) is not None else MISSING
         )
-        self.guild_id: int | MISSING = _get_as_snowflake(data, "guild_id") or MISSING
+        self.guild_id: int | _MissingSentinel = (
+            _get_as_snowflake(data, "guild_id") or MISSING
+        )
         self.consumed: bool = data.get("consumed", False)
 
     def __repr__(self) -> str:
@@ -247,6 +262,9 @@ class Entitlement(Hashable):
 
     def __eq__(self, other: object) -> bool:
         return isinstance(other, self.__class__) and other.id == self.id
+
+    def __hash__(self) -> int:
+        return super().__hash__()
 
     async def consume(self) -> None:
         """|coro|
@@ -260,7 +278,9 @@ class Entitlement(Hashable):
         HTTPException
             Consuming the entitlement failed.
         """
-        await self._state.http.consume_entitlement(self._state.application_id, self.id)
+        await self._state.http.consume_entitlement(
+            cast("int", self._state.application_id), self.id
+        )
         self.consumed = True
 
     async def delete(self) -> None:
@@ -309,16 +329,16 @@ class Subscription(Hashable):
 
     __slots__ = (
         "_state",
-        "id",
-        "user_id",
-        "sku_ids",
-        "entitlement_ids",
-        "renewal_sku_ids",
-        "current_period_start",
-        "current_period_end",
-        "status",
         "canceled_at",
         "country",
+        "current_period_end",
+        "current_period_start",
+        "entitlement_ids",
+        "id",
+        "renewal_sku_ids",
+        "sku_ids",
+        "status",
+        "user_id",
     )
 
     def __init__(self, *, state: ConnectionState, data: SubscriptionPayload) -> None:
@@ -344,7 +364,27 @@ class Subscription(Hashable):
     def __eq__(self, other: object) -> bool:
         return isinstance(other, self.__class__) and other.id == self.id
 
+    def __hash__(self) -> int:
+        return super().__hash__()
+
     @property
-    def user(self):
-        """Optional[:class:`User`]: The user that owns this subscription."""
-        return self._state.get_user(self.user_id)
+    def user(self) -> User | None:
+        """Optional[:class:`User`]: The user that owns this subscription.
+
+        This reads the in-memory cache, use :meth:`get_user` with any cache backend.
+        """
+        return self._state._users.get_nowait(self.user_id)
+
+    async def get_user(self) -> User | None:
+        """|coro|
+
+        Returns the cached user that owns this subscription.
+
+        .. versionadded:: 3.0
+
+        Returns
+        -------
+        Optional[:class:`User`]
+            The user, or ``None`` if it is not cached.
+        """
+        return await self._state.get_user(self.user_id)

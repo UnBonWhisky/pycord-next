@@ -29,7 +29,7 @@ from typing import Literal
 
 from typing_extensions import NotRequired, TypedDict
 
-from ..flags import ChannelFlags
+from .member import Member
 from .snowflake import Snowflake
 
 ThreadType = Literal[10, 11, 12]
@@ -37,10 +37,11 @@ ThreadArchiveDuration = Literal[60, 1440, 4320, 10080]
 
 
 class ThreadMember(TypedDict):
-    id: Snowflake
-    user_id: Snowflake
+    id: NotRequired[Snowflake]
+    user_id: NotRequired[Snowflake]
     join_timestamp: str
     flags: int
+    member: NotRequired[Member]
 
 
 class ThreadMetadata(TypedDict):
@@ -59,14 +60,16 @@ class Thread(TypedDict):
     id: Snowflake
     guild_id: Snowflake
     parent_id: Snowflake
-    owner_id: Snowflake
+    owner_id: NotRequired[Snowflake]
+    applied_tags: NotRequired[list[Snowflake]]
+    _invoke_flag: NotRequired[bool]
     name: str
     type: ThreadType
     member_count: int
     message_count: int
     rate_limit_per_user: int
     thread_metadata: ThreadMetadata
-    flags: ChannelFlags
+    flags: int
     total_message_sent: int
 
 

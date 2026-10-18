@@ -24,47 +24,46 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
+
+from typing_extensions import TypeVar, override
 
 from ..components import (
     CheckboxGroupOption,
-)
-from ..components import Label as LabelComponent
-from ..components import (
+    Label as LabelComponent,
     RadioGroupOption,
     SelectDefaultValue,
     SelectOption,
-    _component_factory,
 )
-from ..enums import ButtonStyle, ChannelType, ComponentType, InputTextStyle
-from ..utils import find, get
-from .button import Button
+from ..enums import ChannelType, ComponentType, InputTextStyle
+from ..limits import ComponentLimits
+from ._fields import Field, length_limit
 from .checkbox import Checkbox
 from .checkbox_group import CheckboxGroup
+from .core import _item_getter
 from .file_upload import FileUpload
 from .input_text import InputText
-from .item import ItemCallbackType, ModalItem
+from .item import ModalItem
 from .radio_group import RadioGroup
 from .select import Select
 
 __all__ = ("Label",)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
     from typing_extensions import Self
 
-    from ..emoji import AppEmoji, GuildEmoji
+    from ..components import Component
     from ..interactions import Interaction
-    from ..partial_emoji import PartialEmoji, _EmojiTag
     from ..types.components import LabelComponent as LabelComponentPayload
     from .modal import DesignerModal
 
 
-L = TypeVar("L", bound="Label")
-M = TypeVar("M", bound="DesignerModal", covariant=True)
+M_co = TypeVar("M_co", bound="DesignerModal", covariant=True, default="DesignerModal")
 
 
-class Label(ModalItem[M]):
+class Label(ModalItem[M_co]):
     """Represents a UI Label used in :class:`discord.ui.DesignerModal`.
 
     The items currently supported are as follows:
@@ -78,12 +77,18 @@ class Label(ModalItem[M]):
 
     .. versionadded:: 2.7
 
+    .. container:: operations
+
+        .. describe:: len(x)
+
+            Returns the total count of items in this label, including the label itself.
+
     Parameters
     ----------
-    item: :class:`ModalItem`
-        The initial item attached to this label.
     label: :class:`str`
         The label text. Must be 45 characters or fewer.
+    item: :class:`ModalItem`
+        The initial item attached to this label.
     description: Optional[:class:`str`]
         The description for this label. Must be 100 characters or fewer.
     id: Optional[:class:`int`]
@@ -102,53 +107,75 @@ class Label(ModalItem[M]):
         "description",
     )
 
+    __component__ = LabelComponent
+    __component_type__ = ComponentType.label
+
+    if TYPE_CHECKING:
+
+        @property
+        def underlying(self) -> LabelComponent:
+            """The component wrapped by this item."""
+            ...
+
+        @underlying.setter
+        def underlying(self, value: Component) -> None: ...
+
+    label: Field[str] = Field(
+        "The label text. Must be 45 characters or fewer.",
+        length_limit(ComponentLimits.LABEL_TEXT_MAX),
+    )
+    description: Field[str | None] = Field(
+        "The description for this label. Must be 100 characters or fewer.",
+        length_limit(ComponentLimits.LABEL_DESCRIPTION_MAX),
+    )
+
     def __init__(
         self,
         label: str,
-        item: ModalItem = None,
+        item: ModalItem | None = None,
         *,
         description: str | None = None,
         id: int | None = None,
-    ):
+    ) -> None:
         super().__init__()
 
-        self.item: ModalItem = None
+        self.item: ModalItem | None = None
 
-        self._underlying = self._generate_underlying(
-            id=id,
-            label=label,
-            description=description,
+        self._build_underlying(
+            id=id, label=label, description=description, component=None
         )
 
         if item:
             self.set_item(item)
 
-    @ModalItem.modal.setter
-    def modal(self, value):
+    def __len__(self) -> int:
+        return 2 if self.item else 1
+
+    @property
+    def modal(self) -> M_co | None:
+        """Gets the parent modal associated with this label.
+
+        Setting it also sets the modal of the attached item.
+
+        Returns
+        -------
+        Optional[:class:`BaseModal`]
+            The parent modal of this label, or ``None`` if the label is not attached to any modal.
+        """
+        return self._modal
+
+    @modal.setter
+    def modal(self, value: M_co | None) -> None:
         self._modal = value
         if self.item:
             self.item.modal = value
 
-    def _set_component_from_item(self, item: ModalItem):
+    def _set_component_from_item(self, item: ModalItem) -> None:
         self.underlying.component = item._generate_underlying()
 
-    def _generate_underlying(
-        self,
-        label: str | None = None,
-        description: str | None = None,
-        id: int | None = None,
-    ) -> LabelComponent:
-        super()._generate_underlying(LabelComponent)
-        label = LabelComponent._raw_construct(
-            type=ComponentType.label,
-            id=id or self.id,
-            component=None,
-            label=label or self.label,
-            description=description or self.description,
-        )
-
-        if self.item:
-            label.component = self.item._generate_underlying()
+    def _generate_underlying(self) -> LabelComponent:
+        label = cast("LabelComponent", super()._generate_underlying())
+        label.component = self.item._generate_underlying() if self.item else None
         return label
 
     def set_item(self, item: ModalItem) -> Self:
@@ -164,11 +191,10 @@ class Label(ModalItem[M]):
         TypeError
             A :class:`ModalItem` was not passed.
         """
-
-        if not isinstance(item, ModalItem):
+        if not isinstance(cast("object", item), ModalItem):
             raise TypeError(f"expected ModalItem not {item.__class__!r}")
         if isinstance(item, InputText) and item.label:
-            raise ValueError(f"InputText.label cannot be set inside Label")
+            raise ValueError("InputText.label cannot be set inside Label")
         if self.modal:
             item.modal = self.modal
         item.parent = self
@@ -177,26 +203,33 @@ class Label(ModalItem[M]):
         self._set_component_from_item(item)
         return self
 
-    def get_item(self, id: str | int) -> ModalItem | None:
-        """Get the item from this label if it matches the provided id.
+    def get_item(self, id: str | int | None = None, **attrs: Any) -> ModalItem | None:
+        r"""Get the item from this label if it matches the provided id or attributes.
+
         If an ``int`` is provided, the item will match by ``id``, otherwise by ``custom_id``.
+        If ``attrs`` are provided, they are all checked (logical AND) as done in :func:`~discord.utils.get`.
+
+        .. versionchanged:: 3.0
+            Added support for ``attrs``.
 
         Parameters
         ----------
-        id: Union[:class:`str`, :class:`int`]
+        id: Optional[Union[:class:`str`, :class:`int`]]
             The id or custom_id of the item to match.
+        \*\*attrs
+            Keyword arguments that denote attributes to search with.
 
         Returns
         -------
         Optional[:class:`ModalItem`]
-            The item if its ``id`` or ``custom_id`` matches.
+            The item if it matches.
         """
-        if not id:
+        if self.item is None:
             return None
-        attr = "id" if isinstance(id, int) else "custom_id"
-        if getattr(self.item, attr, None) != id:
-            return None
-        return self.item
+        if id:
+            attr = "id" if isinstance(id, int) else "custom_id"
+            attrs[attr] = id
+        return cast("ModalItem | None", _item_getter([self.item], **attrs))
 
     def set_input_text(
         self,
@@ -238,7 +271,6 @@ class Label(ModalItem[M]):
         id: Optional[:class:`int`]
             The button's ID.
         """
-
         text = InputText(
             style=style,
             custom_id=custom_id,
@@ -264,7 +296,7 @@ class Label(ModalItem[M]):
         options: list[SelectOption] | None = ...,
         required: bool = ...,
         id: int | None = ...,
-    ) -> None: ...
+    ) -> Self: ...
 
     @overload
     def set_select(
@@ -279,7 +311,7 @@ class Label(ModalItem[M]):
         required: bool = ...,
         id: int | None = ...,
         default_values: Sequence[SelectDefaultValue] | None = ...,
-    ) -> None: ...
+    ) -> Self: ...
 
     @overload
     def set_select(
@@ -297,7 +329,7 @@ class Label(ModalItem[M]):
         required: bool = ...,
         id: int | None = ...,
         default_values: Sequence[SelectDefaultValue] | None = ...,
-    ) -> None: ...
+    ) -> Self: ...
 
     def set_select(
         self,
@@ -349,7 +381,6 @@ class Label(ModalItem[M]):
             These can be either :class:`discord.SelectDefaultValue` instances or models, which will be converted into :class:`discord.SelectDefaultValue`
             instances.
         """
-
         select = Select(
             select_type=select_type,
             custom_id=custom_id,
@@ -371,7 +402,7 @@ class Label(ModalItem[M]):
         custom_id: str | None = None,
         min_values: int | None = None,
         max_values: int | None = None,
-        required: bool | None = True,
+        required: bool = True,
         id: int | None = None,
     ) -> Self:
         """Set this label's item to a file upload.
@@ -389,12 +420,11 @@ class Label(ModalItem[M]):
         max_values: Optional[:class:`int`]
             The maximum number of files that can be uploaded.
             Must be between 1 and 10, inclusive.
-        required: Optional[:class:`bool`]
+        required: :class:`bool`
             Whether the file upload field is required or not. Defaults to ``True``.
         id: Optional[:class:`int`]
             The file upload field's ID.
         """
-
         upload = FileUpload(
             custom_id=custom_id,
             min_values=min_values,
@@ -410,7 +440,7 @@ class Label(ModalItem[M]):
         *,
         custom_id: str | None = None,
         options: list[RadioGroupOption] | None = None,
-        required: bool | None = True,
+        required: bool = True,
         id: int | None = None,
     ) -> Self:
         """Set this label's item to a radio group.
@@ -424,15 +454,14 @@ class Label(ModalItem[M]):
             The ID of the radio group that gets received during an interaction.
         options: List[:class:`discord.RadioGroupOption`]
             A list of options that can be selected from this group.
-        required: Optional[:class:`bool`]
+        required: :class:`bool`
             Whether an option selection is required or not. Defaults to ``True``.
         id: Optional[:class:`int`]
             The radio group's ID.
         """
-
         radio = RadioGroup(
             custom_id=custom_id,
-            option=options,
+            options=options,
             required=required,
             id=id,
         )
@@ -446,7 +475,7 @@ class Label(ModalItem[M]):
         options: list[CheckboxGroupOption] | None = None,
         min_values: int | None = None,
         max_values: int | None = None,
-        required: bool | None = True,
+        required: bool = True,
         id: int | None = None,
     ) -> Self:
         """Set this label's item to a checkbox group.
@@ -466,15 +495,14 @@ class Label(ModalItem[M]):
         max_values: Optional[:class:`int`]
             The maximum number of options that can be selected.
             Must be between 1 and 10, inclusive.
-        required: Optional[:class:`bool`]
+        required: :class:`bool`
             Whether an option selection is required or not. Defaults to ``True``.
         id: Optional[:class:`int`]
             The checkbox group's ID.
         """
-
         checkboxes = CheckboxGroup(
             custom_id=custom_id,
-            option=options,
+            options=options,
             min_values=min_values,
             max_values=max_values,
             required=required,
@@ -504,7 +532,6 @@ class Label(ModalItem[M]):
         id: Optional[:class:`int`]
             The checkbox's ID.
         """
-
         checkbox = Checkbox(
             custom_id=custom_id,
             default=default,
@@ -513,51 +540,48 @@ class Label(ModalItem[M]):
 
         return self.set_item(checkbox)
 
-    @property
-    def label(self) -> str:
-        """The label text. Must be 45 characters or fewer."""
-        return self.underlying.label
-
-    @label.setter
-    def label(self, value: str) -> None:
-        self.underlying.label = value
-
-    @property
-    def description(self) -> str | None:
-        """The description for this label. Must be 100 characters or fewer."""
-        return self.underlying.description
-
-    @description.setter
-    def description(self, value: str | None) -> None:
-        self.underlying.description = value
-
+    @override
     def is_dispatchable(self) -> bool:
-        return self.item.is_dispatchable()
+        return self.item is not None and self.item.is_dispatchable()
 
+    @override
     def is_persistent(self) -> bool:
-        return self.item.is_persistent()
+        return self.item is None or self.item.is_persistent()
 
+    @override
     def refresh_component(self, component: LabelComponent) -> None:
         self.underlying = component
-        self.item.refresh_component(component.component)
+        if self.item is not None:
+            self.item.refresh_component(component.component)
 
     def walk_items(self) -> Iterator[ModalItem]:
-        yield from [self.item]
+        """Iterates over the item of this label."""
+        if self.item is not None:
+            yield self.item
 
+    @override
     def to_component_dict(self) -> LabelComponentPayload:
-        self._set_component_from_item(self.item)
-        return super().to_component_dict()
+        if self.item is not None:
+            self._set_component_from_item(self.item)
+        return cast("LabelComponentPayload", super().to_component_dict())
 
+    @override
     def refresh_from_modal(
         self, interaction: Interaction, data: LabelComponentPayload
     ) -> None:
-        return self.item.refresh_from_modal(interaction, data.get("component", {}))
+        if self.item is not None:
+            self.item.refresh_from_modal(interaction, data.get("component", {}))
 
     @classmethod
-    def from_component(cls: type[L], component: LabelComponent) -> L:
+    @override
+    def from_component(cls, component: LabelComponent) -> Self:
         from .view import _component_to_item
 
-        item = _component_to_item(component.component)
+        item = (
+            _component_to_item(component.component)
+            if component.component is not None
+            else None
+        )
         return cls(
             label=component.label,
             item=item,

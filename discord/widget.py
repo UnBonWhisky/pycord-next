@@ -25,7 +25,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from .activity import BaseActivity, Spotify, create_activity
 from .enums import Status, try_enum
@@ -34,16 +34,18 @@ from .user import BaseUser
 from .utils import _get_as_snowflake, resolve_invite, snowflake_time
 
 if TYPE_CHECKING:
-    import datetime
+    import datetime as dt
 
     from .state import ConnectionState
-    from .types.widget import Widget as WidgetPayload
-    from .types.widget import WidgetMember as WidgetMemberPayload
+    from .types.widget import (
+        Widget as WidgetPayload,
+        WidgetMember as WidgetMemberPayload,
+    )
 
 __all__ = (
+    "Widget",
     "WidgetChannel",
     "WidgetMember",
-    "Widget",
 )
 
 
@@ -100,7 +102,7 @@ class WidgetChannel:
         return f"<#{self.id}>"
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """Returns the channel's creation time in UTC."""
         return snowflake_time(self.id)
 
@@ -155,18 +157,17 @@ class WidgetMember(BaseUser):
     """
 
     __slots__ = (
-        "name",
-        "status",
-        "nick",
-        "avatar",
+        "activity",
+        "bot",
+        "connected_channel",
+        "deafened",
         "discriminator",
         "id",
-        "bot",
-        "activity",
-        "deafened",
-        "suppress",
         "muted",
-        "connected_channel",
+        "name",
+        "nick",
+        "status",
+        "suppress",
     )
 
     if TYPE_CHECKING:
@@ -190,12 +191,7 @@ class WidgetMember(BaseUser):
         )
         self.suppress: bool | None = data.get("suppress", False)
 
-        try:
-            game = data["game"]
-        except KeyError:
-            activity = None
-        else:
-            activity = create_activity(game)
+        activity = create_activity(data["game"]) if "game" in data else None
 
         self.activity: BaseActivity | Spotify | None = activity
 
@@ -209,8 +205,7 @@ class WidgetMember(BaseUser):
                     f" bot={self.bot} nick={self.nick!r}>"
                 )
             return (
-                f"<WidgetMember name={self.name!r}"
-                f" bot={self.bot} nick={self.nick!r}>"
+                f"<WidgetMember name={self.name!r} bot={self.bot} nick={self.nick!r}>"
             )
         return (
             f"<WidgetMember name={self.name!r} discriminator={self.discriminator!r}"
@@ -262,7 +257,7 @@ class Widget:
             retrieved is capped.
     """
 
-    __slots__ = ("_state", "channels", "_invite", "id", "members", "name")
+    __slots__ = ("_invite", "_state", "channels", "id", "members", "name")
 
     def __init__(self, *, state: ConnectionState, data: WidgetPayload) -> None:
         self._state = state
@@ -282,27 +277,31 @@ class Widget:
         self.members: list[WidgetMember] = []
         channels = {channel.id: channel for channel in self.channels}
         for member in data.get("members", []):
-            connected_channel = _get_as_snowflake(member, "channel_id")
-            if connected_channel in channels:
-                connected_channel = channels[connected_channel]  # type: ignore
-            elif connected_channel:
-                connected_channel = WidgetChannel(
-                    id=connected_channel, name="", position=0
-                )
+            channel_id = _get_as_snowflake(member, "channel_id")
+            connected_channel: WidgetChannel | None
+            if channel_id in channels:
+                connected_channel = channels[channel_id]
+            elif channel_id:
+                connected_channel = WidgetChannel(id=channel_id, name="", position=0)
+            else:
+                connected_channel = None
 
             self.members.append(
                 WidgetMember(
                     state=self._state, data=member, connected_channel=connected_channel
                 )
-            )  # type: ignore
+            )
 
     def __str__(self) -> str:
         return self.json_url
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, Widget):
             return self.id == other.id
         return False
+
+    def __hash__(self) -> int:
+        return hash(self.id)
 
     def __repr__(self) -> str:
         return (
@@ -310,7 +309,7 @@ class Widget:
         )
 
     @property
-    def created_at(self) -> datetime.datetime:
+    def created_at(self) -> dt.datetime:
         """Returns the member's creation time in UTC."""
         return snowflake_time(self.id)
 

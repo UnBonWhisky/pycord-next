@@ -17,7 +17,6 @@ from discord.ui import (
     DesignerView,
     MediaGallery,
     Section,
-    Select,
     Separator,
     TextDisplay,
     Thumbnail,
@@ -26,7 +25,6 @@ from discord.ui import (
 
 
 class MyRow(ActionRow):
-
     @button(label="Delete Message", style=ButtonStyle.red, id=200)
     async def delete_button(self, button: Button, interaction: Interaction):
         await interaction.response.defer(invisible=True)

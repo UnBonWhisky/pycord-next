@@ -25,6 +25,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from typing import Generic, TypeVar
 
@@ -32,12 +33,12 @@ T = TypeVar("T")
 
 
 class MultiDataEvent(Generic[T]):
-    """
-    Something like the inverse of a Condition.  A 1-waiting-on-N type of object,
-    with accompanying data object for convenience.
+    """Something like the inverse of a Condition.
+
+    A 1-waiting-on-N type of object, with accompanying data object for convenience.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._items: list[T] = []
         self._ready: threading.Event = threading.Event()
 
@@ -47,6 +48,7 @@ class MultiDataEvent(Generic[T]):
         return self._items.copy()
 
     def is_ready(self) -> bool:
+        """Whether at least one item is registered."""
         return self._ready.is_set()
 
     def _check_ready(self) -> None:
@@ -56,24 +58,50 @@ class MultiDataEvent(Generic[T]):
             self._ready.clear()
 
     def notify(self) -> None:
+        """Wake up the waiters, if any item is registered."""
         self._ready.set()
         self._check_ready()
 
     def wait(self, timeout: float | None = None) -> bool:
+        """Block until an item is registered.
+
+        Parameters
+        ----------
+        timeout: :class:`float` | None
+            The maximum time to wait in seconds, or ``None`` to wait forever.
+
+        Returns
+        -------
+        :class:`bool`
+            ``True`` if an item is available, ``False`` if the wait timed out.
+        """
         self._check_ready()
         return self._ready.wait(timeout)
 
     def register(self, item: T) -> None:
+        """Register an item and wake up the waiters.
+
+        Parameters
+        ----------
+        item: T
+            The item to register.
+        """
         self._items.append(item)
         self._ready.set()
 
     def unregister(self, item: T) -> None:
-        try:
+        """Remove an item, ignoring it if it is not registered.
+
+        Parameters
+        ----------
+        item: T
+            The item to remove.
+        """
+        with contextlib.suppress(ValueError):
             self._items.remove(item)
-        except ValueError:
-            pass
         self._check_ready()
 
     def clear(self) -> None:
+        """Remove every registered item."""
         self._items.clear()
         self._ready.clear()
