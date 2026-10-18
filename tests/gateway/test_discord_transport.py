@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -288,15 +289,20 @@ async def test_connection_reset_resumes(client: discord.Client) -> None:
     await next_event(events)
     ws = transport.ws
     assert ws is not None
+    heartbeat = ws._keep_alive
+    assert heartbeat is not None
 
     async def poll() -> None:
-        raise ConnectionResetError(104, "reset")
+        raise ConnectionResetError(errno.ECONNRESET, "reset")
 
     ws.poll_event = poll  # type: ignore[method-assign]
     event = await next_event(events)
 
     assert event.t == "RESUMED"
     assert transport.ws is not ws
+    assert ws._keep_alive is None
+    heartbeat.join(timeout=1)
+    assert not heartbeat.is_alive()
     await transport.close()
 
 

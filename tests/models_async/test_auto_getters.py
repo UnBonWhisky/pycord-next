@@ -81,6 +81,8 @@ RENAMED: dict[tuple[str, str], str] = {
     ("Member", "get_voice_state"): "voice",
 }
 
+SHARE_EVENT_LOOP = True
+
 
 class Twin(NamedTuple):
     sync: str

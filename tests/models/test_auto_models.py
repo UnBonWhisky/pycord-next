@@ -48,6 +48,8 @@ CASES, SKIPPED = discover()
 PROPERTY_KINDS = (property, functools.cached_property, CachedSlotProperty)
 SKIPPED_PROPERTIES = {(i.cls, i.name) for i in PROPERTY_ISSUES}
 
+SHARE_EVENT_LOOP = True
+
 
 def has_custom_eq(cls: type) -> bool:
     return cls.__eq__ is not object.__eq__

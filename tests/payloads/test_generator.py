@@ -36,6 +36,8 @@ from discord.types import channel, embed, user
 from discord.utils import parse_time
 from tests.payloads.generator import generate, is_snowflake, type_hints, variants
 
+SHARE_EVENT_LOOP = True
+
 
 def all_typeddicts() -> list[Any]:
     found = []

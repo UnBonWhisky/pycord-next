@@ -406,14 +406,20 @@ class DiscordGatewayTransport(GatewayTransport):
     def _is_closing(self) -> bool:
         return self._closed or self._client.is_closed()
 
+    def _stop_heartbeat(self) -> None:
+        if self._ws is not None:
+            self._ws._stop_keep_alive()
+
     def _on_reconnect_requested(self, exc: ReconnectWebSocket) -> None:
         _log.info("Got a request to %s the websocket.", exc.op)
+        self._stop_heartbeat()
         self.on_disconnect()
         self._resume = exc.resume
         if self._is_closing():
             raise _GatewayClosed
 
     async def _on_failure(self, exc: BaseException) -> None:
+        self._stop_heartbeat()
         self.on_disconnect()
 
         if self._is_closing():

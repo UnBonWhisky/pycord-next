@@ -37,23 +37,31 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+@pytest.fixture(scope="module")
+def _module_loop() -> Iterator[asyncio.AbstractEventLoop]:
+    event_loop = asyncio.new_event_loop()
+    yield event_loop
+    event_loop.close()
+
+
+@pytest.fixture
+def loop(request: pytest.FixtureRequest) -> Iterator[asyncio.AbstractEventLoop]:
+    if getattr(request.module, "SHARE_EVENT_LOOP", False):
+        yield request.getfixturevalue("_module_loop")
+        return
+    event_loop = asyncio.new_event_loop()
+    yield event_loop
+    event_loop.close()
+
+
 @pytest.fixture(autouse=True)
 def _current_event_loop(request: pytest.FixtureRequest) -> Iterator[None]:
     if request.node.get_closest_marker("asyncio") is not None:
         yield
         return
-    event_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(event_loop)
+    asyncio.set_event_loop(request.getfixturevalue("loop"))
     yield
     asyncio.set_event_loop(None)
-    event_loop.close()
-
-
-@pytest.fixture
-def loop() -> Iterator[asyncio.AbstractEventLoop]:
-    event_loop = asyncio.new_event_loop()
-    yield event_loop
-    event_loop.close()
 
 
 @pytest.fixture
