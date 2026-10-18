@@ -31,6 +31,7 @@ import contextlib
 import importlib
 import importlib.metadata
 import logging
+import ntpath
 import os
 import platform
 import sys
@@ -231,8 +232,11 @@ def to_path(
         )
         if len(name) <= 4 and name.upper() in forbidden:
             parser.error("invalid directory name given, use a different one")
+        drive, name = ntpath.splitdrive(name)
+    else:
+        drive = ""
 
-    name = name.translate(_translation_table)
+    name = drive + name.translate(_translation_table)
     if replace_spaces:
         name = name.replace(" ", "-")
     return Path(name)

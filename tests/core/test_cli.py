@@ -96,6 +96,13 @@ def test_to_path_rejects_reserved_windows_names(
     assert cli.to_path(p, "console") == Path("console")
 
 
+def test_to_path_keeps_the_windows_drive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    p = parser()
+    assert cli.to_path(p, "C:\\bots\\my:bot") == Path("C:\\bots\\my-bot")
+    assert cli.to_path(p, "relative:name") == Path("relative-name")
+
+
 def test_newbot_creates_the_project(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -105,21 +112,21 @@ def test_newbot_creates_the_project(
 
     root = tmp_path / "mybot"
     assert (root / "cogs" / "__init__.py").exists()
-    assert (
-        root / "config.py"
-    ).read_text() == 'token = "place your token here"\ncogs = []\n'
-    bot = (root / "bot.py").read_text()
+    assert (root / "config.py").read_text(
+        encoding="utf-8"
+    ) == 'token = "place your token here"\ncogs = []\n'
+    bot = (root / "bot.py").read_text(encoding="utf-8")
     assert "class Bot(commands.Bot)" in bot
     assert "when_mentioned_or('!')" in bot
     ast.parse(bot)
-    assert "config.py" in (root / ".gitignore").read_text()
+    assert "config.py" in (root / ".gitignore").read_text(encoding="utf-8")
     assert f"successfully made bot at {root}" in capsys.readouterr().out
 
 
 def test_newbot_options(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     run(monkeypatch, "newbot", "sharded", str(tmp_path), "--sharded", "--no-git")
     root = tmp_path / "sharded"
-    assert "commands.AutoShardedBot" in (root / "bot.py").read_text()
+    assert "commands.AutoShardedBot" in (root / "bot.py").read_text(encoding="utf-8")
     assert not (root / ".gitignore").exists()
 
 
@@ -215,7 +222,7 @@ def test_newcog_creates_a_cog(
     run(monkeypatch, "newcog", "my_cool-cog", str(tmp_path / "cogs"))
 
     path = tmp_path / "cogs" / "my_cool-cog.py"
-    source = path.read_text()
+    source = path.read_text(encoding="utf-8")
     ast.parse(source)
     assert "class MyCoolCog(commands.Cog)" in source
     assert "def cog_unload" not in source
@@ -235,7 +242,7 @@ def test_newcog_options(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
         "--hide-commands",
         "--full",
     )
-    source = (tmp_path / "Plain.py").read_text()
+    source = (tmp_path / "Plain.py").read_text(encoding="utf-8")
     ast.parse(source)
     assert (
         'class Custom(commands.Cog, name="Pretty", command_attrs=dict(hidden=True))'
@@ -245,7 +252,9 @@ def test_newcog_options(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert "async def cog_after_invoke" in source
 
     run(monkeypatch, "newcog", "single", str(tmp_path))
-    assert "class Single(commands.Cog)" in (tmp_path / "single.py").read_text()
+    assert "class Single(commands.Cog)" in (tmp_path / "single.py").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_newcog_reports_errors(

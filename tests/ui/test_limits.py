@@ -306,7 +306,9 @@ class TestEnforcement:
             path
             for path in root.rglob("*.py")
             if path.name != "limits.py"
-            and re.search(rf"ComponentLimits\.{name}\b", path.read_text())
+            and re.search(
+                rf"ComponentLimits\.{name}\b", path.read_text(encoding="utf-8")
+            )
         ]
         assert used, f"ComponentLimits.{name} is not used anywhere"
 
