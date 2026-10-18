@@ -25,6 +25,33 @@ the bot connects to Discord as before, see :doc:`gateway`.
 
 If you only run in one process on the default cache, the sections below are all you have to do.
 
+.. _migrating_next_script:
+
+Automatic migration
+-------------------
+
+``migrate.py``, at the root of the repository, rewrites most of the breaking changes below. It only
+needs Python 3.10 or later, without any dependency:
+
+.. code-block:: shell
+
+    python migrate.py path/to/bot            # show the changes as a diff
+    python migrate.py path/to/bot --write    # apply them
+    python migrate.py path/to/bot --check    # exit with 1 when changes are needed
+
+It adds ``await`` to the lookups by ID of the client and of guilds (``await bot.get_guild(id)``,
+``(await guild.get_member(id)).name``), iterates ``get_all_channels()`` and ``get_all_members()`` with
+``async for``, awaits ``Client.clear()``, makes the ``parse_*`` overrides of a ``ConnectionState``
+subclass and the converter helpers ``async def``, and renames the ``"spoiler"`` key of
+``Attachment.to_dict()``. A call is only rewritten when its receiver is known to be a client or a guild
+(``bot``, ``client``, ``guild``, ``ctx.bot``, ``interaction.client``, ``message.guild``, an annotated
+parameter, ``self`` in a :class:`Client` subclass...); ``--aggressive`` also rewrites the lookups that
+only exist on :class:`Client` and :class:`Guild` when the receiver is unknown.
+
+Everything that needs a decision is printed as a warning with its ``file:line``: a lookup inside a
+function that is not ``async``, the removed ``launch_shard()``, the websocket commands, ... Comments and
+formatting are kept, and a file whose rewritten code would not parse is left untouched.
+
 .. _migrating_next_caching:
 
 Caching

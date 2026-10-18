@@ -4,7 +4,7 @@ This file tracks every difference between `py-cord` (master @ `a4fee6d5`) and py
 
 Each entry is classified as:
 
-- **Breaking** — existing code must be changed (the `pycord-migrate` tool rewrites most of them).
+- **Breaking** — existing code must be changed (`python migrate.py path/to/bot` rewrites most of them, see the migration guide).
 - **Major** — new feature or significant behaviour addition, existing code keeps working.
 - **Minor** — small additions, fixes, internal changes with no impact on user code.
 
@@ -473,6 +473,7 @@ Every pair of this table is checked automatically (`tests/models_async/test_auto
 - Behavior notes of that refactor: `SyncWebhook.send()` and `edit_message()` now send `with_components=0` like `Webhook` (Discord's default) and `AsyncWebhookAdapter` no longer has one method per endpoint (`delete_webhook`, `fetch_webhook_message`...): `Webhook` builds the request and calls `AsyncWebhookAdapter.execute()`; the interaction methods used by `Interaction` are unchanged.
 - `tests/webhook/` runs the same scenarios against `Webhook` (`aioresponses`) and `SyncWebhook` (`responses`): `send` (content, options, embeds, files, voice message, thread, `wait`), `edit`, `delete`, `fetch`, `fetch_message`, `edit_message`, `delete_message`, `WebhookMessage.edit()`/`delete()`, bucket, global and Cloudflare `429`, `5xx` backoff, connection reset (104, 54, 10054), exhausted bucket and error mapping, plus unit tests of the pure core. `requests` and `responses` join the `test` dependency group.
 - GitHub workflows run on uv: ruff check and format, pyright strict, mypy strict on the core packages (blocking) and on the whole package (informational), the tests on Python 3.10 to 3.14 with and without the voice extra (Redis 7 service, coverage threshold `COV_FAIL_UNDER`, 95 % branch coverage on the voice runs; the test suite measured 96.4 %) plus the existing Windows and macOS tox runs, the documentation build with `-W`, and the release workflow smoke tests the built wheel with every extra. `discord.voice.packets`, `discord.voice.receive` and `discord.voice.utils` were missing from the `pyproject.toml` package list and are now shipped in the wheel.
+- `migrate.py` at the root of the repository migrates a bot from pycord: it awaits the client and guild lookups by ID, iterates `get_all_channels()` / `get_all_members()` with `async for`, awaits `Client.clear()`, makes `ConnectionState.parse_*` overrides and the converter helpers `async def`, renames the `Attachment.to_dict()` spoiler key, and reports with `file:line` what needs a decision (standard library only, dry run by default, `--write`, `--check`, `--aggressive`).
 
 ### Documentation
 

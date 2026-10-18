@@ -160,6 +160,7 @@ convention = "numpy"
 "examples/**" = ["D", "INP001", "T201", "ANN", "S311", "CPY001", "I002", "ERA001", "RET503", "S101", "S104", "BLE001", "ARG001", "SIM105"]
 "scripts/**" = ["D", "ANN", "INP001", "T201", "S310", "BLE001", "DTZ011"]
 "setup.py" = ["D100", "CPY001"]
+"migrate.py" = ["D", "T201"]
 "discord/types/**" = ["D"]
 "**/__init__.py" = ["F401", "F403", "F405", "D104"]
 "discord/gateway/**" = ["BLE001", "N818", "TRY301", "TC001"]
