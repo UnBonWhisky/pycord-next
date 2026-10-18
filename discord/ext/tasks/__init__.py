@@ -57,9 +57,9 @@ class SleepHandle:
 
     def __init__(self, when: dt.datetime, *, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
-        self.future = future = loop.create_future()
+        self.future = loop.create_future()
         relative_delta = discord.utils.compute_timedelta(when)
-        self.handle = loop.call_later(relative_delta, future.set_result, True)
+        self.handle = loop.call_later(relative_delta, self._set_result_safe)
 
     def _set_result_safe(self) -> None:
         if not self.future.done():
@@ -772,9 +772,11 @@ class Loop(Generic[LF]):
             if self._time is not MISSING:
                 # prepare the next time index starting from after the last iteration
                 self._prepare_time_index(now=self._last_iteration)
+            elif self._last_iteration is MISSING:
+                return
 
             self._next_iteration = self._get_next_sleep_time()
-            if not self._handle.done():
+            if self._handle is not MISSING and not self._handle.done():
                 # the loop is sleeping, recalculate based on new interval
                 self._handle.recalculate(self._next_iteration)
 

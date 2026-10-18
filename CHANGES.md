@@ -417,6 +417,7 @@ Every pair of this table is checked automatically (`tests/models_async/test_auto
 - `VoiceConnectionState.disconnect(wait=True)` no longer raises `asyncio.TimeoutError` on Python 3.10 when Discord does not confirm the disconnect in time (it caught the builtin `TimeoutError`, which is only the same class from Python 3.11).
 - `python -m discord newbot` / `newcog` keep the drive of an absolute Windows directory (`C:\bots` was sanitised to the relative `C-\bots`).
 - The direct gateway transport stops the heartbeat thread of the old websocket when it reconnects or resumes; after a connection reset the thread kept running until one of its heartbeats failed, and could crash with "Event loop is closed" once the loop was closed.
+- `tasks.Loop.change_interval()` no longer raises `TypeError` when it is called after `start()` but before the first iteration ran, and a cancelled or restarted loop no longer logs `InvalidStateError` from its pending sleep timer.
 
 ### Commands
 

@@ -271,7 +271,8 @@ async def test_delay_task_swallows_http_errors() -> None:
         raise HTTPException(MagicMock(status=404, reason="gone"), "gone")
 
     utils.delay_task(0, failing())
-    await asyncio.sleep(0.01)
+    await asyncio.gather(*utils._background_tasks)
+    await asyncio.sleep(0)
     assert not utils._background_tasks
 
 

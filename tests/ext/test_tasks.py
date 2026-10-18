@@ -35,6 +35,7 @@ import pytest
 import discord
 from discord.ext import tasks
 from discord.ext.tasks import Loop, SleepHandle
+from discord.utils import MISSING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -53,6 +54,22 @@ def instant_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def run(loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, Any]) -> Any:
     return loop.run_until_complete(asyncio.wait_for(coro, 5))
+
+
+def sleeping(task: Loop[Any]) -> bool:
+    return (
+        task._last_iteration is not MISSING
+        and task._handle is not MISSING
+        and not task._handle.done()
+    )
+
+
+async def until(predicate: Callable[[], object], timeout: float = 2) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("the condition was not reached in time")
+        await asyncio.sleep(FAST)
 
 
 def make(
@@ -190,7 +207,7 @@ class TestRunning:
 
         async def scenario() -> None:
             task.start()
-            await asyncio.sleep(0.01)
+            await until(lambda: sleeping(task))
             assert isinstance(task.next_iteration, dt.datetime)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -255,9 +272,9 @@ class TestRunning:
 
         async def scenario() -> None:
             task.start("a")
-            await asyncio.sleep(0.01)
+            await until(lambda: seen == [("a",)])
             task.restart("b")
-            await asyncio.sleep(0.01)
+            await until(lambda: len(seen) == 2)
             assert task.is_running()
             task.cancel()
             await asyncio.sleep(0)
@@ -432,9 +449,9 @@ class TestErrors:
 
         async def scenario() -> None:
             task.start()
-            await asyncio.sleep(0.01)
+            await until(lambda: sleeping(task))
             task.cancel()
-            await asyncio.sleep(0.01)
+            await until(lambda: bool(seen))
 
         run(loop, scenario())
         assert seen == [True]
@@ -590,7 +607,7 @@ class TestIntervals:
 
         async def scenario() -> None:
             task.start()
-            await asyncio.sleep(0.01)
+            await until(lambda: sleeping(task))
             first = task.next_iteration
             task.change_interval(seconds=120)
             assert task.next_iteration > first
@@ -610,7 +627,7 @@ class TestIntervals:
 
         async def scenario() -> None:
             task.start()
-            await asyncio.sleep(0.01)
+            await until(lambda: sleeping(task))
             task.change_interval(time=dt.time(3, 0))
             assert task.time == [dt.time(3, 0, tzinfo=dt.timezone.utc)]
             assert task.seconds is None
@@ -620,6 +637,27 @@ class TestIntervals:
             await asyncio.sleep(0)
 
         run(loop, scenario())
+
+    def test_change_interval_before_the_first_iteration(
+        self, loop: asyncio.AbstractEventLoop
+    ) -> None:
+        seen: list[int] = []
+
+        async def tick() -> None:
+            seen.append(task.current_loop)
+
+        task = make(loop, tick, seconds=60, count=1)
+
+        async def scenario() -> None:
+            task.start()
+            task.change_interval(seconds=30)
+            task.change_interval(time=dt.time(3, 0))
+            task.change_interval(seconds=FAST)
+            await until(lambda: bool(seen))
+
+        run(loop, scenario())
+        assert task.seconds == FAST
+        assert seen == [0]
 
     def test_time_based_loop_runs_at_the_given_time(
         self, loop: asyncio.AbstractEventLoop
