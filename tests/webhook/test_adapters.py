@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+from errno import ECONNRESET
 from io import BytesIO
 from typing import TYPE_CHECKING
 
@@ -569,7 +570,7 @@ def test_5xx_gives_up_after_five_attempts(transport: Transport) -> None:
     assert transport.sleeps == [1, 3, 5, 7]
 
 
-@pytest.mark.parametrize("errno", [104, 54, 10054])
+@pytest.mark.parametrize("errno", sorted({ECONNRESET, 54, 10054}))
 def test_connection_reset_is_retried(transport: Transport, errno: int) -> None:
     transport.reset("POST", HOOK, errno)
     transport.reply("POST", HOOK, status=204)

@@ -31,6 +31,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
+from errno import ECONNRESET
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlsplit
@@ -159,7 +160,7 @@ class Transport:
     ) -> None:
         raise NotImplementedError
 
-    def reset(self, method: str, path: str, errno: int = 104) -> None:
+    def reset(self, method: str, path: str, errno: int = ECONNRESET) -> None:
         raise NotImplementedError
 
     def partial(self, bot_token: str | None = None) -> Any:
@@ -251,7 +252,7 @@ class AsyncTransport(Transport):
                 **kwargs,
             )
 
-    def reset(self, method: str, path: str, errno: int = 104) -> None:
+    def reset(self, method: str, path: str, errno: int = ECONNRESET) -> None:
         self.mock.add(
             _pattern(path),
             method,
@@ -340,7 +341,7 @@ class SyncTransport(Transport):
                 method, _pattern(path), status=status, headers=headers, **kwargs
             )
 
-    def reset(self, method: str, path: str, errno: int = 104) -> None:
+    def reset(self, method: str, path: str, errno: int = ECONNRESET) -> None:
         self.mock.add(
             method,
             _pattern(path),

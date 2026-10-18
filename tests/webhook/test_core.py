@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+from errno import ECONNRESET
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
@@ -107,13 +108,15 @@ def execution(**kwargs: Any) -> Execution:
 
 
 def test_connection_reset_matches_every_platform_errno() -> None:
-    assert all(is_connection_reset(OSError(code, "reset")) for code in (104, 54, 10054))
+    assert all(
+        is_connection_reset(OSError(code, "reset")) for code in (ECONNRESET, 54, 10054)
+    )
     assert not is_connection_reset(OSError(111, "refused"))
     assert not is_connection_reset(ValueError("nope"))
 
 
 def test_connection_reset_is_found_in_wrapped_errors() -> None:
-    inner = ConnectionResetError(104, "reset")
+    inner = ConnectionResetError(ECONNRESET, "reset")
     by_args = OSError(Exception("outer", inner))
     by_args.errno = None
     by_cause = RuntimeError("wrapper")
@@ -236,7 +239,7 @@ def test_execution_5xx_policy() -> None:
 
 def test_execution_connection_errors() -> None:
     run = execution()
-    reset = ConnectionResetError(104, "reset")
+    reset = ConnectionResetError(ECONNRESET, "reset")
 
     assert run.connection_error(reset, 0) == Retry(1)
     assert run.connection_error(reset, 4) is None
