@@ -463,7 +463,7 @@ async def test_voice_server_update(vstate, monkeypatch):
     await st.voice_server_update(ev)
     assert st.endpoint is None
 
-    ev = SimpleNamespace(token="t", guild_id=10, endpoint="wss://host:80")
+    ev = SimpleNamespace(token="t", guild_id=10, endpoint="wss://host:80")  # nosec B106
     st.state = CFS.set_guild_voice_state
     await st.voice_server_update(ev)
     assert st.endpoint == "host:80"
@@ -488,16 +488,16 @@ async def test_voice_server_update_unexpected(vstate, monkeypatch):
     st.connect = AsyncMock()
     st.state = CFS.websocket_connected
     st.token, st.server_id, st.endpoint = "t", 10, "host"
-    ev = SimpleNamespace(token="t", guild_id=10, endpoint="host")
+    ev = SimpleNamespace(token="t", guild_id=10, endpoint="host")  # nosec B106
     await st.voice_server_update(ev)
     st.soft_disconnect.assert_not_awaited()
-    ev = SimpleNamespace(token="t2", guild_id=10, endpoint="host")
+    ev = SimpleNamespace(token="t2", guild_id=10, endpoint="host")  # nosec B106
     await st.voice_server_update(ev)
     st.soft_disconnect.assert_awaited_once_with(with_state=CFS.got_voice_server_update)
     st.connect.assert_awaited_once()
     st.state = CFS.disconnected
     st.soft_disconnect.reset_mock()
-    await st.voice_server_update(SimpleNamespace(token="t3", guild_id=1, endpoint="h"))
+    await st.voice_server_update(SimpleNamespace(token="t3", guild_id=1, endpoint="h"))  # nosec B106
     st.soft_disconnect.assert_not_awaited()
 
 
@@ -687,7 +687,7 @@ async def test_disconnect_variants(vstate):
 async def test_disconnect_wait_cancelled_and_timeout(vstate, monkeypatch):
     st = vstate
     st._voice_disconnect = AsyncMock()
-    for exc in (TimeoutError(), asyncio.CancelledError()):
+    for exc in (asyncio.TimeoutError(), asyncio.CancelledError()):
 
         async def fake_wait_for(coro, timeout, _exc=exc):
             coro.close()

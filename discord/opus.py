@@ -28,6 +28,7 @@ from __future__ import annotations
 import array
 import ctypes
 import ctypes.util
+import importlib.util
 import logging
 import math
 import struct
@@ -92,12 +93,7 @@ __all__ = (
 _log = logging.getLogger(__name__)
 
 
-def __getattr__(name: str) -> bool:
-    if name == "HAS_DAVEY":
-        from .voice.utils.dependencies import HAS_DAVEY
-
-        return HAS_DAVEY
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+HAS_DAVEY: bool = importlib.util.find_spec("davey") is not None
 
 
 c_int_ptr = ctypes.POINTER(ctypes.c_int)

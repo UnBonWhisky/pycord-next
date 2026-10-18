@@ -22,12 +22,11 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 """
 
-# ruff: noqa: PT018
+# ruff: noqa: PT018, I002
 
-from __future__ import annotations
-
+import asyncio
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -41,10 +40,13 @@ from discord.guild import GuildActionsMixin
 from tests.ext.support import Server
 from tests.models.context import World
 
-if TYPE_CHECKING:
-    import asyncio
-
 USER = 1300000000000000009
+
+
+def _callback() -> Any:
+    async def callback(ctx: Any) -> None: ...
+
+    return callback
 
 
 @pytest.fixture
@@ -249,7 +251,7 @@ class TestApplicationInvocation:
     def test_dispatches_and_completes(
         self, bserver: Server, events: list[tuple[Any, ...]]
     ) -> None:
-        slash = bridge.BridgeSlashCommand(AsyncMock(), description="x", name="s")
+        slash = bridge.BridgeSlashCommand(_callback(), description="x", name="s")
         slash.invoke = AsyncMock()
         ctx = SimpleNamespace(command=slash)
         bserver.run(bserver.bot.invoke_application_command(ctx))
@@ -264,7 +266,7 @@ class TestApplicationInvocation:
         self, bserver: Server, events: list[tuple[Any, ...]]
     ) -> None:
         error = discord.DiscordException("x")
-        slash = bridge.BridgeSlashCommand(AsyncMock(), description="x", name="s")
+        slash = bridge.BridgeSlashCommand(_callback(), description="x", name="s")
         slash.invoke = AsyncMock(side_effect=error)
         slash.dispatch_error = AsyncMock()
         ctx = SimpleNamespace(command=slash)
@@ -276,7 +278,7 @@ class TestApplicationInvocation:
         self, bserver: Server, events: list[tuple[Any, ...]]
     ) -> None:
         bserver.bot.check_once(lambda ctx: False)
-        slash = bridge.BridgeSlashCommand(AsyncMock(), description="x", name="s")
+        slash = bridge.BridgeSlashCommand(_callback(), description="x", name="s")
         slash.invoke = AsyncMock()
         slash.dispatch_error = AsyncMock()
         ctx = SimpleNamespace(command=slash)
@@ -287,7 +289,7 @@ class TestApplicationInvocation:
     def test_plain_application_command_has_no_bridge_events(
         self, bserver: Server, events: list[tuple[Any, ...]]
     ) -> None:
-        slash = discord.SlashCommand(AsyncMock(), description="x", name="s")
+        slash = discord.SlashCommand(_callback(), description="x", name="s")
         slash.invoke = AsyncMock()
         bserver.run(
             bserver.bot.invoke_application_command(SimpleNamespace(command=slash))
@@ -300,7 +302,7 @@ class TestApplicationInvocation:
     def test_slash_error_dispatches_bridge_error(
         self, bserver: Server, events: list[tuple[Any, ...]]
     ) -> None:
-        slash = bridge.BridgeSlashCommand(AsyncMock(), description="x", name="s")
+        slash = bridge.BridgeSlashCommand(_callback(), description="x", name="s")
         ctx = SimpleNamespace(bot=bserver.bot, command=slash, interaction=None)
         error = discord.DiscordException("x")
         bserver.run(slash.dispatch_error(ctx, error))
@@ -414,7 +416,7 @@ class TestPermissionDecorators:
         assert a.callback.__guild_only__ is True
         assert a.ext_variant.checks
 
-        slash = discord.SlashCommand(AsyncMock(), description="d", name="x")
+        slash = discord.SlashCommand(_callback(), description="d", name="x")
         assert bridge.guild_only()(slash) is slash
         assert slash.guild_only is True
 
@@ -424,7 +426,7 @@ class TestPermissionDecorators:
         async def a(ctx: bridge.BridgeContext) -> None: ...
 
         assert a.callback.__nsfw__ is True
-        slash = discord.SlashCommand(AsyncMock(), description="d", name="x")
+        slash = discord.SlashCommand(_callback(), description="d", name="x")
         bridge.is_nsfw()(slash)
         assert slash.nsfw is True
 
@@ -435,7 +437,7 @@ class TestPermissionDecorators:
 
         assert a.slash_variant.default_member_permissions.manage_messages
         assert a.ext_variant.checks
-        slash = discord.SlashCommand(AsyncMock(), description="d", name="x")
+        slash = discord.SlashCommand(_callback(), description="d", name="x")
         bridge.has_permissions(ban_members=True)(slash)
         assert slash.default_member_permissions.ban_members
 
@@ -676,7 +678,7 @@ class TestContexts:
             typing = bridge.DeferTyping(ctx)
             typing.__enter__()
             typing.__exit__(None, None, None)
-            await bserver.state.loop.run_in_executor(None, lambda: None)
+            await asyncio.wait([typing.task])
             return typing.task.cancelled() or typing.task.done()
 
         assert bserver.run(scenario())

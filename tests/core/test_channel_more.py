@@ -39,6 +39,7 @@ from tests.core.test_channel_remote import (
     channel_payload,
     make_channel,
 )
+from tests.voice.deps import requires_voice
 
 if TYPE_CHECKING:
     from tests.models.context import World
@@ -635,6 +636,7 @@ def test_channel_misc_helpers(world: World) -> None:
         discord.ForumTag(name="t", emoji=1.5)  # type: ignore[arg-type]
 
 
+@requires_voice
 def test_voice_connect_delegates_to_the_voice_class(world: World) -> None:
     rig = Rig(world)
     voice = channel_of("voice")(rig)

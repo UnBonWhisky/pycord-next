@@ -39,6 +39,12 @@ if TYPE_CHECKING:
     from tests.ext.support import Server
 
 
+def _callback() -> Any:
+    async def callback(ctx: Any) -> None: ...
+
+    return callback
+
+
 class TestPaginator:
     def test_wraps_pages_with_prefix_and_suffix(self) -> None:
         p = Paginator(max_size=30)
@@ -344,7 +350,7 @@ class TestFilterCommands:
         self, server: Server, populated: commands.Bot
     ) -> None:
         h, _, _ = prepare(server, populated.help_command)
-        slash = discord.SlashCommand(AsyncMock(), name="app")
+        slash = discord.SlashCommand(_callback(), name="app")
         result = server.run(h.filter_commands([slash, *populated.commands]))
         assert slash not in result
 

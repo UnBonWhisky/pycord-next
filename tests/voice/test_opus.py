@@ -30,6 +30,7 @@ from types import SimpleNamespace
 import pytest
 
 from discord import opus
+from tests.voice.deps import requires_voice
 
 
 class FakeLib:
@@ -314,6 +315,7 @@ def make_packet(seq=1, ts=960, data=b"opus"):
     return SimpleNamespace(sequence=seq, timestamp=ts, decrypted_data=data, ssrc=5)
 
 
+@requires_voice
 def test_packet_decoder_pop_decodes_with_object_member(monkeypatch, lib):
     from discord.object import Object
 
@@ -330,6 +332,7 @@ def test_packet_decoder_pop_decodes_with_object_member(monkeypatch, lib):
     assert dec.pop_data() is None
 
 
+@requires_voice
 def test_packet_decoder_uses_cached_member_and_opus_sink(monkeypatch, lib):
     member = SimpleNamespace(id=77)
     dec, _, _ = make_packet_decoder(
@@ -341,6 +344,7 @@ def test_packet_decoder_uses_cached_member_and_opus_sink(monkeypatch, lib):
     assert data.source is member
 
 
+@requires_voice
 def test_packet_decoder_cached_id_refreshed_from_member(monkeypatch, lib):
     member = SimpleNamespace(id=9)
     dec, _, _ = make_packet_decoder(monkeypatch, lib, members={3: member})
@@ -350,6 +354,7 @@ def test_packet_decoder_cached_id_refreshed_from_member(monkeypatch, lib):
     assert dec._cached_id == 9
 
 
+@requires_voice
 def test_packet_decoder_plc_and_failure(monkeypatch, lib):
     dec, _, _ = make_packet_decoder(monkeypatch, lib)
     calls = []
@@ -374,6 +379,7 @@ def test_packet_decoder_plc_and_failure(monkeypatch, lib):
     assert dec.process_packet(make_packet()).pcm == b"plc"
 
 
+@requires_voice
 def test_packet_decoder_reset_and_destroy(monkeypatch, lib):
     dec, _registered, _ = make_packet_decoder(monkeypatch, lib)
     dec._last_seq = 4

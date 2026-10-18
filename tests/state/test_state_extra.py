@@ -636,6 +636,9 @@ def test_chunker_and_query_members(world: World) -> None:
         await asyncio.sleep(0)
         ((nonce, pending),) = state._chunk_requests.items()
         assert pending.guild_id == world.guild.id
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert pending.waiters
         await pending.add_members([world.member])
         pending.done()
         result = await task

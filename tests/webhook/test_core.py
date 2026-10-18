@@ -184,7 +184,7 @@ def test_the_sync_adapter_is_shared_by_every_thread() -> None:
 
 
 def test_execution_headers_and_body() -> None:
-    run = execution(payload={"content": "hi"}, reason="café", auth_token="t")  # noqa: S106
+    run = execution(payload={"content": "hi"}, reason="café", auth_token="t")  # noqa: S106  # nosec B106
 
     assert run.headers == {
         "Content-Type": "application/json",

@@ -26,6 +26,13 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+from tests.voice.deps import VOICE_AVAILABLE
+
+if not VOICE_AVAILABLE:
+    pytest.skip("requires the voice extra", allow_module_level=True)
+
 import discord.voice.client as voice_client_module
 from discord.player import AudioSource
 from discord.utils import MISSING

@@ -24,12 +24,13 @@
 
 """Tests for the comparison between local and registered application commands."""
 
-from __future__ import annotations
+# ruff: noqa: I002
 
 import copy
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -45,9 +46,6 @@ from discord.commands.comparison import (
 from discord.utils import MISSING
 
 from .helpers import APP_ID, Payload, actions, echo, fill_node, make_bot
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 
 def callback_for(count: int) -> Callable[..., Any]:
@@ -115,10 +113,12 @@ def make_group() -> discord.SlashCommandGroup:
     @group.command(description="Ban somebody")
     async def ban(ctx: discord.ApplicationContext, reason: str) -> None: ...
 
+    key_option = discord.Option(str, "Key", choices=["a", "b"])
+
     @config.command(description="Set a value")
     async def set(
         ctx: discord.ApplicationContext,
-        key: discord.Option(str, "Key", choices=["a", "b"]),
+        key: key_option,
     ) -> None: ...
 
     return defaulted(group)

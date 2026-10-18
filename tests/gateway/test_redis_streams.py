@@ -445,10 +445,9 @@ async def test_recovery_waits_for_the_idle_time(
         make_config(server, consumer="other", claim_idle_ms=60000), 0, 1
     )
     await replacement.connect()
-    events = replacement.events()
+    assert replacement._reader is not None
 
-    with pytest.raises(asyncio.TimeoutError):
-        await next_event(events, timeout=0.2)
+    assert await replacement._reader.recover() == []
     await replacement.close()
 
 

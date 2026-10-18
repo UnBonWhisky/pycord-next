@@ -101,7 +101,7 @@ class FakeDave:
 
 def make_state(dave=None):
     state = SimpleNamespace(
-        token="tok",
+        token="tok",  # nosec B106
         session_id="sess",
         server_id=10,
         channel_id=20,

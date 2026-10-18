@@ -751,7 +751,7 @@ class VoiceConnectionState:
                     await asyncio.wait_for(
                         self._disconnected.wait(), timeout=self.timeout
                     )
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     _log.debug("Timed out waiting for voice disconnect confirmation")
                 except asyncio.CancelledError:
                     pass

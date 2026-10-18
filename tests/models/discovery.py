@@ -109,7 +109,7 @@ def _is_type_checking(test: ast.expr) -> bool:
 def _import(name: str) -> Any:
     try:
         return importlib.import_module(name)
-    except ImportError:
+    except (ImportError, discord.MissingVoiceDependenciesError):
         return None
 
 
@@ -243,10 +243,16 @@ def _classes(module: ModuleType) -> list[type]:
 
 def _modules() -> list[ModuleType]:
     modules = []
-    for info in pkgutil.walk_packages(discord.__path__, "discord."):
-        if info.name.startswith(SKIPPED_PACKAGES):
-            continue
-        modules.append(importlib.import_module(info.name))
+    pending = [(discord.__path__, "discord.")]
+    while pending:
+        path, prefix = pending.pop()
+        for info in pkgutil.iter_modules(path, prefix):
+            if info.name.startswith(SKIPPED_PACKAGES):
+                continue
+            module = importlib.import_module(info.name)
+            modules.append(module)
+            if info.ispkg:
+                pending.append((module.__path__, f"{info.name}."))
     return modules
 
 

@@ -24,6 +24,7 @@ DEALINGS IN THE SOFTWARE.
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -32,7 +33,6 @@ import discord
 import discord.gateway
 import discord.opus
 import discord.utils
-import discord.voice.utils.dependencies as deps
 from discord.ext import pages, tasks
 
 
@@ -45,7 +45,7 @@ def test_top_level_missing_and_ws_response() -> None:
 
 
 def test_opus_has_davey() -> None:
-    assert discord.opus.HAS_DAVEY is deps.HAS_DAVEY
+    assert discord.opus.HAS_DAVEY is (importlib.util.find_spec("davey") is not None)
 
 
 def test_sleep_handle_recalculate_param_name() -> None:

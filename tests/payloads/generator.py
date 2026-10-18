@@ -51,7 +51,7 @@ MAX_DEPTH = 6
 HARD_DEPTH = 24
 MAX_CHOICES = 8
 UNION_TYPES = (Union, types.UnionType)
-OPTIONAL_WRAPPERS = (te.NotRequired, te.Required, typing.NotRequired, typing.Required)
+OPTIONAL_WRAPPERS = (te.NotRequired, te.Required)
 
 HEX_FIELDS = frozenset(
     {"avatar", "icon", "banner", "splash", "discovery_splash", "hash"}
@@ -136,10 +136,10 @@ def unwrap(tp: Any) -> tuple[Any, bool | None]:
     optional: bool | None = None
     while True:
         origin = get_origin(tp)
-        if origin in (te.NotRequired, typing.NotRequired):
+        if origin is te.NotRequired:
             optional = True
             tp = get_args(tp)[0]
-        elif origin in (te.Required, typing.Required):
+        elif origin is te.Required:
             optional = False
             tp = get_args(tp)[0]
         elif origin is te.Annotated:
