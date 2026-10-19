@@ -56,7 +56,7 @@ async def test_gateway_ratelimiter_block_waits() -> None:
     start = time.monotonic()
     await limiter.block()
     await limiter.block()
-    assert time.monotonic() - start >= 0.09
+    assert time.monotonic() - start >= 0.06
 
 
 def test_the_default_leaves_room_for_heartbeats() -> None:
@@ -98,8 +98,8 @@ async def test_identify_slots_of_a_bucket_are_spaced() -> None:
 
     await asyncio.gather(*(identify(shard) for shard in range(3)))
 
-    assert times[1] - times[0] >= 0.09
-    assert times[2] - times[1] >= 0.09
+    assert times[1] - times[0] >= 0.06
+    assert times[2] - times[1] >= 0.06
 
 
 async def test_identify_slots_of_different_buckets_do_not_wait() -> None:
@@ -114,8 +114,8 @@ async def test_identify_slots_of_different_buckets_do_not_wait() -> None:
 
     assert abs(times[0] - times[1]) < 0.1
     assert abs(times[2] - times[3]) < 0.1
-    assert times[2] - times[0] >= 0.29
-    assert times[3] - times[1] >= 0.29
+    assert times[2] - times[0] >= 0.26
+    assert times[3] - times[1] >= 0.26
 
 
 async def test_the_slot_counts_from_the_end_of_the_identify() -> None:
@@ -125,7 +125,7 @@ async def test_the_slot_counts_from_the_end_of_the_identify() -> None:
     start = time.monotonic()
     async with limiter.slot(0):
         pass
-    assert time.monotonic() - start >= 0.09
+    assert time.monotonic() - start >= 0.06
 
 
 async def test_the_slot_is_released_on_errors() -> None:

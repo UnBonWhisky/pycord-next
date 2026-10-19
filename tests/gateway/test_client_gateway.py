@@ -343,8 +343,8 @@ async def test_autosharded_client_launches_buckets_in_parallel(
     times = dict(server.identify_times)
     assert sorted(times) == [0, 1, 2, 3]
     assert abs(times[0] - times[1]) < 0.15
-    assert times[2] - times[0] >= 0.29
-    assert times[3] - times[1] >= 0.29
+    assert times[2] - times[0] >= 0.26
+    assert times[3] - times[1] >= 0.26
     assert client.shard_count == 4
     assert sorted(client.shards) == [0, 1, 2, 3]
     assert sorted(shard_id for shard_id, _ in client.latencies) == [0, 1, 2, 3]

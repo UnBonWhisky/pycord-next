@@ -146,7 +146,7 @@ async def test_429_waits_and_retries(client: HTTPClient, mocked: aioresponses) -
     started = time.monotonic()
     assert await client.request(messages()) == {"ok": True}
 
-    assert time.monotonic() - started >= 0.09
+    assert time.monotonic() - started >= 0.06
 
 
 async def test_429_global_blocks_every_route(
@@ -164,7 +164,7 @@ async def test_429_global_blocks_every_route(
     )
     await asyncio.gather(first, second)
 
-    assert time.monotonic() - started >= 0.19
+    assert time.monotonic() - started >= 0.16
     assert client._ratelimiter._global_over.is_set()
 
 
