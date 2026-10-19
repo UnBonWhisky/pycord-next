@@ -99,6 +99,7 @@ class GatewayProxy:
         self.publisher: RedisStreamsPublisher = RedisStreamsPublisher(config)
         self.launched: asyncio.Event = asyncio.Event()
         self._stop: asyncio.Event = asyncio.Event()
+        self._closing: bool = False
 
     def stop(self) -> None:
         """Ask :meth:`run` to shut down."""
@@ -129,6 +130,7 @@ class GatewayProxy:
         background: list[asyncio.Task[Any]] = []
         commands: list[asyncio.Task[None]] = []
         forward: asyncio.Task[None] | None = None
+        self._closing = False
         try:
             await self.publisher.start()
             await client.login(self.token)
@@ -148,6 +150,7 @@ class GatewayProxy:
             if forward.done():
                 forward.result()
         finally:
+            self._closing = True
             for sig in installed:
                 loop.remove_signal_handler(sig)
             self.publisher.stop()
@@ -173,7 +176,7 @@ class GatewayProxy:
     async def _publish_status(self, manager: ShardManager) -> None:
         await manager.launched.wait()
         self.launched.set()
-        while True:
+        while not self._closing:
             for shard_id, transport in list(manager.transports.items()):
                 await self._publish_shard_status(shard_id, transport)
             await asyncio.sleep(self.status_interval)

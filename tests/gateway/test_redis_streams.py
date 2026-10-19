@@ -893,6 +893,45 @@ async def test_proxy_stops_when_a_shard_fails(
         await asyncio.wait_for(proxy.run(), 5)
 
 
+async def test_proxy_stops_when_a_cancellation_is_swallowed(
+    server: fakeredis.FakeServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def static_login(self: HTTPClient, token: str) -> dict[str, Any]:
+        self.token = token
+        return USER
+
+    monkeypatch.setattr(HTTPClient, "static_login", static_login)
+    proxy = GatewayProxy(
+        "token",
+        config=make_config(server),
+        shard_ids=[0],
+        shard_count=1,
+        gateway=FakeUpstream,
+        status_interval=0.0,
+    )
+    publishing = asyncio.Event()
+    swallowed: list[int | None] = []
+
+    async def publish_status(
+        shard_id: int | None, *, latency: float, ratelimited: bool
+    ) -> None:
+        publishing.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if swallowed:
+                raise
+            swallowed.append(shard_id)
+
+    monkeypatch.setattr(proxy.publisher, "publish_status", publish_status)
+    run = asyncio.create_task(proxy.run())
+    await asyncio.wait_for(publishing.wait(), 3)
+
+    proxy.stop()
+    await asyncio.wait_for(run, 5)
+    assert swallowed == [0]
+
+
 def run_cli(
     monkeypatch: pytest.MonkeyPatch, *argv: str, from_env: str | None = None
 ) -> tuple[argparse.ArgumentParser, argparse.Namespace]:
